@@ -1,0 +1,14 @@
+Flask
+Flask-Cors
+pymongo[srv]
+bcrypt
+python-dotenv
+requests
+numpy
+Pillow
+dlib
+face_recognition
+opencv-python
+scipy
+imutils
+pyaudio
