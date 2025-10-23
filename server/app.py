@@ -13,7 +13,7 @@ import base64
 import cv2
 from PIL import Image
 from deepface import DeepFace
-from scipy import io
+import io
 
 # --- Your existing imports for proctoring ---
 from proctoring_module import (

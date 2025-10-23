@@ -4,8 +4,9 @@ import {
     User, LogIn, LogOut, Settings, HelpCircle, ShieldCheck, Cpu, BrainCircuit,
     FileText, Timer, BarChart, PlusCircle, Monitor, AlertTriangle, CheckCircle, XCircle,
     ClipboardList, School, GraduationCap, ChevronLeft, Eye, EyeOff,
-    Clock, Lock, Users, Wifi, Mic, Video, Globe, Phone, Camera, Trash2, Unlock
+    Lock, Users, Wifi, Mic, Video, Globe, Trash2, Unlock
 } from 'lucide-react';
+
 
 // Note: This assumes you have a 'cn' utility function for class names, e.g., from 'clsx' and 'tailwind-merge'.
 // If not, you can replace cn(...) with a simple string of class names.
@@ -413,68 +414,129 @@ const AuthPage = ({
   const [isLoading, setIsLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null); // ✅ Persist webcam stream
   const [captureMessage, setCaptureMessage] = useState<string>("");
   const [institution, setInstitution] = useState("");
   const [department, setDepartment] = useState("");
   const formDataRef = useRef<any>({});
 
-  useEffect(() => {
-    if (currentStep === "face" || authMode === "signin") {
-      const videoElement = videoRef.current;
-      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-        navigator.mediaDevices
-          .getUserMedia({ video: true })
-          .then((stream) => {
-            if (videoElement) videoElement.srcObject = stream;
-          })
-          .catch((err) => {
-            console.error("Error accessing webcam: ", err);
-            showToast("Could not access webcam.", "error");
-          });
-      }
-      return () => {
-        if (videoElement && videoElement.srcObject) {
-          const stream = videoElement.srcObject as MediaStream;
-          stream.getTracks().forEach((track) => track.stop());
+  // --- CAMERA INIT & CLEANUP ---
+    useEffect(() => {
+        if (currentStep === "face" || authMode === "signin") {
+            const videoElement = videoRef.current;
+            if (!videoElement) return;
+
+            navigator.mediaDevices.getUserMedia({ video: true })
+                .then((stream) => {
+                    // Store the stream so other code can access/stop it
+                    streamRef.current = stream;
+
+                    // Make sure the video is muted (autoplay policy) and plays inline
+                    try {
+                        videoElement.muted = true;
+                        (videoElement as any).playsInline = true;
+                    } catch (e) {
+                        // ignore if properties not writable
+                    }
+
+                    videoElement.srcObject = stream;
+
+                    // Required for some browsers; handle the play promise
+                    videoElement.onloadedmetadata = () => {
+                        const p = videoElement.play();
+                        if (p && p instanceof Promise) p.catch(err => console.warn('autoplay prevented:', err));
+                    };
+                })
+                .catch((err) => {
+                    console.error("Error accessing webcam: ", err);
+                    showToast("Could not access webcam. Please allow camera permissions.", "error");
+                });
+
+            return () => {
+                // Prefer stopping the stored stream if available
+                const stream = streamRef.current ?? (videoElement.srcObject as MediaStream | null);
+                if (stream) {
+                    stream.getTracks().forEach(track => track.stop());
+                }
+                if (videoElement) videoElement.srcObject = null;
+                streamRef.current = null;
+            };
         }
-      };
-    }
-  }, [currentStep, authMode, showToast]);
+        // only re-run when these change
+    }, [currentStep, authMode, showToast]);
 
-console.log('videoRef.current:', videoRef.current);
-console.log('readyState:', videoRef.current?.readyState);
-console.log('videoWidth, videoHeight:', videoRef.current?.videoWidth, videoRef.current?.videoHeight);
-const waitForVideoReady = (video: HTMLVideoElement, timeout = 10000): Promise<void> => {
-  return new Promise((resolve, reject) => {
-    const start = Date.now();
-    const check = () => {
-      if (video.readyState >= 3 && video.videoWidth > 0 && video.videoHeight > 0) {
-        resolve();
-      } else if (Date.now() - start > timeout) {
-        reject(new Error('Video not ready in time'));
-      } else {
-        requestAnimationFrame(check);
-      }
-    };
-    check();
-  });
+  const captureFrame = (): string | null => {
+        const video = videoRef.current;
+        if (!video) return null;
+
+        // Prefer real video dimensions, but fall back to bounding rect if not yet available.
+        let w = video.videoWidth;
+        let h = video.videoHeight;
+        if (w === 0 || h === 0) {
+            const rect = video.getBoundingClientRect();
+            w = Math.max(1, Math.floor(rect.width));
+            h = Math.max(1, Math.floor(rect.height));
+        }
+
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return null;
+
+        try {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            return canvas.toDataURL("image/jpeg");
+        } catch (err) {
+            console.warn('captureFrame drawImage failed:', err);
+            return null;
+        }
+  };
+
+const waitForVideoReady = (video: HTMLVideoElement, timeout = 20000): Promise<void> => {
+    return new Promise((resolve, reject) => {
+        const start = Date.now();
+
+        const onReady = () => {
+            if (video.videoWidth > 0 && video.videoHeight > 0) {
+                cleanup();
+                resolve();
+            }
+        };
+
+    
+
+        const interval = window.setInterval(() => {
+            if (video.readyState >= 3 && video.videoWidth > 0 && video.videoHeight > 0) {
+                cleanup();
+                resolve();
+            } else if (Date.now() - start > timeout) {
+                cleanup();
+                reject(new Error('Video not ready in time. Please check your camera and allow permissions.'));
+            }
+        }, 250);
+
+        function cleanup() {
+            clearInterval(interval);
+            video.removeEventListener('loadedmetadata', onReady);
+            video.removeEventListener('playing', onReady);
+        }
+
+        // Listen to key events that mean the video is usable
+        video.addEventListener('loadedmetadata', onReady);
+        video.addEventListener('playing', onReady);
+
+        // Also kick it once in case it's already ready
+        onReady();
+    });
 };
 
-
-const captureFrame = (): string | null => {
-  const video = videoRef.current;
-  if (!video || video.readyState < 3 || video.videoWidth === 0 || video.videoHeight === 0) return null;
-
-  const canvas = document.createElement('canvas');
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return null;
-
-  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-  return canvas.toDataURL('image/jpeg');
+// Helper for small on-screen status used in the UI to aid debugging
+const getVideoStatus = () => {
+    const v = videoRef.current;
+    if (!v) return 'no element';
+    return `readyState=${v.readyState} ${v.videoWidth}x${v.videoHeight}`;
 };
-
 
   const handleProceedToFaceStep = (e: FormEvent) => {
     e.preventDefault();
@@ -489,99 +551,214 @@ const captureFrame = (): string | null => {
   };
 
   const handleFullSignUp = async () => {
-  setIsLoading(true);
-  setCaptureMessage('');
+    setIsLoading(true);
+    setCaptureMessage("");
 
-  const video = videoRef.current;
-  if (!video) {
-    showToast("Webcam not initialized", 'error');
-    setIsLoading(false);
-    return;
-  }
-
-  try {
-    await waitForVideoReady(video,10000); // ✅ wait for webcam
-
-    // Countdown
-    for (let i = 3; i > 0; i--) {
-      setCaptureMessage(i.toString());
-      await new Promise(res => setTimeout(res, 1000));
+    const video = videoRef.current;
+    if (!video) {
+      showToast("Webcam not initialized", "error");
+      setIsLoading(false);
+      return;
     }
 
-    setCaptureMessage('Capturing...');
-    const imageDataUrl = captureFrame();
-    if (!imageDataUrl) {
-      throw new Error("Could not capture image. Please ensure your camera is ready.");
+    try {
+                setCaptureMessage('Preparing camera...');
+                try {
+                    await waitForVideoReady(video, 10000);
+                } catch (err) {
+                    // Try to re-acquire the camera once
+                    console.warn('Initial video ready check failed, retrying getUserMedia...', err);
+                    setCaptureMessage('Retrying camera... please allow permissions if prompted');
+                    try {
+                        const newStream = await navigator.mediaDevices.getUserMedia({ video: true });
+                        streamRef.current = newStream;
+                        video.srcObject = newStream;
+                        await waitForVideoReady(video, 8000);
+                    } catch (err2) {
+                        // If still failing, bubble original error
+                        throw err2;
+                    }
+                }
+
+      // ✅ Countdown before capture
+      for (let i = 3; i > 0; i--) {
+        setCaptureMessage(i.toString());
+        await new Promise((res) => setTimeout(res, 1000));
+      }
+
+            setCaptureMessage("Capturing...");
+      const imageDataUrl = captureFrame();
+      if (!imageDataUrl) {
+        throw new Error("Could not capture image. Please ensure your camera is ready.");
+      }
+
+            const finalData = { ...formDataRef.current, imageDataUrl, role: initialRole };
+
+            // Client-side validation to avoid server 400s and improve debugging
+            const requiredFields = ['fullName', 'email', 'phoneNumber', 'roleId', 'password', 'role', 'institution', 'department', 'imageDataUrl'];
+            const missing = requiredFields.filter(f => !finalData[f] || finalData[f] === "");
+            console.log('Register payload keys:', Object.keys(finalData));
+            console.log('imageDataUrl length:', imageDataUrl ? imageDataUrl.length : 0);
+            if (missing.length > 0) {
+                console.error('Missing registration fields:', missing);
+                showToast(`Missing required fields: ${missing.join(', ')}`, 'error');
+                setIsLoading(false);
+                setCaptureMessage('');
+                return;
+            }
+
+                    const res = await fetch(`${API_URL}/register`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(finalData),
+                    });
+                    const data = await res.json();
+                    if (!res.ok) {
+                        // Handle user already exists (conflict) gracefully
+                        if (res.status === 409) {
+                            showToast(data.error || data.message || "User already exists. Please sign in.", "error");
+                            setAuthMode("signin");
+                            setCurrentStep("details");
+                            setIsLoading(false);
+                            setCaptureMessage("");
+                            return;
+                        }
+                        throw new Error(data.error || data.message || "Registration failed");
+                    }
+
+                    showToast(data.message, "success");
+                    // Attempt to log the user in automatically after successful registration
+                    try {
+                        const loginRes = await fetch(`${API_URL}/login`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ identifier: finalData.email || finalData.roleId, password: finalData.password, role: finalData.role })
+                        });
+                        const loginData = await loginRes.json();
+                        if (loginRes.ok) {
+                            showToast(`Welcome, ${loginData.user.name}!`, 'success');
+                            onAuthSuccess(loginData.user);
+                        } else {
+                            // fallback to signin screen
+                            setAuthMode('signin');
+                            setCurrentStep('details');
+                        }
+                    } catch (err) {
+                        setAuthMode('signin');
+                        setCurrentStep('details');
+                    }
+    } catch (error: any) {
+      showToast(error.message, "error");
+    } finally {
+      setIsLoading(false);
+      setCaptureMessage("");
     }
-
-    const finalData = { ...formDataRef.current, imageDataUrl, role: initialRole };
-
-    const res = await fetch(`${API_URL}/register`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(finalData)
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Registration failed');
-
-    showToast(data.message, 'success');
-    setAuthMode('signin');
-    setCurrentStep('details');
-
-  } catch (error: any) {
-    showToast(error.message, 'error');
-  } finally {
-    setIsLoading(false);
-    setCaptureMessage('');
-  }
-};
+  };
 
   const handleSignIn = async (e: FormEvent) => {
     e.preventDefault();
-    setIsLoading(true);
-    setCaptureMessage("Verifying...");
+        setIsLoading(true);
+        setCaptureMessage("Verifying...");
     const form = e.target as HTMLFormElement;
     const formData = new FormData(form);
     const currentIdentifier = formData.get("identifier") as string;
     const currentPassword = formData.get("password") as string;
+        // Attempt to ensure video is ready before capturing
+        const video = videoRef.current;
+        if (!video) {
+            showToast('Webcam not initialized', 'error');
+            setIsLoading(false);
+            return;
+        }
 
-    setTimeout(async () => {
-      const imageDataUrl = captureFrame();
-      if (!imageDataUrl) {
-        showToast("Could not capture image for verification.", "error");
-        setIsLoading(false);
-        setCaptureMessage("");
-        return;
-      }
+        try {
+            await waitForVideoReady(video, 8000);
+        } catch (err) {
+            // Let user retry explicitly
+            showToast('Video not ready. Click Verify to try again.', 'error');
+            setIsLoading(false);
+            setCaptureMessage('');
+            return;
+        }
 
-      try {
-        const faceRes = await fetch(`${API_URL}/verify-face`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ identifier: currentIdentifier, role: initialRole, imageDataUrl }),
-        });
-        const faceData = await faceRes.json();
-        if (!faceRes.ok) throw new Error(faceData.error || faceData.message);
-        showToast("Face verified. Logging in...", "success");
+        const imageDataUrl = captureFrame();
+        if (!imageDataUrl) {
+            showToast("Could not capture image for verification.", "error");
+            setIsLoading(false);
+            setCaptureMessage("");
+            return;
+        }
 
-        const loginRes = await fetch(`${API_URL}/login`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ identifier: currentIdentifier, password: currentPassword, role: initialRole }),
-        });
-        const loginData = await loginRes.json();
-        if (!loginRes.ok) throw new Error(loginData.error || "Login failed");
+        try {
+            const faceRes = await fetch(`${API_URL}/verify-face`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ identifier: currentIdentifier, role: initialRole, imageDataUrl }),
+            });
+            const faceData = await faceRes.json();
+            if (!faceRes.ok) {
+                const sim = faceData?.similarity ? ` (similarity: ${Number(faceData.similarity).toFixed(3)})` : '';
+                showToast(faceData.error || faceData.message || `Face verification failed${sim}`, 'error');
+                // Do NOT auto-retry — user must click Verify again
+                setIsLoading(false);
+                setCaptureMessage('');
+                return;
+            }
 
-        showToast(`Welcome back, ${loginData.user.name}!`, "success");
-        onAuthSuccess(loginData.user);
-      } catch (error: any) {
-        showToast(error.message, "error");
-      } finally {
-        setIsLoading(false);
-        setCaptureMessage("");
-      }
-    }, 1500);
+            showToast("Face verified. Logging in...", "success");
+
+            const loginRes = await fetch(`${API_URL}/login`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ identifier: currentIdentifier, password: currentPassword, role: initialRole }),
+            });
+            const loginData = await loginRes.json();
+            if (!loginRes.ok) {
+                showToast(loginData.error || loginData.message || 'Login failed', 'error');
+                setIsLoading(false);
+                setCaptureMessage('');
+                return;
+            }
+
+            showToast(`Welcome back, ${loginData.user.name}!`, "success");
+            onAuthSuccess(loginData.user);
+        } catch (error: any) {
+            showToast(error.message, "error");
+        } finally {
+            setIsLoading(false);
+            setCaptureMessage("");
+        }
   };
+
+    // Optional: explicit retry handler if you want a separate control
+    const handleVerifyRetry = async () => {
+        // Reuse submit handler behavior but do not submit form; simply trigger capture & verify
+        setIsLoading(true);
+        setCaptureMessage('Verifying...');
+        const video = videoRef.current;
+        if (!video) {
+            showToast('Webcam not initialized', 'error');
+            setIsLoading(false);
+            return;
+        }
+        try {
+            await waitForVideoReady(video, 8000);
+            const imageDataUrl = captureFrame();
+            if (!imageDataUrl) throw new Error('Could not capture frame');
+            showToast('Captured. Please submit the form to verify.', 'success');
+        } catch (err: any) {
+            showToast(err.message || 'Verification retry failed', 'error');
+        } finally {
+            setIsLoading(false);
+            setCaptureMessage('');
+        }
+    };
+
+  
+
+  // ...rest of your JSX code remains untouched
+
+
 
   const idLabel = initialRole === "student" ? "Student ID" : "Lecturer ID";
 
@@ -666,20 +843,26 @@ const captureFrame = (): string | null => {
                   </div>
                   <div className="space-y-2 relative">
                     <Label>Face Verification</Label>
-                    <div className="w-full h-40 bg-slate-800 rounded-lg overflow-hidden relative">
-                      <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover"></video>
-                      {captureMessage && (
-                        <div className="absolute inset-0 flex items-center justify-center bg-black/50">
-                          <p className="text-white text-lg font-bold">{captureMessage}</p>
-                        </div>
-                      )}
-                    </div>
+                                        <div className="w-full h-40 bg-slate-800 rounded-lg overflow-hidden relative">
+                                            <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover"></video>
+                                            <div className="absolute left-2 top-2 bg-black/50 text-xs text-white px-2 py-1 rounded">{getVideoStatus()}</div>
+                                            {captureMessage && (
+                                                <div className="absolute inset-0 flex items-center justify-center bg-black/50">
+                                                    <p className="text-white text-lg font-bold">{captureMessage}</p>
+                                                </div>
+                                            )}
+                                        </div>
                   </div>
                   <div className="pt-2">
                     <Button type="submit" className="w-full" isLoading={isLoading}>
                       Verify Face & Sign In
                     </Button>
                   </div>
+                                    <div className="pt-2">
+                                        <button type="button" onClick={handleVerifyRetry} className="w-full mt-2 inline-flex items-center justify-center rounded-md border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800">
+                                            Retry Camera / Capture
+                                        </button>
+                                    </div>
                 </form>
               )}
 
@@ -771,14 +954,15 @@ const captureFrame = (): string | null => {
                 <div className="text-center space-y-4">
                   <h3 className="text-2xl font-bold text-slate-100">Register Face ID</h3>
                   <p className="text-slate-400">Center your face in the frame for verification.</p>
-                  <div className="w-48 h-48 bg-slate-800 rounded-full mx-auto overflow-hidden border-2 border-dashed border-slate-600 relative">
-                    <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover"></video>
-                    {captureMessage && (
-                      <div className="absolute inset-0 flex items-center justify-center bg-black/50">
-                        <p className="text-white text-3xl font-bold">{captureMessage}</p>
-                      </div>
-                    )}
-                  </div>
+                                    <div className="w-48 h-48 bg-slate-800 rounded-full mx-auto overflow-hidden border-2 border-dashed border-slate-600 relative">
+                                        <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover"></video>
+                                        <div className="absolute left-2 top-2 bg-black/50 text-xs text-white px-2 py-1 rounded">{getVideoStatus()}</div>
+                                        {captureMessage && (
+                                            <div className="absolute inset-0 flex items-center justify-center bg-black/50">
+                                                <p className="text-white text-3xl font-bold">{captureMessage}</p>
+                                            </div>
+                                        )}
+                                    </div>
                   <Button onClick={handleFullSignUp} className="w-full" isLoading={isLoading}>
                     Capture & Complete Signup
                   </Button>
@@ -1097,6 +1281,11 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                 // Start video stream
                 const videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
                 if (videoRef.current) {
+                    // Ensure autoplay policies are satisfied
+                    try {
+                        videoRef.current.muted = true;
+                        (videoRef.current as any).playsInline = true;
+                    } catch (e) {}
                     videoRef.current.srcObject = videoStream;
                 }
 
@@ -1690,4 +1879,3 @@ const QuestionRenderer = ({ question, onAnswer, savedAnswer }: { question: Quest
         </div>
     );
 };
-

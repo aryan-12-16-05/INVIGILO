@@ -12,3 +12,5 @@ opencv-python
 scipy
 imutils
 pyaudio
+deepface
+tf-keras
