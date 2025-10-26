@@ -1,9 +1,10 @@
 import React, { useState, useEffect, type FormEvent, type ChangeEvent, useRef, useCallback } from 'react';
+import Sidebar from './sidebar';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-    User, LogIn, LogOut, Settings, HelpCircle, ShieldCheck, Cpu, BrainCircuit,
-    FileText, Timer, BarChart, PlusCircle, Monitor, AlertTriangle, CheckCircle, XCircle,
-    ClipboardList, School, GraduationCap, ChevronLeft, Eye, EyeOff,
+    User, LogIn, ShieldCheck, Cpu, BrainCircuit,
+    Timer, PlusCircle, Monitor, AlertTriangle, CheckCircle, XCircle,
+    School, GraduationCap, ChevronLeft, Eye, EyeOff,
     Lock, Users, Wifi, Mic, Video, Globe, Trash2, Unlock
 } from 'lucide-react';
 
@@ -25,7 +26,7 @@ const INSTITUTIONS: { [key: string]: string[] } = {
 };
 
 // --- TYPE DEFINITIONS ---
-type AppState = 'loading' | 'landing' | 'auth' | 'student-dashboard' | 'lecturer-dashboard' | 'exam' | 'result';
+type AppState = 'loading' | 'landing' | 'auth' | 'student-dashboard' | 'lecturer-dashboard' | 'exam' | 'result' | 'live-proctoring' | 'help';
 type UserRole = 'student' | 'lecturer';
 type ExamStatus = 'Scheduled' | 'Available' | 'Locked' | 'Completed' | 'Live';
 type QuestionType = 'multiple-choice' | 'true-false' | 'short-answer' | 'essay';
@@ -86,6 +87,7 @@ interface ExamResult {
     score: number;
     totalMarks: number;
     examTitle: string;
+    perQuestion?: any[];
 }
 
 // --- UI COMPONENTS (ShadCN UI Inspired, Enhanced) ---
@@ -228,7 +230,8 @@ export default function App() {
 
     const fetchExams = useCallback(async () => {
         try {
-            const res = await fetch(`${API_URL}/exams`);
+            const url = currentUser ? `${API_URL}/exams?userId=${currentUser._id}` : `${API_URL}/exams`;
+            const res = await fetch(url);
             if (!res.ok) throw new Error('Failed to fetch exams');
             const data = await res.json();
             setExams(data.exams);
@@ -268,6 +271,15 @@ export default function App() {
     const handleStartExam = (examId: string) => {
         const examToStart = exams.find(e => e._id === examId);
         if (examToStart) {
+            // Prevent starting if user already completed the exam or server indicates they cannot start
+            if ((examToStart as any).completedByUser) {
+                showToast('You have already submitted this exam.', 'error');
+                return;
+            }
+            if (typeof (examToStart as any).canStartForUser !== 'undefined' && !(examToStart as any).canStartForUser) {
+                showToast('This exam cannot be started at this time.', 'error');
+                return;
+            }
             setCurrentExam(examToStart);
             navigateTo('exam');
         } else {
@@ -287,8 +299,10 @@ export default function App() {
             case 'loading': return <LoadingScreen key="loading" />;
             case 'landing': return <LandingPage key="landing" onNavigate={navigateTo} />;
             case 'auth': return <AuthPage key="auth" initialRole={authRole} onAuthSuccess={onAuthSuccess} showToast={showToast} onBack={() => navigateTo('landing')} />;
-            case 'student-dashboard': return currentUser && <StudentDashboard key="student-dashboard" user={currentUser} exams={exams} onLogout={handleLogout} onStartExam={handleStartExam} onBack={() => navigateTo('landing')} />;
-            case 'lecturer-dashboard': return currentUser && <LecturerDashboard key="lecturer-dashboard" user={currentUser} exams={exams} onLogout={handleLogout} onBack={() => navigateTo('landing')} onExamChange={fetchExams} showToast={showToast} />;
+            case 'student-dashboard': return currentUser && <StudentDashboard key="student-dashboard" user={currentUser} exams={exams} onLogout={handleLogout} onStartExam={handleStartExam} onBack={() => navigateTo('landing')} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} />;
+                case 'lecturer-dashboard': return currentUser && <LecturerDashboard key="lecturer-dashboard" user={currentUser} exams={exams} onLogout={handleLogout} onBack={() => navigateTo('landing')} onExamChange={fetchExams} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} />;
+            case 'live-proctoring': return currentUser && <LiveProctoring key="live-proctoring" user={currentUser} onBack={() => navigateTo(currentUser?.role === 'student' ? 'student-dashboard' : 'lecturer-dashboard')} showToast={showToast} />;
+            case 'help': return <HelpPage key="help" onBack={() => navigateTo(currentUser?.role === 'student' ? 'student-dashboard' : 'lecturer-dashboard')} />;
             case 'exam': return currentUser && currentExam && <ExamScreen key="exam" exam={currentExam} user={currentUser} onExit={handleExamSubmit} showToast={showToast} />;
             case 'result': return lastResult && <ResultScreen key="result" result={lastResult} onDone={() => navigateTo('student-dashboard')} />;
             default: return <LandingPage key="default-landing" onNavigate={navigateTo} />;
@@ -979,61 +993,107 @@ const getVideoStatus = () => {
 
 
 
-const DashboardLayout = ({ children, user, onLogout, onBack }: { children: React.ReactNode, user: UserProfile, onLogout: () => void, onBack: () => void }) => {
-    const navItems = user.role === 'student' ? [
-        { icon: <ClipboardList className="h-5 w-5" />, label: 'Dashboard' },
-        { icon: <FileText className="h-5 w-5" />, label: 'My Exams' },
-        { icon: <BarChart className="h-5 w-5" />, label: 'Results' },
-        { icon: <User className="h-5 w-5" />, label: 'Profile' },
-        { icon: <HelpCircle className="h-5 w-5" />, label: 'Help' },
-    ] : [
-        { icon: <Monitor className="h-5 w-5" />, label: 'Overview' },
-        { icon: <PlusCircle className="h-5 w-5" />, label: 'Create Exam' },
-        { icon: <BrainCircuit className="h-5 w-5" />, label: 'AI Questions' },
-        { icon: <Users className="h-5 w-5" />, label: 'Live Proctoring' },
-        { icon: <Settings className="h-5 w-5" />, label: 'Settings' },
-    ];
+const DashboardLayout = ({ children, user, onLogout, onBack, onAction, onUpdateUser, showToast }: { children: React.ReactNode, user: UserProfile, onLogout?: () => void, onBack: () => void, onAction?: (action: string) => void, onUpdateUser?: (u: UserProfile) => void, showToast?: (msg:string, type:'success'|'error') => void }) => {
+    const [profileOpen, setProfileOpen] = useState(false);
+    const [profileForm, setProfileForm] = useState<any>(null);
 
+    useEffect(() => {
+        setProfileForm(user ? { name: user.name, phoneNumber: user.phoneNumber, institution: user.institution, department: user.department, year: user.year, studentId: user.studentId, lecturerId: user.lecturerId } : null);
+    }, [user]);
+
+    const handleAction = (action: string) => {
+        if (action === 'profile') {
+            setProfileOpen(true);
+            return;
+        }
+        if (onAction) onAction(action);
+    };
+
+    const saveProfile = async () => {
+        if (!profileForm) return;
+        try {
+            const res = await fetch(`${API_URL}/users/${user._id}`, {
+                method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(profileForm)
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Failed to update profile');
+            if (onUpdateUser && data.user) onUpdateUser(data.user as UserProfile);
+            setProfileOpen(false);
+            showToast?.('Profile updated', 'success');
+        } catch (err: any) {
+            showToast?.(err.message || 'Failed to update profile', 'error');
+        }
+    };
     return (
+        <>
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="flex min-h-screen">
-            <div className="w-64 bg-slate-900 p-4 flex flex-col border-r border-slate-800">
-                <div className="flex items-center space-x-2 mb-10">
-                    <BrainCircuit className="h-8 w-8 text-indigo-400" />
-                    <span className="text-xl font-bold">Invigilo</span>
-                </div>
-                <nav className="flex-1 space-y-2">
-                    {navItems.map((item, index) => (
-                        <a key={item.label} href="#" className={cn(
-                            "flex items-center space-x-3 px-3 py-2 rounded-lg transition-colors duration-200",
-                            index === 0 ? "bg-indigo-600/50 text-white" : "text-slate-400 hover:bg-slate-800 hover:text-white"
-                        )}>
-                            {item.icon}
-                            <span>{item.label}</span>
-                        </a>
-                    ))}
-                </nav>
-                <div className="mt-auto">
-                    <div className="flex items-center space-x-3 mb-4 p-2">
-                        <div className="w-10 h-10 rounded-full bg-indigo-500 flex items-center justify-center font-bold">{user.name.charAt(0)}</div>
-                        <div>
-                            <p className="font-semibold text-sm text-white">{user.name}</p>
-                            <p className="text-xs text-slate-400">{user.institution}</p>
-                        </div>
-                    </div>
-                    <Button variant="secondary" className="w-full" onClick={onLogout}><LogOut className="h-4 w-4 mr-2" /> Logout</Button>
-                </div>
-            </div>
+            <Sidebar user={user} onAction={handleAction} />
             <main className="flex-1 p-8 bg-slate-950/50 overflow-y-auto">
                 <div className="flex justify-between items-center mb-8">
                     <h1 className="text-3xl font-bold text-white">Welcome back, {user.name.split(' ')[0]}!</h1>
-                    <Button variant="outline" onClick={onBack}><ChevronLeft className="h-4 w-4 mr-2" /> Back to Home</Button>
+                    <div className="flex items-center space-x-2">
+                        <Button variant="outline" onClick={onBack}><ChevronLeft className="h-4 w-4 mr-2" /> Back to Home</Button>
+                        {onLogout && <Button variant="destructive" onClick={onLogout}>Logout</Button>}
+                    </div>
                 </div>
                 {children}
             </main>
         </motion.div>
+
+        <Dialog open={profileOpen} onOpenChange={setProfileOpen} className="max-w-md">
+            <h2 className="text-xl font-bold mb-2">Edit Profile</h2>
+            {profileForm && (
+                <div className="space-y-3">
+                    <div>
+                        <Label>Name</Label>
+                        <Input value={profileForm.name} onChange={(e: any) => setProfileForm((p: any) => ({ ...p, name: e.target.value }))} />
+                    </div>
+                    <div>
+                        <Label>Phone</Label>
+                        <Input value={profileForm.phoneNumber} onChange={(e: any) => setProfileForm((p: any) => ({ ...p, phoneNumber: e.target.value }))} />
+                    </div>
+                    <div>
+                        <Label>Institution</Label>
+                        <Select
+                            value={profileForm.institution || ''}
+                            onChange={(e: any) => setProfileForm((p: any) => ({ ...p, institution: e.target.value, department: '' }))}
+                        >
+                            <option value="">Select Institution</option>
+                            {Object.keys(INSTITUTIONS).map(inst => (
+                                <option key={inst} value={inst}>{inst}</option>
+                            ))}
+                        </Select>
+                    </div>
+                    <div>
+                        <Label>Department</Label>
+                        <Select
+                            value={profileForm.department || ''}
+                            onChange={(e: any) => setProfileForm((p: any) => ({ ...p, department: e.target.value }))}
+                            disabled={!profileForm.institution}
+                        >
+                            <option value="">Select Department</option>
+                            {profileForm.institution && INSTITUTIONS[profileForm.institution]?.map((dept) => (
+                                <option key={dept} value={dept}>{dept}</option>
+                            ))}
+                        </Select>
+                    </div>
+                    {user.role === 'student' && (
+                        <div>
+                            <Label>Year</Label>
+                            <Input value={profileForm.year} onChange={(e: any) => setProfileForm((p: any) => ({ ...p, year: e.target.value }))} />
+                        </div>
+                    )}
+                    <div className="flex justify-end space-x-2 pt-2">
+                        <Button variant="outline" onClick={() => setProfileOpen(false)}>Cancel</Button>
+                        <Button onClick={saveProfile}>Save</Button>
+                    </div>
+                </div>
+            )}
+        </Dialog>
+        </>
     );
 };
-const StudentDashboard = ({ user, exams, onLogout, onStartExam, onBack }: { user: UserProfile; exams: Exam[], onLogout: () => void; onStartExam: (examId: string) => void; onBack: () => void; }) => {
+const StudentDashboard = ({ user, exams, onLogout, onStartExam, onBack, showToast, onUpdateUser, navigateTo }: { user: UserProfile; exams: Exam[]; onLogout: () => void; onStartExam: (examId: string) => void; onBack: () => void; showToast: (message:string, type:'success'|'error') => void; onUpdateUser: (u: UserProfile) => void; navigateTo: (state: AppState) => void }) => {
     const [systemCheckOpen, setSystemCheckOpen] = useState(false);
     
     const userExams = exams.filter(exam => 
@@ -1048,7 +1108,7 @@ const StudentDashboard = ({ user, exams, onLogout, onStartExam, onBack }: { user
     const averageScore = completedExams.length > 0 ? Math.round(completedExams.reduce((acc, e) => acc + (e.attempt?.score || 0), 0) / completedExams.length) : 0;
 
     return (
-        <DashboardLayout user={user} onLogout={onLogout} onBack={onBack}>
+    <DashboardLayout user={user} onLogout={onLogout} onBack={onBack} showToast={showToast} onUpdateUser={onUpdateUser} onAction={(a) => { if (a === 'dashboard') setSystemCheckOpen(true); else if (a === 'live-proctoring') navigateTo('live-proctoring'); else if (a === 'help') navigateTo('help'); }}>
             <Card className="p-4 mb-8 bg-slate-900 border-slate-800">
                 <div className="flex justify-between items-center">
                     <div>
@@ -1092,10 +1152,43 @@ const StudentDashboard = ({ user, exams, onLogout, onStartExam, onBack }: { user
                                         </div>
                                         <p className="text-sm text-slate-400">{exam.courseCode} | {new Date(exam.scheduledDate).toLocaleDateString()} @ {exam.startTime}</p>
                                     </div>
-                                    <Button onClick={() => onStartExam(exam._id)} disabled={exam.status !== 'Available'}>
-                                        {exam.status === 'Locked' ? <Lock className="h-4 w-4 mr-2"/> : null}
-                                        {exam.status === 'Available' ? 'Start Exam' : 'View Details'}
-                                    </Button>
+                                        {(() => {
+                                        // Prefer server-provided flags when available
+                                        const completed = (exam as any).completedByUser;
+                                        const serverCanStart = (exam as any).canStartForUser;
+                                        if (completed) {
+                                            return <Button disabled>Completed</Button>;
+                                        }
+                                        if (typeof serverCanStart !== 'undefined') {
+                                            return (
+                                                <Button onClick={() => onStartExam(exam._id)} disabled={!serverCanStart}>
+                                                    {exam.status === 'Locked' ? <Lock className="h-4 w-4 mr-2"/> : null}
+                                                    {serverCanStart ? 'Start Exam' : 'View Details'}
+                                                </Button>
+                                            );
+                                        }
+                                        // Fallback to client-side scheduled window calculation
+                                        const isWithinScheduledWindow = (() => {
+                                            try {
+                                                const date = new Date(exam.scheduledDate);
+                                                const [sh, sm] = (exam.startTime || '00:00').split(':').map(Number);
+                                                const [eh, em] = (exam.endTime || '23:59').split(':').map(Number);
+                                                const start = new Date(date.getFullYear(), date.getMonth(), date.getDate(), sh || 0, sm || 0);
+                                                const end = new Date(date.getFullYear(), date.getMonth(), date.getDate(), eh || 23, em || 59);
+                                                const now = new Date();
+                                                return now >= start && now <= end;
+                                            } catch (e) {
+                                                return false;
+                                            }
+                                        })();
+                                        const canStart = exam.status === 'Available' || isWithinScheduledWindow;
+                                        return (
+                                            <Button onClick={() => onStartExam(exam._id)} disabled={!canStart}>
+                                                {exam.status === 'Locked' ? <Lock className="h-4 w-4 mr-2"/> : null}
+                                                {canStart ? 'Start Exam' : 'View Details'}
+                                            </Button>
+                                        );
+                                    })()}
                                 </Card>
                             )) : <p className="text-slate-400">No upcoming exams scheduled.</p>}
                         </div>
@@ -1141,13 +1234,20 @@ const StudentDashboard = ({ user, exams, onLogout, onStartExam, onBack }: { user
         </DashboardLayout>
     );
 };
-const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showToast }: { user: UserProfile; exams: Exam[]; onLogout: () => void; onBack: () => void; onExamChange: () => void; showToast: (message: string, type: 'success' | 'error') => void; }) => {
+const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showToast, onUpdateUser, navigateTo }: { user: UserProfile; exams: Exam[]; onLogout: () => void; onBack: () => void; onExamChange: () => void; showToast: (message: string, type: 'success' | 'error') => void; onUpdateUser: (u: UserProfile) => void; navigateTo: (state: AppState) => void }) => {
     const lecturerExams = exams.filter((exam) => exam.lecturerId === user._id);
     const [createExamOpen, setCreateExamOpen] = useState(false);
     const [examToDelete, setExamToDelete] = useState<Exam | null>(null);
+    const [examToEdit, setExamToEdit] = useState<Exam | null>(null);
+    const [proctorOpen, setProctorOpen] = useState(false);
+    const [proctorExamId, setProctorExamId] = useState<string | null>(null);
+    const [adminStats, setAdminStats] = useState<{ totalStudents: number; liveExams: number; activeAlerts: number; systemUptime: string; serverUptimeHours?: number }>({ totalStudents: 0, liveExams: 0, activeAlerts: 0, systemUptime: '99.9%' });
+    const [reportOpen, setReportOpen] = useState(false);
+    const [reportData, setReportData] = useState<any>(null);
+    const [reportExamTitle, setReportExamTitle] = useState<string>('');
 
 
-    const liveExamsCount = lecturerExams.filter(e => e.status === 'Live').length;
+    
 
     const handleDelete = async () => {
         if (!examToDelete) return;
@@ -1192,13 +1292,42 @@ const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showTo
         </Card>
     );
 
+    // Fetch admin stats for lecturer dashboard
+    useEffect(() => {
+        const fetchStats = async () => {
+            try {
+                const res = await fetch(`${API_URL}/admin/stats`, { headers: { 'Content-Type': 'application/json', 'X-User-Id': user._id } });
+                const data = await res.json();
+                if (res.ok) {
+                    setAdminStats({ totalStudents: data.totalStudents || 0, liveExams: data.liveExams || 0, activeAlerts: data.activeAlerts || 0, systemUptime: data.systemUptime || '99.9%', serverUptimeHours: data.serverUptimeHours });
+                }
+            } catch (err) {
+                console.error('Failed to load admin stats', err);
+            }
+        };
+        fetchStats();
+    }, [user._id]);
+
+    const fetchReport = async (examId: string, examTitle?: string) => {
+        try {
+            const res = await fetch(`${API_URL}/exams/${examId}/report`, { headers: { 'Content-Type': 'application/json', 'X-User-Id': user._id } });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Failed to fetch report');
+            setReportData(data);
+            setReportExamTitle(examTitle || 'Exam Report');
+            setReportOpen(true);
+        } catch (err: any) {
+            showToast(err.message || 'Failed to load report', 'error');
+        }
+    };
+
     return (
-        <DashboardLayout user={user} onLogout={onLogout} onBack={onBack}>
+    <DashboardLayout user={user} onLogout={onLogout} onBack={onBack} showToast={showToast} onUpdateUser={onUpdateUser} onAction={(a) => { if (a === 'create-exam') setCreateExamOpen(true); else if (a === 'live-proctoring') navigateTo('live-proctoring'); else if (a === 'help') navigateTo('help'); }}>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-                <StatCard title="Total Students" value="127" icon={<Users className="h-6 w-6 text-indigo-300"/>} colorClass="border-indigo-500/50" />
-                <StatCard title="Live Exams" value={liveExamsCount} icon={<Monitor className="h-6 w-6 text-green-300"/>} colorClass="border-green-500/50" />
-                <StatCard title="Active Alerts" value="15" icon={<AlertTriangle className="h-6 w-6 text-yellow-300"/>} colorClass="border-yellow-500/50" />
-                <StatCard title="System Uptime" value="99.9%" icon={<ShieldCheck className="h-6 w-6 text-sky-300"/>} colorClass="border-sky-500/50" />
+                <StatCard title="Total Students" value={adminStats.totalStudents} icon={<Users className="h-6 w-6 text-indigo-300"/>} colorClass="border-indigo-500/50" />
+                <StatCard title="Live Exams" value={adminStats.liveExams} icon={<Monitor className="h-6 w-6 text-green-300"/>} colorClass="border-green-500/50" />
+                <StatCard title="Active Alerts" value={adminStats.activeAlerts} icon={<AlertTriangle className="h-6 w-6 text-yellow-300"/>} colorClass="border-yellow-500/50" />
+                <StatCard title="System Uptime" value={adminStats.systemUptime} icon={<ShieldCheck className="h-6 w-6 text-sky-300"/>} colorClass="border-sky-500/50" />
             </div>
 
             <div className="flex justify-between items-center mb-4">
@@ -1220,7 +1349,16 @@ const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showTo
                             <p className="text-xs text-slate-400">Status</p>
                             <Badge variant={exam.status === 'Live' ? 'live' : 'info'}>{exam.status}</Badge>
                         </div>
-                        <div className="flex justify-end items-center space-x-1">
+                            <div className="flex justify-end items-center space-x-1">
+                            <Button variant="ghost" size="sm" onClick={() => { setExamToEdit(exam); setCreateExamOpen(true); }} title="Edit Exam">
+                                Edit
+                            </Button>
+                            <Button variant="ghost" size="sm" onClick={() => { setProctorExamId(exam._id); setProctorOpen(true); }} title="Proctor Exam">
+                                Proctor
+                            </Button>
+                            <Button variant="ghost" size="sm" onClick={() => fetchReport(exam._id, exam.title)} title="View Report">
+                                View Report
+                            </Button>
                             <Button variant="ghost" size="sm" onClick={() => handleToggleLock(exam)} title={exam.status === 'Locked' ? 'Unlock Exam' : 'Lock Exam'}>
                                 {exam.status === 'Locked' ? <Unlock className="h-4 w-4 text-green-400" /> : <Lock className="h-4 w-4 text-yellow-400"/>}
                             </Button>
@@ -1231,7 +1369,30 @@ const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showTo
                     </Card>
                 )) : <p className="text-slate-400 text-center py-8">You haven't created any exams yet.</p>}
             </div>
-            <CreateExamDialog open={createExamOpen} onOpenChange={setCreateExamOpen} lecturer={user} onExamCreated={onExamChange} showToast={showToast} />
+            <CreateExamDialog open={createExamOpen} onOpenChange={(open) => { if (!open) setExamToEdit(null); setCreateExamOpen(open); }} lecturer={user} onExamCreated={() => { setExamToEdit(null); onExamChange(); }} showToast={showToast} examToEdit={examToEdit || undefined} />
+            <ProctorDashboard open={proctorOpen} onOpenChange={setProctorOpen} examId={proctorExamId} user={user} />
+            <Dialog open={reportOpen} onOpenChange={setReportOpen} className="max-w-4xl">
+                <h2 className="text-2xl font-bold mb-2">Report: {reportExamTitle}</h2>
+                <div className="space-y-3">
+                    {reportData ? (
+                        <div>
+                            <p className="text-sm text-slate-400">Average Score: {reportData.averageScore}%</p>
+                            <h3 className="font-semibold mt-3 mb-2">Per Question Stats</h3>
+                            <div className="space-y-2 max-h-64 overflow-y-auto p-2">
+                                {reportData.perQuestionStats && reportData.perQuestionStats.map((q: any) => (
+                                    <div key={q.questionId} className="p-2 bg-slate-800 rounded">
+                                        <div className="font-medium text-white">{q.question}</div>
+                                        <div className="text-xs text-slate-300">Attempts: {q.attempts} — Correct: {q.correctCount} ({q.correctRatio}%)</div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    ) : <div className="text-slate-400">No report data available.</div>}
+                </div>
+                <div className="flex justify-end mt-4">
+                    <Button variant="outline" onClick={() => setReportOpen(false)}>Close</Button>
+                </div>
+            </Dialog>
             
             <Dialog open={!!examToDelete} onOpenChange={() => setExamToDelete(null)}>
                 <h2 className="text-xl font-bold text-white">Confirm Deletion</h2>
@@ -1264,7 +1425,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
             const data = await res.json();
             if (!res.ok) throw new Error(data.error || 'Failed to submit exam');
 
-            onExit({ score: data.score, totalMarks: data.totalMarks, examTitle: exam.title });
+            onExit({ score: data.score, totalMarks: data.totalMarks, examTitle: exam.title, perQuestion: data.perQuestion });
 
         } catch (error: any) {
             showToast(error.message, 'error');
@@ -1308,8 +1469,16 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                                 body: JSON.stringify({ audioData: base64Audio.split(',')[1] }), // Send only base64 part
                             });
                             const data = await res.json();
-                            if (data.audioStatus === "Suspicious audio detected") {
-                                showToast("Suspicious audio detected!", 'error');
+                            // Students shouldn't see suspicious audio alerts; record events for lecturer review
+                            if (data && data.audioStatus && data.audioStatus.toLowerCase().includes('suspicious')) {
+                                try {
+                                    await fetch(`${API_URL}/proctor/event`, {
+                                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ examId: exam._id, userId: user._id, eventType: 'audio', details: { audioStatus: data.audioStatus } })
+                                    });
+                                } catch (err) {
+                                    console.error('Failed to record audio proctor event', err);
+                                }
                             }
                         } catch (error) {
                             console.error("Audio proctoring error:", error);
@@ -1327,21 +1496,30 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ imageDataUrl, userId: user._id }),
                         }).then(res => res.json()).then(data => {
-                            if (data.error) {
-                                showToast(data.error, 'error');
-                            } else {
-                                if (!data.identityVerified) {
-                                    showToast("Identity verification failed. Please ensure you are the registered user.", 'error');
-                                }
-                                if (data.objectsDetected && data.objectsDetected.length > 0 && data.objectsDetected[0] !== "No objects") {
-                                    showToast(`Suspicious object detected: ${data.objectsDetected.join(', ')}`, 'error');
-                                }
-                                if (data.headPose !== 'Forward') {
-                                    showToast(`Suspicious head pose: ${data.headPose}`, 'error');
-                                }
-                                if (data.gazeDirection !== 'Center') {
-                                    showToast(`Suspicious eye gaze: Looking ${data.gazeDirection}`, 'error');
-                                }
+                            if (data && !data.error) {
+                                // If any suspicious flag found, record it server-side for lecturers to review.
+                                const suspicious = [];
+                                                if (!data.identityVerified) suspicious.push({ event: 'identity', details: { similarity: data.similarity } });
+                                if (data.faceCount && data.faceCount > 1) suspicious.push({ event: 'multiple_faces', details: { count: data.faceCount } });
+                                                if (data.objectsDetected && data.objectsDetected.length > 0 && data.objectsDetected[0] !== 'No objects') suspicious.push({ event: 'object_detected', details: { objects: data.objectsDetected } });
+                                if (data.headPose && data.headPose !== 'Forward') suspicious.push({ event: 'head_pose', details: { pose: data.headPose } });
+                                if (data.gazeDirection && data.gazeDirection !== 'Center') suspicious.push({ event: 'gaze', details: { gaze: data.gazeDirection } });
+                                if (data.blinkStatus && data.blinkStatus === 'suspicious') suspicious.push({ event: 'blink', details: {} });
+
+                                // Send each suspicious event to server. Students should not see these notifications.
+                                suspicious.forEach(async (ev) => {
+                                    try {
+                                        await fetch(`${API_URL}/proctor/event`, {
+                                            method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                            body: JSON.stringify({ examId: exam._id, userId: user._id, eventType: ev.event, details: ev.details })
+                                        });
+                                    } catch (err) {
+                                        console.error('Failed to record proctor event', err);
+                                    }
+                                });
+                                // Keep the student UI calm: only show a generic proctoring active notice if not already shown
+                            } else if (data && data.error) {
+                                console.error('Proctoring error:', data.error);
                             }
                         }).catch(err => console.error("Image proctoring error:", err));
                     }
@@ -1352,9 +1530,9 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                             if (mediaRecorderRef.current?.state === 'recording') {
                                 mediaRecorderRef.current.stop();
                             }
-                        }, 2000); // Record for 2 seconds
+                        }, 1000); // Record for 1 second
                     }
-                }, 8000); // Run every 8 seconds
+                }, 3000); // Run every 3 seconds (faster proctoring)
             } catch (error) {
                 console.error("Failed to start proctoring streams:", error);
                 showToast("Could not start camera or microphone for proctoring.", "error");
@@ -1494,6 +1672,21 @@ const ResultScreen = ({ result, onDone }: { result: ExamResult, onDone: () => vo
                 <p className="text-slate-400 text-sm">YOUR SCORE</p>
                 <p className="text-6xl font-bold text-green-400 my-2">{result.score}%</p>
             </div>
+            {result.perQuestion && result.perQuestion.length > 0 && (
+                <div className="mb-4 bg-slate-900 p-4 rounded">
+                    <h3 className="text-lg font-semibold text-white mb-2">Question Breakdown</h3>
+                    <div className="space-y-2 max-h-64 overflow-y-auto">
+                        {result.perQuestion.map((q, idx) => (
+                            <div key={idx} className={cn('p-2 rounded', q.correct ? 'bg-green-800/30' : 'bg-red-800/20')}>
+                                <div className="font-medium text-sm text-white">{idx + 1}. {q.question}</div>
+                                <div className="text-xs text-slate-300">Your answer: {String(q.given)}</div>
+                                <div className="text-xs text-slate-300">Correct answer: {String(q.expected)}</div>
+                                <div className="text-xs text-slate-300">Marks: {q.marks} — {q.correct ? 'Correct' : 'Incorrect'}</div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
             <Button onClick={onDone} className="w-full">Back to Dashboard</Button>
         </Card>
     </motion.div>
@@ -1528,7 +1721,7 @@ const SystemCheckDialog = ({ open, onOpenChange }: { open: boolean, onOpenChange
         </Dialog>
     );
 };
-const CreateExamDialog = ({ open, onOpenChange, lecturer, onExamCreated, showToast }: { open: boolean, onOpenChange: (open: boolean) => void; lecturer: UserProfile, onExamCreated: () => void, showToast: (message: string, type: 'success' | 'error') => void; }) => {
+const CreateExamDialog = ({ open, onOpenChange, lecturer, onExamCreated, showToast, examToEdit }: { open: boolean, onOpenChange: (open: boolean) => void; lecturer: UserProfile, onExamCreated: () => void, showToast: (message: string, type: 'success' | 'error') => void; examToEdit?: Exam }) => {
     const [isLoading, setIsLoading] = useState(false);
     const [department, setDepartment] = useState('');
     const [questions, setQuestions] = useState<NewQuestion[]>([]);
@@ -1547,6 +1740,19 @@ const CreateExamDialog = ({ open, onOpenChange, lecturer, onExamCreated, showToa
         setQuestions(prev => prev.filter((_, i) => i !== index));
     };
     
+    useEffect(() => {
+        if (open && examToEdit) {
+            // prefill form values when editing
+            setDepartment(examToEdit.department || '');
+            setQuestions(examToEdit.questions || []);
+            // we will populate the form fields via DOM when the dialog renders using defaultValue
+        } else if (!open) {
+            // clear when closed
+            setDepartment('');
+            setQuestions([]);
+        }
+    }, [open, examToEdit]);
+
     const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
         e.preventDefault();
         setIsLoading(true);
@@ -1570,19 +1776,30 @@ const CreateExamDialog = ({ open, onOpenChange, lecturer, onExamCreated, showToa
         };
         
         try {
-            const res = await fetch(`${API_URL}/exams`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(examDetails)
-            });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.error || 'Failed to create exam');
+            let res;
+            if (examToEdit) {
+                // Update existing exam
+                res = await fetch(`${API_URL}/exams/${examToEdit._id}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ...examDetails })
+                });
+            } else {
+                res = await fetch(`${API_URL}/exams`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(examDetails)
+                });
+            }
 
-            showToast('Exam created successfully!', 'success');
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || (examToEdit ? 'Failed to update exam' : 'Failed to create exam'));
+
+            showToast(examToEdit ? 'Exam updated successfully!' : 'Exam created successfully!', 'success');
+            try { e.currentTarget?.reset?.(); } catch (err) {}
+            setQuestions([]);
             onExamCreated();
             onOpenChange(false);
-            e.currentTarget.reset();
-            setQuestions([]);
 
         } catch (error: any) {
             showToast(error.message, 'error');
@@ -1596,31 +1813,31 @@ const CreateExamDialog = ({ open, onOpenChange, lecturer, onExamCreated, showToa
             <h2 className="text-2xl font-bold mb-4 text-white">Create New Exam</h2>
             <form onSubmit={handleSubmit} className="space-y-4 max-h-[80vh] overflow-y-auto pr-2">
                 <div className="grid grid-cols-2 gap-4">
-                    <div><Label htmlFor="exam-title">Exam Title</Label><Input id="exam-title" name="title" required/></div>
-                    <div><Label htmlFor="course-code">Course Code</Label><Input id="course-code" name="courseCode" required/></div>
+                    <div><Label htmlFor="exam-title">Exam Title</Label><Input id="exam-title" name="title" required defaultValue={examToEdit?.title || ''} /></div>
+                    <div><Label htmlFor="course-code">Course Code</Label><Input id="course-code" name="courseCode" required defaultValue={examToEdit?.courseCode || ''} /></div>
                 </div>
-                 <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-1">
                         <Label>Institution</Label>
                         <Input value={lecturer.institution} disabled />
                     </div>
                     <div className="space-y-1">
                         <Label htmlFor="department-create">Department</Label>
-                        <Select id="department-create" name="department" value={department} onChange={(e: ChangeEvent<HTMLSelectElement>) => setDepartment(e.target.value)} required>
+                        <Select id="department-create" name="department" value={department || examToEdit?.department || ''} onChange={(e: ChangeEvent<HTMLSelectElement>) => setDepartment(e.target.value)} required>
                             <option value="">Select Department</option>
                             {INSTITUTIONS[lecturer.institution]?.map(dept => <option key={dept} value={dept}>{dept}</option>)}
                         </Select>
                     </div>
                 </div>
                 <div className="grid grid-cols-3 gap-4">
-                    <div><Label htmlFor="exam-date">Exam Date</Label><Input id="exam-date" name="scheduledDate" type="date" required/></div>
-                    <div><Label htmlFor="start-time">Start Time</Label><Input id="start-time" name="startTime" type="time" required/></div>
-                    <div><Label htmlFor="duration">Duration (mins)</Label><Input id="duration" name="duration" type="number" required/></div>
+                    <div><Label htmlFor="exam-date">Exam Date</Label><Input id="exam-date" name="scheduledDate" type="date" required defaultValue={examToEdit?.scheduledDate ? new Date(examToEdit.scheduledDate).toISOString().slice(0,10) : ''} /></div>
+                    <div><Label htmlFor="start-time">Start Time</Label><Input id="start-time" name="startTime" type="time" required defaultValue={examToEdit?.startTime || ''} /></div>
+                    <div><Label htmlFor="duration">Duration (mins)</Label><Input id="duration" name="duration" type="number" required defaultValue={examToEdit?.duration ? String(examToEdit.duration) : ''} /></div>
                 </div>
-                 <div className="grid grid-cols-2 gap-4">
-                    <div><Label htmlFor="targetYear">Target Year</Label><Input id="targetYear" name="targetYear" placeholder="e.g., 3" required /></div>
+                <div className="grid grid-cols-2 gap-4">
+                    <div><Label htmlFor="targetYear">Target Year</Label><Input id="targetYear" name="targetYear" placeholder="e.g., 3" required defaultValue={examToEdit?.targetYear || ''} /></div>
                 </div>
-                <div><Label htmlFor="description">Description</Label><textarea id="description" name="description" rows={2} className="w-full rounded-md border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm" required></textarea></div>
+                <div><Label htmlFor="description">Description</Label><textarea id="description" name="description" rows={2} className="w-full rounded-md border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm" required defaultValue={examToEdit?.description || ''}></textarea></div>
                 
                 <div>
                     <h3 className="text-lg font-semibold mb-2 text-white">Questions ({questions.length})</h3>
@@ -1838,6 +2055,238 @@ const AIGenerateQuestionsDialog = ({ open, onOpenChange, onAddQuestions, showToa
                 </div>
             )}
         </Dialog>
+    );
+};
+
+// --- Live Proctoring Page ---
+const LiveProctoring = ({ user, onBack, showToast }: { user: UserProfile; onBack: () => void; showToast: (msg:string, type:'success'|'error') => void }) => {
+    const videoRef = React.useRef<HTMLVideoElement | null>(null);
+    const streamRef = React.useRef<MediaStream | null>(null);
+    const [isStreaming, setIsStreaming] = React.useState(false);
+
+    const startStream = async () => {
+        try {
+            const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+            streamRef.current = s;
+            if (videoRef.current) {
+                videoRef.current.srcObject = s;
+                try { await (videoRef.current.play() as any); } catch (e) {}
+            }
+            setIsStreaming(true);
+            showToast('Live proctoring started', 'success');
+        } catch (err: any) {
+            console.error('Failed to start stream', err);
+            showToast('Could not start camera. Please allow permissions.', 'error');
+        }
+    };
+
+    const stopStream = () => {
+        if (streamRef.current) {
+            streamRef.current.getTracks().forEach(t => t.stop());
+            streamRef.current = null;
+        }
+        if (videoRef.current) videoRef.current.srcObject = null;
+        setIsStreaming(false);
+        showToast('Live proctoring stopped', 'success');
+    };
+
+    React.useEffect(() => {
+        return () => stopStream();
+    }, []);
+
+    return (
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="min-h-screen p-8">
+            <div className="flex items-center justify-between mb-6">
+                <h2 className="text-2xl font-bold">Live Proctoring</h2>
+                <div className="flex items-center space-x-2">
+                    <Button variant="outline" onClick={onBack}>Back</Button>
+                    {isStreaming ? <Button variant="destructive" onClick={stopStream}>Stop</Button> : <Button onClick={startStream}>Start Proctoring</Button>}
+                </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="bg-slate-900 rounded-lg p-4">
+                    <video ref={videoRef} className="w-full h-80 bg-black rounded" autoPlay playsInline muted></video>
+                </div>
+                <div className="bg-slate-900 rounded-lg p-4">
+                    <h3 className="font-semibold mb-2">Instructions</h3>
+                    <p className="text-slate-400">Start the proctoring stream to monitor the student in real-time. This view is a simple demo — production proctoring should stream to your server for analysis and recording.</p>
+                    <div className="mt-4">
+                        <p className="text-sm text-slate-300">User: {user.name}</p>
+                        <p className="text-sm text-slate-300">Institution: {user.institution}</p>
+                    </div>
+                </div>
+            </div>
+        </motion.div>
+    );
+};
+
+const ProctorDashboard = ({ open, onOpenChange, examId, user }: { open: boolean; onOpenChange: (b: boolean) => void; examId?: string | null; user?: UserProfile }) => {
+    const [summary, setSummary] = useState<{ userId: string; name: string; count: number; lastEvent: any; countsByType?: any }[]>([]);
+    const [selectedUser, setSelectedUser] = useState<string | null>(null);
+    const [details, setDetails] = useState<any[]>([]);
+    const lastTimestampRef = useRef<string | null>(null);
+    const pollRef = useRef<number | null>(null);
+    const [newCounts, setNewCounts] = useState<Record<string, number>>({});
+    const clearTimersRef = useRef<Record<string, number>>({});
+
+    useEffect(() => {
+        if (!open || !examId) return;
+        fetch(`${API_URL}/exams/${examId}/proctoring`, { headers: { 'Content-Type': 'application/json', 'X-User-Id': user?._id || '' } }).then(r => r.json()).then(data => {
+            if (data && data.summary) setSummary(data.summary);
+            // initialize lastTimestamp to now so polling fetches only new events
+            lastTimestampRef.current = new Date().toISOString();
+            // start polling for recent events
+            if (pollRef.current) window.clearInterval(pollRef.current);
+            pollRef.current = window.setInterval(async () => {
+                try {
+                    const since = lastTimestampRef.current || new Date(0).toISOString();
+                    const res = await fetch(`${API_URL}/exams/${examId}/proctoring/recent?since=${encodeURIComponent(since)}`, { headers: { 'Content-Type': 'application/json', 'X-User-Id': user?._id || '' } });
+                    if (!res.ok) return;
+                    const recent = await res.json();
+                    if (!recent || !Array.isArray(recent.events) || recent.events.length === 0) return;
+                    // update lastTimestamp to newest event timestamp
+                    const newest = recent.events.reduce((acc: string, ev: any) => ev.timestamp > acc ? ev.timestamp : acc, lastTimestampRef.current || '1970-01-01T00:00:00.000Z');
+                    lastTimestampRef.current = newest;
+                    // apply events to summary and details
+                    setSummary(prev => {
+                        const copy = [...prev];
+                        for (const ev of recent.events) {
+                            const userId = ev.userId || ev.user || 'unknown';
+                            const idx = copy.findIndex(s => s.userId === userId);
+                            if (idx >= 0) {
+                                copy[idx] = { ...copy[idx], count: (copy[idx].count || 0) + 1, lastEvent: ev };
+                            } else {
+                                copy.push({ userId, name: ev.userName || userId, count: 1, lastEvent: ev });
+                            }
+                        }
+                        return copy;
+                    });
+                    // compute per-user new event counts and set temporary badges/highlights
+                    const perUserCounts: Record<string, number> = {};
+                    for (const ev of recent.events) {
+                        const userId = ev.userId || ev.user || 'unknown';
+                        perUserCounts[userId] = (perUserCounts[userId] || 0) + 1;
+                    }
+                    setNewCounts(prev => {
+                        const copy = { ...prev };
+                        for (const uid of Object.keys(perUserCounts)) {
+                            copy[uid] = (copy[uid] || 0) + perUserCounts[uid];
+                            // reset any existing timer
+                            if (clearTimersRef.current[uid]) { window.clearTimeout(clearTimersRef.current[uid]); }
+                            // auto-clear the new badge after 6s
+                            // capture uid for closure
+                            const timerId = window.setTimeout(() => {
+                                setNewCounts(curr => {
+                                    const c2 = { ...curr };
+                                    delete c2[uid];
+                                    return c2;
+                                });
+                                delete clearTimersRef.current[uid];
+                            }, 6000);
+                            clearTimersRef.current[uid] = timerId;
+                        }
+                        return copy;
+                    });
+                    // if currently viewing one user's details, append new events for that user
+                    if (selectedUser) {
+                        const userEvents = recent.events.filter((e: any) => (e.userId || e.user) === selectedUser);
+                        if (userEvents.length > 0) setDetails(prev => [...userEvents.map((ev: any) => ev), ...prev]);
+                    }
+                } catch (err) {
+                    // ignore polling errors silently (optionally log)
+                    // console.error('Polling proctor recent failed', err);
+                }
+            }, 1000); // Poll lecturer proctoring endpoint every 1s for near-real-time updates
+        }).catch(err => console.error('Failed to load proctor summary', err));
+        return () => {
+            if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; }
+            // clear any pending badge timers
+            Object.values(clearTimersRef.current).forEach(tid => window.clearTimeout(tid));
+            clearTimersRef.current = {};
+            lastTimestampRef.current = null;
+            setNewCounts({});
+        };
+    }, [open, examId]);
+
+    useEffect(() => {
+        if (!selectedUser || !examId) return;
+        fetch(`${API_URL}/exams/${examId}/proctoring/${selectedUser}`, { headers: { 'Content-Type': 'application/json', 'X-User-Id': user?._id || '' } }).then(r => r.json()).then(data => {
+            if (data && data.events) setDetails(data.events);
+        }).catch(err => console.error('Failed to load proctor details', err));
+    }, [selectedUser, examId]);
+
+    return (
+        <Dialog open={open} onOpenChange={onOpenChange} className="max-w-4xl">
+            <h2 className="text-2xl font-bold mb-2">Proctoring Dashboard</h2>
+            <div className="grid grid-cols-3 gap-4">
+                <div className="col-span-1 bg-slate-900 p-3 rounded">
+                    <h3 className="font-semibold mb-2">Students</h3>
+                    <div className="space-y-2 max-h-80 overflow-y-auto">
+                        {summary.map(s => (
+                            <button key={s.userId} onClick={() => {
+                                setSelectedUser(s.userId);
+                                // clear new count for this user when lecturer opens details
+                                if (newCounts[s.userId]) {
+                                    setNewCounts(prev => { const c = { ...prev }; delete c[s.userId]; return c; });
+                                    if (clearTimersRef.current[s.userId]) { window.clearTimeout(clearTimersRef.current[s.userId]); delete clearTimersRef.current[s.userId]; }
+                                }
+                            }} className={cn('w-full text-left p-2 rounded hover:bg-slate-800 flex justify-between items-center', newCounts[s.userId] ? 'ring-2 ring-yellow-400' : '')}>
+                                <div>
+                                    <div className="font-medium">{s.name}</div>
+                                    <div className="text-xs text-slate-400">Events: {s.count}</div>
+                                </div>
+                                <div className="flex items-center space-x-2">
+                                    {newCounts[s.userId] ? (
+                                        <div className="bg-red-500 text-white text-xs px-2 py-0.5 rounded-full font-medium animate-pulse">{newCounts[s.userId]}</div>
+                                    ) : null}
+                                    <div className={cn('h-3 w-20 rounded-full', s.count > 0 ? 'bg-red-500' : 'bg-green-500')}></div>
+                                </div>
+                            </button>
+                        ))}
+                    </div>
+                </div>
+                <div className="col-span-2 bg-slate-900 p-3 rounded">
+                    <h3 className="font-semibold mb-2">Events</h3>
+                    {selectedUser ? (
+                        <div>
+                            <div className="text-sm text-slate-400 mb-3">Showing events for <strong>{selectedUser}</strong></div>
+                            <div className="space-y-2 max-h-96 overflow-y-auto">
+                                {details.length === 0 && <div className="text-slate-400">No events recorded.</div>}
+                                {details.map((ev: any) => (
+                                    <div key={ev._id} className="p-2 bg-slate-800 rounded">
+                                        <div className="text-sm font-medium">{ev.eventType}</div>
+                                        <div className="text-xs text-slate-400">{new Date(ev.timestamp).toLocaleString()}</div>
+                                        <pre className="text-xs mt-2 text-slate-300 bg-black/10 p-2 rounded">{JSON.stringify(ev.details)}</pre>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="text-slate-400">Select a student to view detailed proctoring events.</div>
+                    )}
+                </div>
+            </div>
+        </Dialog>
+    );
+};
+
+const HelpPage = ({ onBack }: { onBack: () => void }) => {
+    return (
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="min-h-screen p-8">
+            <div className="flex items-center justify-between mb-6">
+                <h2 className="text-2xl font-bold">Help & Documentation</h2>
+                <Button variant="outline" onClick={onBack}>Back</Button>
+            </div>
+            <Card className="p-6">
+                <h3 className="font-semibold mb-2">Getting Started</h3>
+                <p className="text-slate-400">This is placeholder help content. Replace with your institution's help and FAQs. For now, here are some tips:</p>
+                <ul className="list-disc list-inside mt-4 text-slate-300">
+                    <li>Allow camera and microphone permissions before starting exams.</li>
+                    <li>Ensure a stable internet connection.</li>
+                    <li>Contact your instructor if you face issues.</li>
+                </ul>
+            </Card>
+        </motion.div>
     );
 };
 const QuestionRenderer = ({ question, onAnswer, savedAnswer }: { question: Question, onAnswer: (answer: any) => void, savedAnswer: any }) => {
