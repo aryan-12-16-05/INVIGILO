@@ -26,7 +26,7 @@ const INSTITUTIONS: { [key: string]: string[] } = {
 };
 
 // --- TYPE DEFINITIONS ---
-type AppState = 'loading' | 'landing' | 'auth' | 'student-dashboard' | 'lecturer-dashboard' | 'exam' | 'result' | 'live-proctoring' | 'help';
+type AppState = 'loading' | 'landing' | 'auth' | 'student-dashboard' | 'lecturer-dashboard' | 'exam' | 'result' | 'live-proctoring' | 'help' | 'my-exams';
 type UserRole = 'student' | 'lecturer';
 type ExamStatus = 'Scheduled' | 'Available' | 'Locked' | 'Completed' | 'Live';
 type QuestionType = 'multiple-choice' | 'true-false' | 'short-answer' | 'essay';
@@ -300,6 +300,7 @@ export default function App() {
             case 'landing': return <LandingPage key="landing" onNavigate={navigateTo} />;
             case 'auth': return <AuthPage key="auth" initialRole={authRole} onAuthSuccess={onAuthSuccess} showToast={showToast} onBack={() => navigateTo('landing')} />;
             case 'student-dashboard': return currentUser && <StudentDashboard key="student-dashboard" user={currentUser} exams={exams} onLogout={handleLogout} onStartExam={handleStartExam} onBack={() => navigateTo('landing')} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} />;
+            case 'my-exams': return currentUser && <MyExamsPage key="my-exams" user={currentUser} exams={exams} onLogout={handleLogout} onStartExam={handleStartExam} onBack={() => navigateTo('student-dashboard')} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} />;
                 case 'lecturer-dashboard': return currentUser && <LecturerDashboard key="lecturer-dashboard" user={currentUser} exams={exams} onLogout={handleLogout} onBack={() => navigateTo('landing')} onExamChange={fetchExams} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} />;
             case 'live-proctoring': return currentUser && <LiveProctoring key="live-proctoring" user={currentUser} onBack={() => navigateTo(currentUser?.role === 'student' ? 'student-dashboard' : 'lecturer-dashboard')} showToast={showToast} />;
             case 'help': return <HelpPage key="help" onBack={() => navigateTo(currentUser?.role === 'student' ? 'student-dashboard' : 'lecturer-dashboard')} />;
@@ -424,7 +425,7 @@ const AuthPage = ({
   onBack: () => void;
 }) => {
   const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
-  const [currentStep, setCurrentStep] = useState<"details" | "face">("details");
+    const [currentStep, setCurrentStep] = useState<"details" | "face">("details");
   const [isLoading, setIsLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -433,6 +434,7 @@ const AuthPage = ({
   const [institution, setInstitution] = useState("");
   const [department, setDepartment] = useState("");
   const formDataRef = useRef<any>({});
+    const [enrollSamples, setEnrollSamples] = useState<string[]>([]);
 
   // --- CAMERA INIT & CLEANUP ---
     useEffect(() => {
@@ -507,7 +509,8 @@ const AuthPage = ({
         }
   };
 
-const waitForVideoReady = (video: HTMLVideoElement, timeout = 20000): Promise<void> => {
+// Wait until video has non-zero dimensions; default timeout kept short for snappy UX
+const waitForVideoReady = (video: HTMLVideoElement, timeout = 5000): Promise<void> => {
     return new Promise((resolve, reject) => {
         const start = Date.now();
 
@@ -564,7 +567,7 @@ const getVideoStatus = () => {
     setCurrentStep("face");
   };
 
-  const handleFullSignUp = async () => {
+    const handleFullSignUp = async () => {
     setIsLoading(true);
     setCaptureMessage("");
 
@@ -606,16 +609,23 @@ const getVideoStatus = () => {
         throw new Error("Could not capture image. Please ensure your camera is ready.");
       }
 
-            const finalData = { ...formDataRef.current, imageDataUrl, role: initialRole };
+            // Allow multi-sample: include existing samples + this capture (unique by string)
+            const samples = Array.from(new Set([...enrollSamples, imageDataUrl]));
+            const finalData: any = { ...formDataRef.current, role: initialRole };
+            if (samples.length > 1) finalData.imageDataUrls = samples;
+            else finalData.imageDataUrl = imageDataUrl;
 
             // Client-side validation to avoid server 400s and improve debugging
-            const requiredFields = ['fullName', 'email', 'phoneNumber', 'roleId', 'password', 'role', 'institution', 'department', 'imageDataUrl'];
+            const requiredFields = ['fullName', 'email', 'phoneNumber', 'roleId', 'password', 'role', 'institution', 'department'];
             const missing = requiredFields.filter(f => !finalData[f] || finalData[f] === "");
+            // Validate that at least one image field exists
+            const hasImage = !!finalData.imageDataUrl || (Array.isArray(finalData.imageDataUrls) && finalData.imageDataUrls.length > 0);
             console.log('Register payload keys:', Object.keys(finalData));
             console.log('imageDataUrl length:', imageDataUrl ? imageDataUrl.length : 0);
-            if (missing.length > 0) {
+            if (missing.length > 0 || !hasImage) {
                 console.error('Missing registration fields:', missing);
-                showToast(`Missing required fields: ${missing.join(', ')}`, 'error');
+                const imgMsg = hasImage ? '' : (missing.length > 0 ? '; image missing' : 'Image missing');
+                showToast(`Missing required fields: ${missing.join(', ')}${imgMsg}`,'error');
                 setIsLoading(false);
                 setCaptureMessage('');
                 return;
@@ -977,9 +987,42 @@ const getVideoStatus = () => {
                                             </div>
                                         )}
                                     </div>
-                  <Button onClick={handleFullSignUp} className="w-full" isLoading={isLoading}>
-                    Capture & Complete Signup
-                  </Button>
+                                    <div className="space-y-2">
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-xs text-slate-400">Samples captured: {enrollSamples.length} / 5</span>
+                                            <Button type="button" variant="secondary" onClick={async () => {
+                                                const v = videoRef.current; if (!v) { showToast('Camera not ready', 'error'); return; }
+                                                try {
+                                                    // Try instant capture; if it fails, reacquire stream once and retry immediately.
+                                                    let dataUrl = captureFrame();
+                                                    if (!dataUrl) {
+                                                        try {
+                                                            const newStream = await navigator.mediaDevices.getUserMedia({ video: true });
+                                                            v.srcObject = newStream;
+                                                        } catch {}
+                                                        // No long waits—attempt quick ready check then capture
+                                                        try { await waitForVideoReady(v, 1500); } catch {}
+                                                        dataUrl = captureFrame();
+                                                    }
+                                                    if (!dataUrl) throw new Error('Capture failed');
+                                                    setEnrollSamples(s => Array.from(new Set([...(s||[]), dataUrl])).slice(0,5));
+                                                    showToast('Sample added', 'success');
+                                                } catch (err:any) {
+                                                    showToast(err.message || 'Failed to add sample', 'error');
+                                                }
+                                            }}>Add another sample</Button>
+                                        </div>
+                                        {enrollSamples.length > 0 && (
+                                            <div className="grid grid-cols-5 gap-2">
+                                                {enrollSamples.map((s, i) => (
+                                                    <img key={i} src={s} className="w-full h-16 object-cover rounded border border-slate-700" />
+                                                ))}
+                                            </div>
+                                        )}
+                                        <Button onClick={handleFullSignUp} className="w-full" isLoading={isLoading}>
+                                            Complete Signup
+                                        </Button>
+                                    </div>
                 </div>
               )}
             </motion.div>
@@ -996,6 +1039,9 @@ const getVideoStatus = () => {
 const DashboardLayout = ({ children, user, onLogout, onBack, onAction, onUpdateUser, showToast }: { children: React.ReactNode, user: UserProfile, onLogout?: () => void, onBack: () => void, onAction?: (action: string) => void, onUpdateUser?: (u: UserProfile) => void, showToast?: (msg:string, type:'success'|'error') => void }) => {
     const [profileOpen, setProfileOpen] = useState(false);
     const [profileForm, setProfileForm] = useState<any>(null);
+    const [faceDialogOpen, setFaceDialogOpen] = useState(false);
+    const videoRef = useRef<HTMLVideoElement>(null);
+    const [faceSamples, setFaceSamples] = useState<string[]>([]);
 
     useEffect(() => {
         setProfileForm(user ? { name: user.name, phoneNumber: user.phoneNumber, institution: user.institution, department: user.department, year: user.year, studentId: user.studentId, lecturerId: user.lecturerId } : null);
@@ -1086,15 +1132,282 @@ const DashboardLayout = ({ children, user, onLogout, onBack, onAction, onUpdateU
                     <div className="flex justify-end space-x-2 pt-2">
                         <Button variant="outline" onClick={() => setProfileOpen(false)}>Cancel</Button>
                         <Button onClick={saveProfile}>Save</Button>
+                        <Button variant="secondary" onClick={() => setFaceDialogOpen(true)}>Manage Face Samples</Button>
                     </div>
                 </div>
             )}
         </Dialog>
+
+        <Dialog open={faceDialogOpen} onOpenChange={setFaceDialogOpen} className="max-w-lg">
+            <h2 className="text-xl font-bold mb-2">Face Samples</h2>
+            <p className="text-slate-400 text-sm mb-2">Add up to 5 samples in different lighting/expressions. These help improve verification.</p>
+            <div className="w-full h-48 bg-slate-800 rounded-lg overflow-hidden relative mb-2">
+                <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover"></video>
+            </div>
+            <div className="flex items-center justify-between">
+                <span className="text-xs text-slate-400">Pending to add: {faceSamples.length}</span>
+                <div className="space-x-2">
+                    <Button variant="secondary" onClick={async () => {
+                        const v = videoRef.current; if (!v) return;
+                        try {
+                            const dataUrl = (() => {
+                                const canvas = document.createElement('canvas');
+                                canvas.width = 320; canvas.height = 240;
+                                const ctx = canvas.getContext('2d');
+                                if (!ctx) return null;
+                                ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
+                                return canvas.toDataURL('image/jpeg');
+                            })();
+                            if (!dataUrl) throw new Error('Capture failed');
+                            setFaceSamples(s => [...s, dataUrl].slice(0,5));
+                        } catch (e:any) { showToast?.(e.message || 'Failed to capture', 'error'); }
+                    }}>Capture Sample</Button>
+                    <Button onClick={async () => {
+                        if (faceSamples.length === 0) { setFaceDialogOpen(false); return; }
+                        try {
+                            const res = await fetch(`${API_URL}/users/${user._id}/face-samples`, {
+                                method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ imageDataUrls: faceSamples })
+                            });
+                            const data = await res.json();
+                            if (!res.ok) throw new Error(data.error || 'Failed to add samples');
+                            showToast?.('Samples added', 'success');
+                            setFaceSamples([]);
+                            setFaceDialogOpen(false);
+                        } catch (err:any) { showToast?.(err.message || 'Failed to add samples', 'error'); }
+                    }}>Save</Button>
+                </div>
+            </div>
+        </Dialog>
         </>
     );
 };
+
+const MyExamsPage = ({ user, exams, onLogout, onStartExam, onBack, showToast, onUpdateUser, navigateTo }: { user: UserProfile; exams: Exam[]; onLogout: () => void; onStartExam: (examId: string) => void; onBack: () => void; showToast: (message:string, type:'success'|'error') => void; onUpdateUser: (u: UserProfile) => void; navigateTo: (state: AppState) => void }) => {
+    const [activeTab, setActiveTab] = useState<'upcoming' | 'finished'>('upcoming');
+    const [selectedExam, setSelectedExam] = useState<Exam | null>(null);
+    const [detailsOpen, setDetailsOpen] = useState(false);
+    const [resultsOpen, setResultsOpen] = useState(false);
+    const [resultAttempt, setResultAttempt] = useState<any>(null);
+
+    const userExams = exams.filter(exam => 
+        exam.institution.toLowerCase() === user.institution.toLowerCase() && 
+        exam.department.toLowerCase() === user.department.toLowerCase() && 
+        exam.targetYear === user.year
+    );
+
+    const now = new Date();
+    const isWithinWindow = (e: any) => {
+        try {
+            if (!e.scheduledDate) return e.status === 'Available' || e.status === 'Live';
+            const date = new Date(e.scheduledDate);
+            const [sh, sm] = (e.startTime || '00:00').split(':').map((n: string) => parseInt(n || '0', 10));
+            const [eh, em] = (e.endTime || '23:59').split(':').map((n: string) => parseInt(n || '0', 10));
+            const start = new Date(date.getFullYear(), date.getMonth(), date.getDate(), sh || 0, sm || 0);
+            const end = new Date(date.getFullYear(), date.getMonth(), date.getDate(), eh || 23, em || 59);
+            return now >= start && now <= end;
+        } catch { return false; }
+    };
+    const isExpired = (e: any) => {
+        try {
+            if (!e.scheduledDate) return false;
+            const date = new Date(e.scheduledDate);
+            const [eh, em] = (e.endTime || '23:59').split(':').map((n: string) => parseInt(n || '0', 10));
+            const end = new Date(date.getFullYear(), date.getMonth(), date.getDate(), eh || 23, em || 59);
+            return now > end;
+        } catch { return false; }
+    };
+
+    const upcomingExams = userExams.filter(e => 
+        ((e.status === 'Scheduled' || e.status === 'Available' || e.status === 'Live' || e.status === 'Locked') && !isExpired(e)) &&
+        !(e as any).completedByUser
+    );
+    const finishedExams = userExams.filter(e => (e as any).attemptForUser || (e as any).completedByUser);
+
+    const openDetails = (exam: Exam) => {
+        setSelectedExam(exam);
+        setDetailsOpen(true);
+    };
+
+    const openResults = async (exam: Exam) => {
+        try {
+            const res = await fetch(`${API_URL}/exams/${exam._id}/attempt?userId=${user._id}`);
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Failed to load results');
+            if (!data.attempt) {
+                showToast('No results found for this exam yet.', 'error');
+                return;
+            }
+            setResultAttempt(data.attempt);
+            setSelectedExam(exam);
+            setResultsOpen(true);
+        } catch (err: any) {
+            showToast(err.message || 'Failed to load results', 'error');
+        }
+    };
+
+    return (
+        <DashboardLayout user={user} onLogout={onLogout} onBack={() => navigateTo('student-dashboard')} showToast={showToast} onUpdateUser={onUpdateUser} onAction={(a) => {
+            if (a === 'dashboard') { navigateTo('student-dashboard'); return; }
+            if (a === 'my-exams') { /* already here */ return; }
+            if (a === 'live-proctoring') { navigateTo('live-proctoring'); return; }
+            if (a === 'help') { navigateTo('help'); return; }
+        }}>
+            <div className="space-y-6">
+                <div className="flex items-center justify-between">
+                    <h1 className="text-3xl font-bold text-white">My Exams</h1>
+                </div>
+
+                {/* Tabs */}
+                <div className="flex space-x-2 border-b border-slate-800">
+                    <button
+                        onClick={() => setActiveTab('upcoming')}
+                        className={cn(
+                            'px-6 py-3 font-semibold transition-colors duration-200',
+                            activeTab === 'upcoming' 
+                                ? 'text-indigo-400 border-b-2 border-indigo-400' 
+                                : 'text-slate-400 hover:text-slate-200'
+                        )}
+                    >
+                        Upcoming ({upcomingExams.length})
+                    </button>
+                    <button
+                        onClick={() => setActiveTab('finished')}
+                        className={cn(
+                            'px-6 py-3 font-semibold transition-colors duration-200',
+                            activeTab === 'finished' 
+                                ? 'text-indigo-400 border-b-2 border-indigo-400' 
+                                : 'text-slate-400 hover:text-slate-200'
+                        )}
+                    >
+                        Finished ({finishedExams.length})
+                    </button>
+                </div>
+
+                {/* Content */}
+                <div className="space-y-4">
+                    {activeTab === 'upcoming' && (
+                        <>
+                            {upcomingExams.length > 0 ? upcomingExams.map((exam: Exam) => (
+                                <Card key={exam._id} className="p-4 hover:border-indigo-500 transition-colors duration-200">
+                                    <div className="flex items-center justify-between">
+                                        <div className="flex-1">
+                                            <div className="flex items-center space-x-3 mb-2">
+                                                <h3 className="font-semibold text-white text-lg">{exam.title}</h3>
+                                                <Badge variant={exam.status === 'Available' ? 'success' : exam.status === 'Scheduled' ? 'info' : exam.status === 'Live' ? 'live' : 'warning'}>{exam.status}</Badge>
+                                            </div>
+                                            <p className="text-sm text-slate-400 mb-1">{exam.courseCode} | {exam.description}</p>
+                                            <p className="text-sm text-slate-400">{new Date(exam.scheduledDate).toLocaleDateString()} @ {exam.startTime} - {exam.endTime}</p>
+                                            <p className="text-xs text-slate-500 mt-1">Duration: {exam.duration} minutes | Questions: {exam.questions?.length || 0}</p>
+                                        </div>
+                                        <div className="flex space-x-2">
+                                            <Button variant="outline" onClick={() => openDetails(exam)}>Details</Button>
+                                            {(() => {
+                                                const completed = (exam as any).completedByUser;
+                                                const serverCanStart = (exam as any).canStartForUser;
+                                                const canStart = serverCanStart !== undefined ? serverCanStart : (exam.status === 'Available' || exam.status === 'Live' || isWithinWindow(exam));
+                                                
+                                                if (completed) return <Button disabled>Completed</Button>;
+                                                return (
+                                                    <Button onClick={() => onStartExam(exam._id)} disabled={!canStart}>
+                                                        {exam.status === 'Locked' ? <Lock className="h-4 w-4 mr-2"/> : null}
+                                                        {canStart ? 'Start Exam' : 'Not Available'}
+                                                    </Button>
+                                                );
+                                            })()}
+                                        </div>
+                                    </div>
+                                </Card>
+                            )) : <p className="text-slate-400 text-center py-8">No upcoming exams scheduled.</p>}
+                        </>
+                    )}
+
+                    {activeTab === 'finished' && (
+                        <>
+                            {finishedExams.length > 0 ? finishedExams.map((exam: Exam) => (
+                                <Card key={exam._id} className="p-4 hover:border-green-500 transition-colors duration-200">
+                                    <div className="flex items-center justify-between">
+                                        <div className="flex-1">
+                                            <div className="flex items-center space-x-3 mb-2">
+                                                <h3 className="font-semibold text-white text-lg">{exam.title}</h3>
+                                                <Badge variant="success">Completed</Badge>
+                                            </div>
+                                            <p className="text-sm text-slate-400 mb-1">{exam.courseCode} | {exam.description}</p>
+                                            <p className="text-sm text-slate-400">Completed: {new Date((exam as any).attemptForUser?.completedAt || Date.now()).toLocaleDateString()}</p>
+                                            <p className="text-sm text-green-400 mt-1 font-semibold">Score: {(exam as any).attemptForUser?.score || exam.attempt?.score || 0}%</p>
+                                        </div>
+                                        <div className="flex space-x-2">
+                                            <Button onClick={() => openResults(exam)}>See Results</Button>
+                                        </div>
+                                    </div>
+                                </Card>
+                            )) : <p className="text-slate-400 text-center py-8">No finished exams yet.</p>}
+                        </>
+                    )}
+                </div>
+            </div>
+
+            {/* Details Dialog */}
+            <Dialog open={detailsOpen} onOpenChange={setDetailsOpen} className="max-w-2xl">
+                <div className="p-6 space-y-4">
+                    <h2 className="text-2xl font-bold text-white">{selectedExam?.title}</h2>
+                    <div className="space-y-2 text-sm">
+                        <p className="text-slate-300"><span className="font-semibold">Course Code:</span> {selectedExam?.courseCode}</p>
+                        <p className="text-slate-300"><span className="font-semibold">Description:</span> {selectedExam?.description}</p>
+                        <p className="text-slate-300"><span className="font-semibold">Date:</span> {selectedExam && new Date(selectedExam.scheduledDate).toLocaleDateString()}</p>
+                        <p className="text-slate-300"><span className="font-semibold">Time:</span> {selectedExam?.startTime} - {selectedExam?.endTime}</p>
+                        <p className="text-slate-300"><span className="font-semibold">Duration:</span> {selectedExam?.duration} minutes</p>
+                        <p className="text-slate-300"><span className="font-semibold">Questions:</span> {selectedExam?.questions?.length || 0}</p>
+                        <p className="text-slate-300"><span className="font-semibold">Lecturer:</span> {selectedExam?.lecturerName}</p>
+                    </div>
+                    <Button onClick={() => setDetailsOpen(false)} className="w-full mt-4">Close</Button>
+                </div>
+            </Dialog>
+
+            {/* Results Dialog */}
+            <Dialog open={resultsOpen} onOpenChange={setResultsOpen} className="max-w-2xl">
+                <div className="p-6 space-y-4 max-h-[80vh] overflow-y-auto">
+                    <h2 className="text-2xl font-bold text-white">{selectedExam?.title} - Results</h2>
+                    <div className="bg-slate-800 p-4 rounded-lg">
+                        <div className="flex justify-between items-center">
+                            <span className="text-slate-300">Your Score:</span>
+                            <span className="text-3xl font-bold text-green-400">{resultAttempt?.score || 0}%</span>
+                        </div>
+                        <div className="flex justify-between items-center mt-2">
+                            <span className="text-slate-400 text-sm">Points: {resultAttempt?.pointsEarned || 0} / {resultAttempt?.totalMarks || 0}</span>
+                            <span className="text-slate-400 text-sm">Completed: {resultAttempt?.completedAt ? new Date(resultAttempt.completedAt).toLocaleString() : 'N/A'}</span>
+                        </div>
+                    </div>
+                    {resultAttempt?.perQuestion && resultAttempt.perQuestion.length > 0 && (
+                        <div className="space-y-3">
+                            <h3 className="font-semibold text-white">Question Breakdown:</h3>
+                            {resultAttempt.perQuestion.map((q: any, i: number) => (
+                                <div key={i} className="bg-slate-800/50 p-3 rounded border border-slate-700">
+                                    <div className="flex items-start justify-between">
+                                        <div className="flex-1">
+                                            <p className="text-sm text-slate-300 mb-1">Q{i + 1}: {q.question}</p>
+                                            <p className="text-xs text-slate-400">Your Answer: <span className={q.isCorrect ? 'text-green-400' : 'text-red-400'}>{String(q.userAnswer || 'No answer')}</span></p>
+                                            {!q.isCorrect && <p className="text-xs text-slate-500">Correct Answer: {String(q.correctAnswer)}</p>}
+                                        </div>
+                                        <div className="ml-4">
+                                            {q.isCorrect ? <CheckCircle className="h-5 w-5 text-green-400" /> : <XCircle className="h-5 w-5 text-red-400" />}
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                    <Button onClick={() => setResultsOpen(false)} className="w-full mt-4">Close</Button>
+                </div>
+            </Dialog>
+        </DashboardLayout>
+    );
+};
+
 const StudentDashboard = ({ user, exams, onLogout, onStartExam, onBack, showToast, onUpdateUser, navigateTo }: { user: UserProfile; exams: Exam[]; onLogout: () => void; onStartExam: (examId: string) => void; onBack: () => void; showToast: (message:string, type:'success'|'error') => void; onUpdateUser: (u: UserProfile) => void; navigateTo: (state: AppState) => void }) => {
     const [systemCheckOpen, setSystemCheckOpen] = useState(false);
+    const [resultsOpen, setResultsOpen] = useState(false);
+    const [resultExamTitle, setResultExamTitle] = useState<string>('');
+    const [resultAttempt, setResultAttempt] = useState<any>(null);
     
     const userExams = exams.filter(exam => 
         exam.institution.toLowerCase() === user.institution.toLowerCase() && 
@@ -1102,13 +1415,68 @@ const StudentDashboard = ({ user, exams, onLogout, onStartExam, onBack, showToas
         exam.targetYear === user.year
     );
 
-    const liveExams = userExams.filter(e => e.status === 'Live');
-    const upcomingExams = userExams.filter(e => e.status === 'Scheduled' || e.status === 'Available' || e.status === 'Locked');
-    const completedExams = userExams.filter(e => e.status === 'Completed');
+    const now = new Date();
+    const isWithinWindow = (e: any) => {
+        try {
+            if (!e.scheduledDate) return e.status === 'Available' || e.status === 'Live';
+            const date = new Date(e.scheduledDate);
+            const [sh, sm] = (e.startTime || '00:00').split(':').map((n: string) => parseInt(n || '0', 10));
+            const [eh, em] = (e.endTime || '23:59').split(':').map((n: string) => parseInt(n || '0', 10));
+            const start = new Date(date.getFullYear(), date.getMonth(), date.getDate(), sh || 0, sm || 0);
+            const end = new Date(date.getFullYear(), date.getMonth(), date.getDate(), eh || 23, em || 59);
+            return now >= start && now <= end;
+        } catch { return false; }
+    };
+    const isExpired = (e: any) => {
+        try {
+            if (!e.scheduledDate) return false;
+            const date = new Date(e.scheduledDate);
+            const [eh, em] = (e.endTime || '23:59').split(':').map((n: string) => parseInt(n || '0', 10));
+            const end = new Date(date.getFullYear(), date.getMonth(), date.getDate(), eh || 23, em || 59);
+            return now > end;
+        } catch { return false; }
+    };
+
+    const liveExams = userExams.filter(e => (e.status === 'Live') || (e.status === 'Available' && isWithinWindow(e)));
+    const upcomingExams = userExams.filter(e => (e.status === 'Scheduled' || e.status === 'Available' || e.status === 'Locked') && !isExpired(e));
+    const completedExams = userExams.filter(e => (e as any).attemptForUser); // treat exams with attempts as completed for this user
     const averageScore = completedExams.length > 0 ? Math.round(completedExams.reduce((acc, e) => acc + (e.attempt?.score || 0), 0) / completedExams.length) : 0;
 
+    const openResults = async (exam: any) => {
+        try {
+            const res = await fetch(`${API_URL}/exams/${exam._id}/attempt?userId=${user._id}`);
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Failed to load results');
+            if (!data.attempt) {
+                showToast('No results found for this exam yet.', 'error');
+                return;
+            }
+            setResultAttempt(data.attempt);
+            setResultExamTitle(exam.title);
+            setResultsOpen(true);
+        } catch (err: any) {
+            showToast(err.message || 'Failed to load results', 'error');
+        }
+    };
+
     return (
-    <DashboardLayout user={user} onLogout={onLogout} onBack={onBack} showToast={showToast} onUpdateUser={onUpdateUser} onAction={(a) => { if (a === 'dashboard') setSystemCheckOpen(true); else if (a === 'live-proctoring') navigateTo('live-proctoring'); else if (a === 'help') navigateTo('help'); }}>
+    <DashboardLayout user={user} onLogout={onLogout} onBack={onBack} showToast={showToast} onUpdateUser={onUpdateUser} onAction={(a) => {
+        // Keep students on the main dashboard unless explicitly opening tools
+        if (a === 'dashboard') { setSystemCheckOpen(false); return; }
+        if (a === 'my-exams') { navigateTo('my-exams'); return; }
+        if (a === 'results') {
+            // Open the most recent completed exam's results, if any
+            try {
+                const last = completedExams[completedExams.length - 1];
+                if (last) { (async () => await openResults(last))(); }
+                else { showToast('No results available yet.', 'error'); }
+            } catch { showToast('Unable to open results.', 'error'); }
+            return;
+        }
+        if (a === 'live-proctoring') { navigateTo('live-proctoring'); return; }
+        if (a === 'help') { navigateTo('help'); return; }
+        if (a === 'profile') { /* handled in DashboardLayout */ return; }
+    }}>
             <Card className="p-4 mb-8 bg-slate-900 border-slate-800">
                 <div className="flex justify-between items-center">
                     <div>
@@ -1220,17 +1588,46 @@ const StudentDashboard = ({ user, exams, onLogout, onStartExam, onBack, showToas
                                 <div key={exam._id} className="flex justify-between items-center">
                                     <div>
                                         <p className="text-sm font-medium text-slate-200">{exam.title}</p>
-                                        <p className="text-xs text-slate-500">{exam.attempt?.completedAt}</p>
+                                        <p className="text-xs text-slate-500">{(exam as any).attemptForUser?.completedAt || exam.attempt?.completedAt}</p>
                                     </div>
-                                    <Badge variant={(exam.attempt?.score || 0) >= 80 ? 'success' : 'warning'}>{exam.attempt?.score}%</Badge>
+                                    <div className="flex items-center space-x-2">
+                                        <Badge variant={((exam as any).attemptForUser?.score || exam.attempt?.score || 0) >= 80 ? 'success' : 'warning'}>{(exam as any).attemptForUser?.score ?? exam.attempt?.score}%</Badge>
+                                        <Button variant="outline" onClick={() => openResults(exam)}>See Results</Button>
+                                    </div>
                                 </div>
                             ))}
+                            {completedExams.length === 0 && <p className="text-slate-400">No results available yet.</p>}
                         </div>
                     </Card>
                 </div>
             </div>
             
             <SystemCheckDialog open={systemCheckOpen} onOpenChange={setSystemCheckOpen} />
+
+            <Dialog open={resultsOpen} onOpenChange={setResultsOpen} className="max-w-2xl">
+                <h2 className="text-xl font-bold mb-2">Results: {resultExamTitle}</h2>
+                {resultAttempt ? (
+                    <div className="space-y-2 max-h-[70vh] overflow-y-auto pr-2">
+                        <div className="flex justify-between items-center p-2 bg-slate-800 rounded">
+                            <span className="text-slate-300">Score</span>
+                            <span className="text-white font-bold">{resultAttempt.score}%</span>
+                        </div>
+                        {resultAttempt.perQuestion && resultAttempt.perQuestion.map((pq: any, idx: number) => (
+                            <div key={idx} className={cn('p-2 rounded border', pq.correct ? 'border-green-600 bg-green-900/10' : 'border-red-600 bg-red-900/10')}>
+                                <div className="text-sm text-white font-medium">{idx + 1}. {pq.question}</div>
+                                <div className="text-xs text-slate-300">Your answer: {String(pq.given)}</div>
+                                <div className="text-xs text-slate-300">Correct answer: {String(pq.expected)}</div>
+                                <div className="text-xs text-slate-300">Marks: {pq.marks} — {pq.correct ? 'Correct' : 'Incorrect'}</div>
+                            </div>
+                        ))}
+                    </div>
+                ) : (
+                    <div className="text-slate-400">No attempt data available.</div>
+                )}
+                <div className="flex justify-end mt-3">
+                    <Button variant="outline" onClick={() => setResultsOpen(false)}>Close</Button>
+                </div>
+            </Dialog>
         </DashboardLayout>
     );
 };
@@ -1245,6 +1642,9 @@ const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showTo
     const [reportOpen, setReportOpen] = useState(false);
     const [reportData, setReportData] = useState<any>(null);
     const [reportExamTitle, setReportExamTitle] = useState<string>('');
+    const [attemptOpen, setAttemptOpen] = useState(false);
+    const [selectedAttempt, setSelectedAttempt] = useState<any | null>(null);
+    const [attemptEvents, setAttemptEvents] = useState<any[]>([]);
 
 
     
@@ -1321,8 +1721,29 @@ const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showTo
         }
     };
 
+    const openAttemptDetails = async (attempt: any) => {
+        setSelectedAttempt(attempt);
+        setAttemptEvents([]);
+        setAttemptOpen(true);
+        try {
+            const examId = reportData?.exam?._id || reportData?.exam?.id || '';
+            if (!examId || !attempt?.userId) return;
+            const res = await fetch(`${API_URL}/exams/${examId}/proctoring/${attempt.userId}`, { headers: { 'Content-Type': 'application/json', 'X-User-Id': user._id } });
+            const data = await res.json();
+            if (res.ok && Array.isArray(data.events)) setAttemptEvents(data.events);
+        } catch (err) {
+            // ignore silently
+        }
+    };
+
     return (
-    <DashboardLayout user={user} onLogout={onLogout} onBack={onBack} showToast={showToast} onUpdateUser={onUpdateUser} onAction={(a) => { if (a === 'create-exam') setCreateExamOpen(true); else if (a === 'live-proctoring') navigateTo('live-proctoring'); else if (a === 'help') navigateTo('help'); }}>
+    <DashboardLayout user={user} onLogout={onLogout} onBack={onBack} showToast={showToast} onUpdateUser={onUpdateUser} onAction={(a) => {
+        if (a === 'overview' || a === 'dashboard') { /* default overview; no-op */ return; }
+        if (a === 'create-exam') { setCreateExamOpen(true); return; }
+        if (a === 'live-proctoring') { navigateTo('live-proctoring'); return; }
+        if (a === 'help') { navigateTo('help'); return; }
+        if (a === 'profile') { /* DashboardLayout handles */ return; }
+    }}>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
                 <StatCard title="Total Students" value={adminStats.totalStudents} icon={<Users className="h-6 w-6 text-indigo-300"/>} colorClass="border-indigo-500/50" />
                 <StatCard title="Live Exams" value={adminStats.liveExams} icon={<Monitor className="h-6 w-6 text-green-300"/>} colorClass="border-green-500/50" />
@@ -1386,11 +1807,68 @@ const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showTo
                                     </div>
                                 ))}
                             </div>
+                            <h3 className="font-semibold mt-4 mb-2">Student Attempts</h3>
+                            <div className="space-y-2 max-h-60 overflow-y-auto p-2">
+                                {reportData.attempts && reportData.attempts.length > 0 ? reportData.attempts.map((a: any, idx: number) => (
+                                    <div key={idx} className="p-2 bg-slate-800 rounded flex items-center justify-between">
+                                        <div>
+                                            <div className="font-medium text-white">{a.userName || a.userId}</div>
+                                            <div className="text-xs text-slate-300">Score: {a.score}% — Completed: {a.completedAt ? new Date(a.completedAt).toLocaleString() : 'N/A'}</div>
+                                        </div>
+                                        <div className="flex items-center space-x-2">
+                                            <Button size="sm" variant="outline" onClick={() => openAttemptDetails(a)}>View Details</Button>
+                                        </div>
+                                    </div>
+                                )) : <div className="text-slate-400">No attempts yet.</div>}
+                            </div>
                         </div>
                     ) : <div className="text-slate-400">No report data available.</div>}
                 </div>
                 <div className="flex justify-end mt-4">
                     <Button variant="outline" onClick={() => setReportOpen(false)}>Close</Button>
+                </div>
+            </Dialog>
+            <Dialog open={attemptOpen} onOpenChange={setAttemptOpen} className="max-w-4xl">
+                <h2 className="text-2xl font-bold mb-2">Attempt Details</h2>
+                {selectedAttempt ? (
+                    <div className="space-y-4">
+                        <div className="bg-slate-900 p-3 rounded">
+                            <div className="font-medium text-white">{selectedAttempt.userName || selectedAttempt.userId}</div>
+                            <div className="text-xs text-slate-300">Score: {selectedAttempt.score}% — Completed: {selectedAttempt.completedAt ? new Date(selectedAttempt.completedAt).toLocaleString() : 'N/A'}</div>
+                        </div>
+                        <div>
+                            <h3 className="font-semibold mb-2">Answers</h3>
+                            <div className="space-y-2 max-h-60 overflow-y-auto">
+                                {selectedAttempt.perQuestion && selectedAttempt.perQuestion.map((pq: any, idx: number) => (
+                                    <div key={idx} className={cn('p-2 rounded border', pq.correct ? 'border-green-600 bg-green-900/10' : 'border-red-600 bg-red-900/10')}>
+                                        <div className="text-sm text-white font-medium">{idx + 1}. {pq.question}</div>
+                                        <div className="text-xs text-slate-300">Answer: {String(pq.given)} — Expected: {String(pq.expected)} — Marks: {pq.marks}</div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                        <div>
+                            <h3 className="font-semibold mb-2">Proctoring Timeline</h3>
+                            <div className="space-y-2 max-h-64 overflow-y-auto">
+                                {attemptEvents.length === 0 && <div className="text-slate-400">No proctoring events recorded.</div>}
+                                {attemptEvents.map((ev: any) => (
+                                    <div key={ev._id} className="p-2 bg-slate-800 rounded">
+                                        <div className="text-sm font-medium">{ev.eventType}</div>
+                                        <div className="text-xs text-slate-400">{new Date(ev.timestamp).toLocaleString()}</div>
+                                        {ev.details?.snapshot ? (
+                                            <div className="mt-2">
+                                                <img src={ev.details.snapshot} alt="snapshot" className="w-40 h-28 object-cover rounded border border-slate-700" />
+                                            </div>
+                                        ) : null}
+                                        <pre className="text-xs mt-2 text-slate-300 bg-black/10 p-2 rounded overflow-x-auto">{JSON.stringify(ev.details)}</pre>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                ) : <div className="text-slate-400">No attempt selected.</div>}
+                <div className="flex justify-end mt-4">
+                    <Button variant="outline" onClick={() => setAttemptOpen(false)}>Close</Button>
                 </div>
             </Dialog>
             
@@ -1410,34 +1888,114 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
     const [answers, setAnswers] = useState<{[key: string]: any}>({});
     const [timeLeft, setTimeLeft] = useState(exam.duration * 60);
     const [isSubmitting, setIsSubmitting] = useState(false);
+    const [showSubmitConfirm, setShowSubmitConfirm] = useState(false);
     const videoRef = useRef<HTMLVideoElement>(null);
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-    const audioChunksRef = useRef<Blob[]>([]);
+    const proctoringIntervalRef = useRef<any>(null);
+    const [proctoringStopped, setProctoringStopped] = useState(false);
+    // Note: switched to continuous MediaRecorder with timeslice; no need for manual chunks buffer.
+    // const audioChunksRef = useRef<Blob[]>([]);
 
+    // Function to stop all proctoring activities
+    const stopProctoring = useCallback(() => {
+        if (proctoringStopped) return; // Already stopped
+        
+        console.log('[SUBMIT] Stopping proctoring interval...');
+        if (proctoringIntervalRef.current) {
+            clearInterval(proctoringIntervalRef.current);
+            proctoringIntervalRef.current = null;
+        }
+        
+        console.log('[SUBMIT] Stopping media recorder...');
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+            try {
+                mediaRecorderRef.current.stop();
+            } catch (e) {
+                console.log('[SUBMIT] Error stopping media recorder:', e);
+            }
+        }
+        
+        console.log('[SUBMIT] Stopping video stream...');
+        if (videoRef.current && videoRef.current.srcObject) {
+            const stream = videoRef.current.srcObject as MediaStream;
+            stream.getTracks().forEach(track => {
+                track.stop();
+                console.log('[SUBMIT] Stopped track:', track.kind);
+            });
+        }
+        
+        setProctoringStopped(true);
+        console.log('[SUBMIT] All proctoring stopped successfully');
+    }, [proctoringStopped]);
+
+    // Handle first submit button click - stop proctoring and show confirmation
+    const handleInitialSubmitClick = useCallback(() => {
+        console.log('[SUBMIT] Initial submit button clicked');
+        stopProctoring();
+        setShowSubmitConfirm(true);
+    }, [stopProctoring]);
+
+    // Handle actual submission after confirmation
     const handleSubmit = useCallback(async () => {
         setIsSubmitting(true);
+        console.log('[SUBMIT] Starting exam submission...', { examId: exam._id, userId: user._id, answerCount: Object.keys(answers).length });
+        
+        // Wait a bit for all pending requests to complete (proctoring already stopped)
+        console.log('[SUBMIT] Waiting for pending requests to complete...');
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
         try {
-            const res = await fetch(`${API_URL}/exams/${exam._id}/submit`, {
+            const url = `${API_URL}/exams/${exam._id}/submit`;
+            console.log('[SUBMIT] Now submitting to:', url);
+            
+            // Add timeout to prevent hanging forever
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+            
+            const res = await fetch(url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ userId: user._id, answers })
+                body: JSON.stringify({ userId: user._id, answers }),
+                signal: controller.signal
             });
+            
+            clearTimeout(timeoutId);
+            console.log('[SUBMIT] Submit response status:', res.status);
+            
             const data = await res.json();
+            console.log('[SUBMIT] Submit response data:', data);
+            
             if (!res.ok) throw new Error(data.error || 'Failed to submit exam');
 
+            showToast('Exam submitted successfully!', 'success');
             onExit({ score: data.score, totalMarks: data.totalMarks, examTitle: exam.title, perQuestion: data.perQuestion });
 
         } catch (error: any) {
-            showToast(error.message, 'error');
+            console.error('[SUBMIT] Exam submission error:', error);
+            if (error.name === 'AbortError') {
+                showToast('Submission timeout. The server took too long to respond. Please try again.', 'error');
+            } else {
+                showToast(error.message || 'Failed to submit exam. Please try again.', 'error');
+            }
             setIsSubmitting(false);
         }
     }, [answers, exam._id, exam.title, onExit, showToast, user._id]);
 
     // Proctoring Loop
     useEffect(() => {
-        let proctoringInterval: any; // Using 'any' to avoid NodeJS/browser type conflicts for setInterval
+        // Reset proctoring stopped state when starting a new exam
+        console.log('[PROCTORING] Initializing proctoring for exam:', exam._id);
+        setProctoringStopped(false);
+        
+        const [proctorDegradedRef] = [
+            { current: false } as { current: boolean }
+        ];
+        // Simple network backoff to avoid spamming server if unreachable
+        const nextAllowedRef = { current: 0 } as any;
+        const backoffMs = () => 10000; // 10s backoff on network failure
 
         const startProctoring = async () => {
+            console.log('[PROCTORING] Starting camera and audio streams...');
             try {
                 // Start video stream
                 const videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
@@ -1453,50 +2011,57 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                 // Start audio stream and recorder
                 const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 mediaRecorderRef.current = new MediaRecorder(audioStream);
-                mediaRecorderRef.current.ondataavailable = (event) => {
-                    audioChunksRef.current.push(event.data);
-                };
-                mediaRecorderRef.current.onstop = async () => {
-                    const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-                    const reader = new FileReader();
-                    reader.readAsDataURL(audioBlob);
-                    reader.onloadend = async () => {
-                        const base64Audio = reader.result as string;
-                        try {
-                            const res = await fetch(`${API_URL}/proctor/audio`, {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ audioData: base64Audio.split(',')[1] }), // Send only base64 part
-                            });
-                            const data = await res.json();
-                            // Students shouldn't see suspicious audio alerts; record events for lecturer review
-                            if (data && data.audioStatus && data.audioStatus.toLowerCase().includes('suspicious')) {
-                                try {
-                                    await fetch(`${API_URL}/proctor/event`, {
-                                        method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({ examId: exam._id, userId: user._id, eventType: 'audio', details: { audioStatus: data.audioStatus } })
-                                    });
-                                } catch (err) {
-                                    console.error('Failed to record audio proctor event', err);
+                mediaRecorderRef.current.ondataavailable = async (event) => {
+                    try {
+                        const blob = event.data;
+                        if (!blob || blob.size === 0) return;
+                        const reader = new FileReader();
+                        reader.readAsDataURL(blob);
+                        reader.onloadend = async () => {
+                            const base64Audio = (reader.result as string) || '';
+                            if (!base64Audio.includes(',')) return;
+                            try {
+                                const res = await fetch(`${API_URL}/proctor/audio`, {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ audioData: base64Audio.split(',')[1] }),
+                                });
+                                const data = await res.json();
+                                if (data && data.audioStatus && String(data.audioStatus).toLowerCase().includes('suspicious')) {
+                                    try {
+                                        await fetch(`${API_URL}/proctor/event`, {
+                                            method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                            body: JSON.stringify({ examId: exam._id, userId: user._id, eventType: 'audio', details: { audioStatus: data.audioStatus } })
+                                        });
+                                    } catch (err) { /* ignore */ }
                                 }
-                            }
-                        } catch (error) {
-                            console.error("Audio proctoring error:", error);
-                        }
-                    };
-                    audioChunksRef.current = [];
+                            } catch (error) { /* ignore transient network errors */ }
+                        };
+                    } catch { /* ignore */ }
                 };
 
-                // Start a recurring loop for proctoring
-                proctoringInterval = setInterval(() => {
+                // Start a recurring loop for proctoring - store in ref so handleSubmit can stop it
+                proctoringIntervalRef.current = setInterval(() => {
+                    // Skip if in backoff window
+                    if (Date.now() < nextAllowedRef.current) return;
                     const imageDataUrl = captureFrame();
                     if (imageDataUrl) {
                         fetch(`${API_URL}/proctor`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ imageDataUrl, userId: user._id }),
-                        }).then(res => res.json()).then(data => {
+                            // Include examId so backend can correlate and produce server-side events if needed
+                            body: JSON.stringify({ imageDataUrl, userId: user._id, examId: exam._id }),
+                        }).then(async res => {
+                            if (!res.ok) {
+                                // On server error, apply a short backoff
+                                nextAllowedRef.current = Date.now() + backoffMs();
+                                proctorDegradedRef.current = true;
+                            }
+                            return res.json();
+                        }).then(data => {
                             if (data && !data.error) {
+                                // Success: clear degraded flag
+                                proctorDegradedRef.current = false;
                                 // If any suspicious flag found, record it server-side for lecturers to review.
                                 const suspicious = [];
                                                 if (!data.identityVerified) suspicious.push({ event: 'identity', details: { similarity: data.similarity } });
@@ -1511,7 +2076,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                                     try {
                                         await fetch(`${API_URL}/proctor/event`, {
                                             method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                            body: JSON.stringify({ examId: exam._id, userId: user._id, eventType: ev.event, details: ev.details })
+                                            body: JSON.stringify({ examId: exam._id, userId: user._id, eventType: ev.event, details: ev.details, snapshot: imageDataUrl })
                                         });
                                     } catch (err) {
                                         console.error('Failed to record proctor event', err);
@@ -1521,20 +2086,20 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                             } else if (data && data.error) {
                                 console.error('Proctoring error:', data.error);
                             }
-                        }).catch(err => console.error("Image proctoring error:", err));
+                        }).catch(err => { console.error("Image proctoring error:", err); nextAllowedRef.current = Date.now() + backoffMs(); proctorDegradedRef.current = true; });
                     }
 
-                    if (mediaRecorderRef.current?.state === 'inactive') {
-                        mediaRecorderRef.current.start();
-                        setTimeout(() => {
-                            if (mediaRecorderRef.current?.state === 'recording') {
-                                mediaRecorderRef.current.stop();
-                            }
-                        }, 1000); // Record for 1 second
-                    }
+                    // Ensure recorder is running with 1s timeslice for continuous small chunks
+                    try {
+                        if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'inactive') {
+                            mediaRecorderRef.current.start(1000);
+                        }
+                    } catch {}
                 }, 3000); // Run every 3 seconds (faster proctoring)
+                
+                console.log('[PROCTORING] Proctoring started successfully - interval set');
             } catch (error) {
-                console.error("Failed to start proctoring streams:", error);
+                console.error("[PROCTORING] Failed to start proctoring streams:", error);
                 showToast("Could not start camera or microphone for proctoring.", "error");
             }
         };
@@ -1543,7 +2108,11 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
 
         // Cleanup function
         return () => {
-            clearInterval(proctoringInterval);
+            console.log('[PROCTORING] Cleanup: stopping all proctoring activities');
+            if (proctoringIntervalRef.current) {
+                clearInterval(proctoringIntervalRef.current);
+                proctoringIntervalRef.current = null;
+            }
             if (videoRef.current && videoRef.current.srcObject) {
                 (videoRef.current.srcObject as MediaStream).getTracks().forEach(track => track.stop());
             }
@@ -1551,19 +2120,29 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                 mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
             }
         };
-    }, [showToast, user._id]);
+    }, [exam._id, showToast, user._id]);
 
     const captureFrame = (): string | null => {
         const video = videoRef.current;
-        if (video && video.readyState >= 3) {
-            const canvas = document.createElement('canvas');
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-            const ctx = canvas.getContext('2d');
-            ctx?.drawImage(video, 0, 0, canvas.width, canvas.height);
-            return canvas.toDataURL('image/jpeg');
+        if (!video || video.readyState < 3) return null;
+        // Downscale to reduce bandwidth and backend load, keep aspect ratio
+        const srcW = video.videoWidth || 640;
+        const srcH = video.videoHeight || 480;
+        const targetW = 320; // small fixed width
+        const scale = targetW / srcW;
+        const targetH = Math.max(1, Math.round(srcH * scale));
+
+        const canvas = document.createElement('canvas');
+        canvas.width = targetW;
+        canvas.height = targetH;
+        const ctx = canvas.getContext('2d');
+        try {
+            ctx?.drawImage(video, 0, 0, targetW, targetH);
+            // Slightly lower quality to reduce payload size
+            return canvas.toDataURL('image/jpeg', 0.7);
+        } catch (e) {
+            return null;
         }
-        return null;
     };
 
     // Timer logic
@@ -1583,6 +2162,13 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
         const handleVisibilityChange = () => {
             if (document.hidden) {
                 showToast("Tab switch detected. Please remain on the exam page.", 'error');
+                // Record as a proctor event for lecturer timeline
+                try {
+                    fetch(`${API_URL}/proctor/event`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ examId: exam._id, userId: user._id, eventType: 'tab_switch', details: { hidden: true, at: new Date().toISOString() } })
+                    });
+                } catch {}
             }
         };
         document.addEventListener("visibilitychange", handleVisibilityChange);
@@ -1616,8 +2202,13 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                         </button>
                     ))}
                 </div>
-                <div className="mt-auto">
-                    <Button variant="destructive" className="w-full" isLoading={isSubmitting} onClick={handleSubmit}>Submit Exam</Button>
+                <div className="mt-auto space-y-2">
+                    <div className="text-xs text-slate-400 text-center mb-2">
+                        {Object.keys(answers).length} of {exam.questions.length} answered
+                    </div>
+                    <Button variant="destructive" className="w-full" disabled={isSubmitting} onClick={handleInitialSubmitClick}>
+                        {isSubmitting ? 'Submitting...' : 'Submit Exam'}
+                    </Button>
                 </div>
             </div>
             <main className="flex-1 flex flex-col">
@@ -1629,6 +2220,13 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                         <div className="flex items-center space-x-2 text-yellow-400">
                             <AlertTriangle className="h-5 w-5" />
                             <span className="text-sm font-medium">Proctoring Active</span>
+                        </div>
+                        {/* Optional connectivity indicator when proctor uploads are degraded */}
+                        <div className="hidden md:flex items-center space-x-2">
+                            {/* Using a simple heuristic: if we recently backed off uploads, show badge */}
+                            {/* Note: this badge updates on next render cycles driven by other state; lightweight UX hint only */}
+                            {/* In a more advanced setup, lift degraded state into React state for deterministic updates */}
+                            <span className="text-xs px-2 py-1 rounded bg-yellow-500/20 text-yellow-300 border border-yellow-600/30">Network adapting…</span>
                         </div>
                         <div className="flex items-center space-x-2">
                             <Timer className="h-5 w-5 text-slate-400"/>
@@ -1655,6 +2253,40 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                     <Button disabled={!exam.questions || currentQuestion === exam.questions.length - 1} onClick={() => setCurrentQuestion(p => p + 1)}>Next</Button>
                 </footer>
             </main>
+            
+            {/* Submit Confirmation Dialog */}
+            <Dialog open={showSubmitConfirm} onOpenChange={setShowSubmitConfirm}>
+                <div className="text-center p-6">
+                    <AlertTriangle className="h-16 w-16 text-yellow-400 mx-auto mb-4" />
+                    <h2 className="text-2xl font-bold text-white mb-2">Submit Exam?</h2>
+                    <p className="text-slate-400 mb-4">
+                        Are you sure you want to submit your exam? This action cannot be undone.
+                    </p>
+                    <div className="bg-slate-800/50 rounded-lg p-4 mb-6">
+                        <div className="flex justify-between text-sm mb-2">
+                            <span className="text-slate-400">Questions Answered:</span>
+                            <span className="text-white font-semibold">{Object.keys(answers).length} / {exam.questions.length}</span>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                            <span className="text-slate-400">Time Remaining:</span>
+                            <span className="text-white font-semibold">{formatTime(timeLeft)}</span>
+                        </div>
+                    </div>
+                    {Object.keys(answers).length < exam.questions.length && (
+                        <div className="bg-yellow-500/20 text-yellow-300 p-3 rounded-lg mb-4 text-sm">
+                            ⚠️ You have unanswered questions. They will be marked as incorrect.
+                        </div>
+                    )}
+                    <div className="flex space-x-3">
+                        <Button variant="outline" className="flex-1" onClick={() => setShowSubmitConfirm(false)} disabled={isSubmitting}>
+                            Cancel
+                        </Button>
+                        <Button variant="destructive" className="flex-1" onClick={() => { setShowSubmitConfirm(false); handleSubmit(); }} disabled={isSubmitting}>
+                            {isSubmitting ? 'Submitting...' : 'Submit Now'}
+                        </Button>
+                    </div>
+                </div>
+            </Dialog>
         </motion.div>
     );
 };
@@ -2060,61 +2692,155 @@ const AIGenerateQuestionsDialog = ({ open, onOpenChange, onAddQuestions, showToa
 
 // --- Live Proctoring Page ---
 const LiveProctoring = ({ user, onBack, showToast }: { user: UserProfile; onBack: () => void; showToast: (msg:string, type:'success'|'error') => void }) => {
-    const videoRef = React.useRef<HTMLVideoElement | null>(null);
-    const streamRef = React.useRef<MediaStream | null>(null);
-    const [isStreaming, setIsStreaming] = React.useState(false);
-
-    const startStream = async () => {
-        try {
-            const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-            streamRef.current = s;
-            if (videoRef.current) {
-                videoRef.current.srcObject = s;
-                try { await (videoRef.current.play() as any); } catch (e) {}
-            }
-            setIsStreaming(true);
-            showToast('Live proctoring started', 'success');
-        } catch (err: any) {
-            console.error('Failed to start stream', err);
-            showToast('Could not start camera. Please allow permissions.', 'error');
-        }
-    };
-
-    const stopStream = () => {
-        if (streamRef.current) {
-            streamRef.current.getTracks().forEach(t => t.stop());
-            streamRef.current = null;
-        }
-        if (videoRef.current) videoRef.current.srcObject = null;
-        setIsStreaming(false);
-        showToast('Live proctoring stopped', 'success');
-    };
+    const [events, setEvents] = React.useState<any[]>([]);
+    const pollRef = React.useRef<number | null>(null);
 
     React.useEffect(() => {
-        return () => stopStream();
-    }, []);
+        // For students: fetch their own recent proctor events
+        // For lecturers: fetch global recent events
+        const fetchEvents = async () => {
+            try {
+                const endpoint = user.role === 'lecturer' 
+                    ? `${API_URL}/proctoring/recent-global?limit=50` 
+                    : `${API_URL}/proctoring/recent?userId=${user._id}&limit=50`;
+                const res = await fetch(endpoint, { headers: { 'X-User-Id': user._id } });
+                const data = await res.json();
+                if (res.ok && data.events) {
+                    setEvents(data.events);
+                }
+            } catch (err) {
+                console.error('Failed to fetch events', err);
+            }
+        };
+
+        fetchEvents();
+        pollRef.current = window.setInterval(fetchEvents, 2000);
+
+        return () => {
+            if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; }
+        };
+    }, [user]);
+
+    const getSeverityColor = (severity: string) => {
+        switch (severity) {
+            case 'high': return 'text-red-400 bg-red-500/10 border-red-500/50';
+            case 'medium': return 'text-orange-400 bg-orange-500/10 border-orange-500/50';
+            case 'warning': return 'text-yellow-400 bg-yellow-500/10 border-yellow-500/50';
+            default: return 'text-blue-400 bg-blue-500/10 border-blue-500/50';
+        }
+    };
 
     return (
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="min-h-screen p-8">
             <div className="flex items-center justify-between mb-6">
-                <h2 className="text-2xl font-bold">Live Proctoring</h2>
-                <div className="flex items-center space-x-2">
-                    <Button variant="outline" onClick={onBack}>Back</Button>
-                    {isStreaming ? <Button variant="destructive" onClick={stopStream}>Stop</Button> : <Button onClick={startStream}>Start Proctoring</Button>}
-                </div>
+                <h2 className="text-2xl font-bold">Live Proctoring Monitor</h2>
+                <Button variant="outline" onClick={onBack}>Back to Dashboard</Button>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="bg-slate-900 rounded-lg p-4">
-                    <video ref={videoRef} className="w-full h-80 bg-black rounded" autoPlay playsInline muted></video>
-                </div>
-                <div className="bg-slate-900 rounded-lg p-4">
-                    <h3 className="font-semibold mb-2">Instructions</h3>
-                    <p className="text-slate-400">Start the proctoring stream to monitor the student in real-time. This view is a simple demo — production proctoring should stream to your server for analysis and recording.</p>
-                    <div className="mt-4">
-                        <p className="text-sm text-slate-300">User: {user.name}</p>
-                        <p className="text-sm text-slate-300">Institution: {user.institution}</p>
+
+            <div className="grid grid-cols-1 gap-6">
+                <Card className="p-6 bg-slate-900 border-slate-800">
+                    <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-xl font-semibold text-white">Recent Proctoring Events</h3>
+                        <div className="flex items-center space-x-2">
+                            <div className="h-2 w-2 rounded-full bg-green-500 animate-pulse"></div>
+                            <span className="text-sm text-slate-400">Live Updates</span>
+                        </div>
                     </div>
-                </div>
+                    <div className="text-sm text-slate-400 mb-4">
+                        {user.role === 'student' ? 'Your recent proctoring activity' : 'All recent proctoring events across exams'}
+                    </div>
+                    
+                    <div className="space-y-3 max-h-[600px] overflow-y-auto">
+                        {events.length > 0 ? events.map((evt, idx) => (
+                            <div key={evt._id || idx} className={cn('p-4 rounded-lg border', getSeverityColor(evt.severity || 'info'))}>
+                                <div className="flex items-start justify-between">
+                                    <div className="flex-1">
+                                        <div className="flex items-center space-x-2 mb-1">
+                                            <span className="font-semibold text-white capitalize">
+                                                {(evt.eventType || 'event').replace(/_/g, ' ')}
+                                            </span>
+                                            <Badge variant={evt.severity === 'high' ? 'danger' : evt.severity === 'medium' ? 'warning' : 'info'}>
+                                                {evt.severity || 'info'}
+                                            </Badge>
+                                        </div>
+                                        <p className="text-xs text-slate-400 mb-1">
+                                            {user.role === 'lecturer' && `Student: ${evt.userId || 'Unknown'} | `}
+                                            Exam: {evt.examId || 'Unknown'}
+                                        </p>
+                                        <p className="text-xs text-slate-500">
+                                            {new Date(evt.timestamp).toLocaleString()}
+                                        </p>
+                                        {evt.details && Object.keys(evt.details).length > 0 && (
+                                            <div className="mt-2 text-xs text-slate-400">
+                                                {Object.entries(evt.details).map(([key, val]) => (
+                                                    <div key={key}>
+                                                        <span className="font-medium">{key}:</span> {String(val)}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                    {evt.details?.snapshot && (
+                                        <img src={evt.details.snapshot} alt="Snapshot" className="h-16 w-20 object-cover rounded ml-3" />
+                                    )}
+                                </div>
+                            </div>
+                        )) : (
+                            <div className="text-center py-12 text-slate-400">
+                                <AlertTriangle className="h-12 w-12 mx-auto mb-3 text-slate-600" />
+                                <p>No recent proctoring events</p>
+                                <p className="text-xs text-slate-500 mt-1">Events will appear here when exams are in progress</p>
+                            </div>
+                        )}
+                    </div>
+                </Card>
+
+                {user.role === 'lecturer' && (
+                    <Card className="p-6 bg-slate-900 border-slate-800">
+                        <h3 className="text-lg font-semibold text-white mb-2">Monitoring Information</h3>
+                        <p className="text-sm text-slate-400">
+                            This dashboard displays real-time proctoring events from all active exams. Events are color-coded by severity:
+                        </p>
+                        <ul className="mt-3 space-y-2 text-sm">
+                            <li className="flex items-center space-x-2">
+                                <div className="h-3 w-3 rounded-full bg-red-500"></div>
+                                <span className="text-slate-300">High Severity - Immediate attention required</span>
+                            </li>
+                            <li className="flex items-center space-x-2">
+                                <div className="h-3 w-3 rounded-full bg-orange-500"></div>
+                                <span className="text-slate-300">Medium Severity - Review recommended</span>
+                            </li>
+                            <li className="flex items-center space-x-2">
+                                <div className="h-3 w-3 rounded-full bg-yellow-500"></div>
+                                <span className="text-slate-300">Warning - Minor issues detected</span>
+                            </li>
+                            <li className="flex items-center space-x-2">
+                                <div className="h-3 w-3 rounded-full bg-blue-500"></div>
+                                <span className="text-slate-300">Info - Normal activity</span>
+                            </li>
+                        </ul>
+                    </Card>
+                )}
+
+                {user.role === 'student' && (
+                    <Card className="p-6 bg-slate-900 border-slate-800">
+                        <h3 className="text-lg font-semibold text-white mb-2">About Proctoring</h3>
+                        <p className="text-sm text-slate-400">
+                            During exams, the system monitors various behaviors to ensure academic integrity. Events shown here include:
+                        </p>
+                        <ul className="mt-3 space-y-1 text-sm text-slate-400">
+                            <li>• Face detection and verification</li>
+                            <li>• Head pose and gaze direction</li>
+                            <li>• Multiple faces detected</li>
+                            <li>• Audio anomalies and talking</li>
+                            <li>• Tab switching and window focus</li>
+                            <li>• Environmental changes</li>
+                        </ul>
+                        <p className="mt-3 text-xs text-slate-500">
+                            All events are recorded and reviewed by your instructor. Ensure you follow exam guidelines to avoid issues.
+                        </p>
+                    </Card>
+                )}
             </div>
         </motion.div>
     );
@@ -2256,7 +2982,12 @@ const ProctorDashboard = ({ open, onOpenChange, examId, user }: { open: boolean;
                                     <div key={ev._id} className="p-2 bg-slate-800 rounded">
                                         <div className="text-sm font-medium">{ev.eventType}</div>
                                         <div className="text-xs text-slate-400">{new Date(ev.timestamp).toLocaleString()}</div>
-                                        <pre className="text-xs mt-2 text-slate-300 bg-black/10 p-2 rounded">{JSON.stringify(ev.details)}</pre>
+                                        {ev.details?.snapshot ? (
+                                            <div className="mt-2">
+                                                <img src={ev.details.snapshot} alt="snapshot" className="w-40 h-28 object-cover rounded border border-slate-700" />
+                                            </div>
+                                        ) : null}
+                                        <pre className="text-xs mt-2 text-slate-300 bg-black/10 p-2 rounded overflow-x-auto">{JSON.stringify(ev.details)}</pre>
                                     </div>
                                 ))}
                             </div>

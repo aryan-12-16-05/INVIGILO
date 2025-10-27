@@ -23,6 +23,18 @@ except Exception as e:
     DEEPFACE_AVAILABLE = False
 import io
 
+# Attempt to load the fast face engine (InsightFace) with graceful fallback to DeepFace
+ENGINE_AVAILABLE = False
+engine = None
+try:
+    from face_engine import get_engine
+    engine = get_engine()
+    ENGINE_AVAILABLE = engine is not None
+except Exception as e:
+    print(f"Face engine unavailable: {e}")
+    engine = None
+    ENGINE_AVAILABLE = False
+
 # --- Your existing imports for proctoring ---
 try:
     from proctoring_module import (
@@ -53,8 +65,45 @@ DETECTOR_BACKEND = "retinaface"
 # --- Setup ---
 load_dotenv()
 app = Flask(__name__)
-CORS(app)
+# Enable CORS with explicit configuration to handle all origins and methods
+CORS(app, resources={r"/api/*": {"origins": "*", "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"]}})
 APP_START = datetime.datetime.utcnow()
+
+# Add a before_request hook to log all incoming requests
+@app.before_request
+def log_request():
+    print(f"[REQUEST] {request.method} {request.path} from {request.remote_addr}")
+    if request.method == 'OPTIONS':
+        print(f"[REQUEST] CORS preflight request")
+    return None
+
+# Add an after_request hook to ensure CORS headers are on all responses
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-User-Id')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    response.headers.add('Access-Control-Max-Age', '3600')
+    return response
+
+# Simple health check endpoint
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    return jsonify({"status": "ok", "timestamp": datetime.datetime.utcnow().isoformat()}), 200
+
+PROCTOR_STATE = {}
+"""
+In-memory rolling state for proctoring signals per (examId,userId):
+PROCTOR_STATE[(examId,userId)] = {
+    'poses': [(ts, headPose)],
+    'gazes': [(ts, gazeDirection)],
+    'mouths': [(ts, mouthStatus)],
+    'faces': [(ts, faceCount)],
+    'brightness': [(ts, avg_brightness)],
+    'last_emit': { 'event_key': ts }
+}
+Note: This is a best-effort cache for live sessions; it resets on server restart.
+"""
 
 # --- Database ---
 MONGO_URI = os.getenv("MONGO_URI")
@@ -67,6 +116,27 @@ users_collection = db['users']
 exams_collection = db['exams']
 proctor_events_collection = db['proctor_events']
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+settings_collection = db['settings']
+
+# Ensure important DB indexes for performance
+try:
+    proctor_events_collection.create_index([('examId', 1), ('timestamp', -1)])
+    proctor_events_collection.create_index([('examId', 1), ('userId', 1), ('timestamp', -1)])
+    exams_collection.create_index('completedBy')
+    users_collection.create_index('role')
+    users_collection.create_index('email', unique=False)
+    users_collection.create_index('phoneNumber', unique=False)
+    users_collection.create_index('studentId', sparse=True)
+    users_collection.create_index('lecturerId', sparse=True)
+    # Privacy/retention: expire proctoring events after a configurable window (default 30 days)
+    try:
+        ttl_days = int(os.getenv('PROCTOR_EVENT_TTL_DAYS', '30'))
+        if ttl_days > 0:
+            proctor_events_collection.create_index('timestamp', expireAfterSeconds=ttl_days * 24 * 3600)
+    except Exception as _e:
+        print(f"TTL index setup warning: {_e}")
+except Exception as e:
+    print(f"Index creation warning: {e}")
 
 # --- Helpers ---
 def serialize_doc(doc):
@@ -95,7 +165,8 @@ def decode_base64_image(data_url):
 @app.route('/api/register', methods=['POST'])
 def register_user():
     data = request.get_json()
-    required = ['fullName', 'email', 'phoneNumber', 'roleId', 'password', 'role', 'institution', 'department', 'imageDataUrl']
+    # imageDataUrl (single) OR imageDataUrls (list) is required for face enrollment
+    required = ['fullName', 'email', 'phoneNumber', 'roleId', 'password', 'role', 'institution', 'department']
     if not all(field in data for field in required):
         return jsonify({"error": "Missing required fields"}), 400
 
@@ -108,27 +179,52 @@ def register_user():
         return jsonify({"error": "User already exists"}), 409
 
     # --- Decode and process face image ---
-    image = decode_base64_image(data['imageDataUrl'])
-    if image is None:
+    # Collect one or more images for multi-sample enrollment
+    images: list = []
+    if data.get('imageDataUrls') and isinstance(data.get('imageDataUrls'), list):
+        for d in data['imageDataUrls']:
+            img = decode_base64_image(d)
+            if img is not None:
+                images.append(img)
+    elif data.get('imageDataUrl'):
+        img = decode_base64_image(data['imageDataUrl'])
+        if img is not None:
+            images.append(img)
+    if not images:
         return jsonify({"error": "Invalid image data"}), 400
 
     try:
-        # Try to extract face embedding using DeepFace (ArcFace) when available.
-        face_vector = None
-        if DEEPFACE_AVAILABLE and DeepFace is not None:
-            try:
-                embeddings = DeepFace.represent(
-                    img_path=image,
-                    model_name=MODEL_NAME,
-                    detector_backend=DETECTOR_BACKEND,
-                    enforce_detection=True
-                )
-                if not embeddings or not isinstance(embeddings, list):
-                    return jsonify({"error": "No face detected"}), 400
-                face_vector = embeddings[0]['embedding']
-            except Exception as e:
-                print(f"DeepFace representation failed during register: {e}")
-                # In dev environments we allow registration but mark faceVerified False
+        # Prefer fast InsightFace engine for embedding; fallback to DeepFace.
+        face_vectors = []
+        if ENGINE_AVAILABLE and engine is not None:
+            for img in images:
+                try:
+                    emb = engine.embed(img)
+                    if emb is not None:
+                        # Engine returns normalized embedding; store as list
+                        face_vectors.append(emb.tolist())
+                except Exception as e:
+                    print(f"InsightFace embedding failed during register: {e}")
+        # Fallback to DeepFace for any remaining images not embedded
+        if DEEPFACE_AVAILABLE and DeepFace is not None and len(face_vectors) < len(images):
+            for img in images:
+                try:
+                    embeddings = DeepFace.represent(
+                        img_path=img,
+                        model_name=MODEL_NAME,
+                        detector_backend=DETECTOR_BACKEND,
+                        enforce_detection=True
+                    )
+                    if embeddings and isinstance(embeddings, list):
+                        raw = embeddings[0]['embedding']
+                        # Normalize the DeepFace embedding to ensure consistency with InsightFace
+                        emb_arr = np.array(raw, dtype=np.float32)
+                        norm = np.linalg.norm(emb_arr)
+                        if norm > 0:
+                            emb_arr = emb_arr / norm
+                        face_vectors.append(emb_arr.tolist())
+                except Exception as e:
+                    print(f"DeepFace representation failed during register: {e}")
 
         hashed_pw = bcrypt.hashpw(data['password'].encode('utf-8'), bcrypt.gensalt())
 
@@ -140,8 +236,10 @@ def register_user():
             "password": hashed_pw,
             "institution": data['institution'],
             "department": data['department'],
-            "faceEmbedding": face_vector,
-            "faceVerified": bool(face_vector),
+            # Backcompat: keep the first embedding in faceEmbedding; store all in faceEmbeddings
+            "faceEmbedding": (face_vectors[0] if face_vectors else None),
+            "faceEmbeddings": face_vectors,
+            "faceVerified": bool(face_vectors),
             "isActive": True,
             "createdAt": datetime.datetime.utcnow()
         }
@@ -151,7 +249,15 @@ def register_user():
         else:
             new_user['lecturerId'] = data['roleId']
 
-        users_collection.insert_one(new_user)
+        result = users_collection.insert_one(new_user)
+        new_id = str(result.inserted_id)
+        new_user['_id'] = new_id
+        # Cache embedding in engine for faster verification
+        try:
+            if ENGINE_AVAILABLE and engine is not None and new_user.get('faceEmbedding'):
+                engine.user_cache[new_id] = np.array(new_user['faceEmbedding'], dtype=np.float32)
+        except Exception:
+            pass
         return jsonify({"message": "User registered successfully with face embedding!"}), 201
 
     except ValueError:
@@ -181,6 +287,19 @@ def login_user():
         return jsonify({"message": "Login successful", "user": user}), 200
     return jsonify({"error": "Invalid credentials"}), 401
 
+# Helper: face threshold from settings or env
+def get_face_threshold(default_val=0.58):
+    try:
+        cfg = settings_collection.find_one({'key': 'FACE_SIMILARITY_THRESHOLD'})
+        if cfg and isinstance(cfg.get('value'), (int, float)):
+            return float(cfg['value'])
+    except Exception:
+        pass
+    try:
+        return float(os.getenv('FACE_SIMILARITY_THRESHOLD', str(default_val)))
+    except Exception:
+        return float(default_val)
+
 # ✅ FACE VERIFICATION
 @app.route('/api/verify-face', methods=['POST'])
 def verify_face():
@@ -204,10 +323,6 @@ def verify_face():
     if image is None:
         return jsonify({"error": "Invalid image data"}), 400
     try:
-        # If DeepFace is not available in this environment, short-circuit verification
-        if not DEEPFACE_AVAILABLE or DeepFace is None:
-            return jsonify({"message": "Face verification unavailable in this environment", "verified": False, "similarity": 0.0}), 200
-
         # helper: create simple variants to account for lighting/contrast differences
         def make_variants(img):
             variants = []
@@ -236,22 +351,72 @@ def verify_face():
                 variants.append(clahe_img)
             except Exception:
                 pass
+            try:
+                # mild blur to reduce noise
+                blur = cv2.GaussianBlur(base, (3,3), 0)
+                variants.append(blur)
+            except Exception:
+                pass
+            try:
+                # gamma correction
+                gamma = 1.2
+                table = np.array([((i / 255.0) ** (1.0/gamma)) * 255 for i in np.arange(0, 256)]).astype('uint8')
+                gamma_img = cv2.LUT(base, table)
+                variants.append(gamma_img)
+            except Exception:
+                pass
             return variants
 
         variants = make_variants(image)
 
-        # compute embeddings for variants, pick the best similarity
-        stored_embedding = np.array(user['faceEmbedding'])
+        # Support multiple stored embeddings
+        stored_list = []
+        if user.get('faceEmbeddings') and isinstance(user.get('faceEmbeddings'), list):
+            try:
+                stored_list = [np.array(e, dtype=np.float32) for e in user['faceEmbeddings'] if isinstance(e, (list, tuple))]
+                # L2-normalize each stored embedding for consistent cosine similarity (in case old data isn't normalized)
+                stored_list = [e / np.linalg.norm(e) if np.linalg.norm(e) > 0 else e for e in stored_list]
+            except Exception:
+                stored_list = []
+        if not stored_list and user.get('faceEmbedding'):
+            emb = np.array(user['faceEmbedding'], dtype=np.float32)
+            norm = np.linalg.norm(emb)
+            if norm > 0:
+                emb = emb / norm
+            stored_list = [emb]
+
+        if ENGINE_AVAILABLE and engine is not None and stored_list:
+            # Use engine only for fast embeddings; apply our DB-configured threshold for final decision
+            _ok, max_sim, sims = engine.verify_any(stored_list, image_bgr=image, variants=variants)
+            THRESHOLD = get_face_threshold(0.56)
+            app.logger.info('Face verify (engine) for %s: similarities=%s, max=%s thr=%s', identifier, sims, max_sim, THRESHOLD)
+            if max_sim >= THRESHOLD:
+                return jsonify({"message": "Face verified successfully", "verified": True, "similarity": float(max_sim), "similarities": sims}), 200
+            else:
+                return jsonify({"message": "Face verification failed", "verified": False, "similarity": float(max_sim), "similarities": sims}), 401
+
+        # Fallback to DeepFace if engine not available
+        if not DEEPFACE_AVAILABLE or DeepFace is None:
+            return jsonify({"message": "Face verification unavailable in this environment", "verified": False, "similarity": 0.0}), 200
+
         similarities = []
+        if not stored_list:
+            return jsonify({"message": "No stored face data for user" , "verified": False, "similarities": []}), 200
+
         for v in variants:
             try:
                 emb_obj = DeepFace.represent(img_path=v, model_name=MODEL_NAME, detector_backend=DETECTOR_BACKEND, enforce_detection=False)
                 if not emb_obj or not isinstance(emb_obj, list):
                     continue
                 new_emb = np.array(emb_obj[0].get('embedding'))
-                denom = (np.linalg.norm(stored_embedding) * np.linalg.norm(new_emb))
-                sim = float(np.dot(stored_embedding, new_emb) / denom) if denom > 0 else 0.0
-                similarities.append(sim)
+                # Compare to all stored and keep best
+                best_sim = 0.0
+                for s in stored_list:
+                    denom = (np.linalg.norm(s) * np.linalg.norm(new_emb))
+                    sim = float(np.dot(s, new_emb) / denom) if denom > 0 else 0.0
+                    if sim > best_sim:
+                        best_sim = sim
+                similarities.append(best_sim)
             except Exception as e:
                 app.logger.debug('Variant embedding failed: %s', e)
                 continue
@@ -260,10 +425,9 @@ def verify_face():
             return jsonify({"message": "Face embedding extraction failed", "verified": False, "similarities": []}), 200
 
         max_sim = max(similarities)
-        app.logger.info('Face verify for %s: similarities=%s, max=%s', identifier, similarities, max_sim)
+        app.logger.info('Face verify (deepface) for %s: similarities=%s, max=%s', identifier, similarities, max_sim)
 
-        # Allow a slightly lower threshold when multiple variants are tried; still configurable
-        THRESHOLD = float(os.getenv('FACE_SIMILARITY_THRESHOLD', '0.58'))
+        THRESHOLD = get_face_threshold(0.58)
         if max_sim >= THRESHOLD:
             return jsonify({"message": "Face verified successfully", "verified": True, "similarity": float(max_sim), "similarities": similarities}), 200
         else:
@@ -285,58 +449,89 @@ def proctor_activity():
     data = request.get_json()
     image_data_url = data.get('imageDataUrl')
     user_id = data.get('userId')
+    exam_id = str(data.get('examId') or '')
 
     if not image_data_url or not user_id:
         return jsonify({"error": "Image data and User ID are required"}), 400
-    
+
     frame = decode_base64_image(image_data_url)
     if frame is None:
         return jsonify({"error": "Invalid image data"}), 400
-        
-    face_count, faces = detectFace(frame)
-    
-    if face_count == 0:
-        return jsonify({"faceCount": 0, "error": "No face detected"}), 200
-    if face_count > 1:
-        return jsonify({"faceCount": face_count, "error": "Multiple faces detected"}), 200
 
-    # --- Live Identity Verification (DeepFace ArcFace) ---
+    # Face count for basic checks
+    face_count, faces = detectFace(frame)
+
+    # Identity verification (best-effort, no hard failure)
     identity_verified = False
     similarity_score = None
     try:
         user = users_collection.find_one({'_id': ObjectId(user_id)})
-        if user and user.get('faceEmbedding') and DEEPFACE_AVAILABLE and DeepFace is not None:
-            try:
-                stored_embedding = np.array(user['faceEmbedding'])
+        if user and (user.get('faceEmbeddings') or user.get('faceEmbedding')):
+            stored_embedding = np.array(user['faceEmbedding'], dtype=np.float32)
 
-                # Create small variants similar to verify_face to be tolerant to lighting/pose
-                def _make_variants_local(img):
-                    vs = []
-                    try:
-                        b = cv2.resize(img, (160, 160))
-                    except Exception:
-                        b = img
-                    vs.append(b)
-                    try:
-                        hsv = cv2.cvtColor(b, cv2.COLOR_BGR2HSV).astype('float32')
-                        hsv[...,2] = np.clip(hsv[...,2] * 1.25, 0, 255)
-                        bright = cv2.cvtColor(hsv.astype('uint8'), cv2.COLOR_HSV2BGR)
-                        vs.append(bright)
-                    except Exception:
-                        pass
-                    try:
-                        lab = cv2.cvtColor(b, cv2.COLOR_BGR2LAB)
-                        l, a, ba = cv2.split(lab)
-                        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-                        cl = clahe.apply(l)
-                        limg = cv2.merge((cl,a,ba))
-                        clahe_img = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
-                        vs.append(clahe_img)
-                    except Exception:
-                        pass
-                    return vs
+            # Prepare tolerant variants
+            def _make_variants_local(img):
+                vs = []
+                try:
+                    b = cv2.resize(img, (160, 160))
+                except Exception:
+                    b = img
+                vs.append(b)
+                try:
+                    hsv = cv2.cvtColor(b, cv2.COLOR_BGR2HSV).astype('float32')
+                    hsv[...,2] = np.clip(hsv[...,2] * 1.25, 0, 255)
+                    bright = cv2.cvtColor(hsv.astype('uint8'), cv2.COLOR_HSV2BGR)
+                    vs.append(bright)
+                except Exception:
+                    pass
+                try:
+                    lab = cv2.cvtColor(b, cv2.COLOR_BGR2LAB)
+                    l, a, ba = cv2.split(lab)
+                    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+                    cl = clahe.apply(l)
+                    limg = cv2.merge((cl,a,ba))
+                    clahe_img = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
+                    vs.append(clahe_img)
+                except Exception:
+                    pass
+                try:
+                    blur = cv2.GaussianBlur(b, (3,3), 0)
+                    vs.append(blur)
+                except Exception:
+                    pass
+                try:
+                    gamma = 1.2
+                    table = np.array([((i / 255.0) ** (1.0/gamma)) * 255 for i in np.arange(0, 256)]).astype('uint8')
+                    gamma_img = cv2.LUT(b, table)
+                    vs.append(gamma_img)
+                except Exception:
+                    pass
+                return vs
 
-                variants = _make_variants_local(frame)
+            # Build stored_list from faceEmbeddings (preferred) or faceEmbedding
+            stored_list = []
+            if user.get('faceEmbeddings') and isinstance(user.get('faceEmbeddings'), list):
+                try:
+                    stored_list = [np.array(e, dtype=np.float32) for e in user['faceEmbeddings'] if isinstance(e, (list, tuple))]
+                    # L2-normalize each for consistent cosine similarity
+                    stored_list = [e / np.linalg.norm(e) if np.linalg.norm(e) > 0 else e for e in stored_list]
+                except Exception:
+                    stored_list = []
+            if not stored_list and user.get('faceEmbedding'):
+                emb = np.array(user['faceEmbedding'], dtype=np.float32)
+                norm = np.linalg.norm(emb)
+                if norm > 0:
+                    emb = emb / norm
+                stored_list = [emb]
+
+            variants = _make_variants_local(frame)
+            if ENGINE_AVAILABLE and engine is not None and stored_list:
+                _ok, max_sim, sims = engine.verify_any(stored_list, image_bgr=frame, variants=variants)
+                similarity_score = float(max_sim)
+                THRESH_P = get_face_threshold(0.56)
+                identity_verified = similarity_score >= THRESH_P
+                app.logger.info('Proctor identity (engine) for %s similarities=%s max=%s thr=%s', user_id, sims, similarity_score, THRESH_P)
+            elif DEEPFACE_AVAILABLE and DeepFace is not None:
                 sims = []
                 for v in variants:
                     try:
@@ -344,29 +539,27 @@ def proctor_activity():
                         if not emb_o or not isinstance(emb_o, list):
                             continue
                         new_embedding = np.array(emb_o[0].get('embedding'))
-                        denom = (np.linalg.norm(stored_embedding) * np.linalg.norm(new_embedding))
-                        sim = float(np.dot(stored_embedding, new_embedding) / denom) if denom > 0 else 0.0
-                        sims.append(sim)
+                        # best vs stored_list
+                        best_sim = 0.0
+                        for s in stored_list:
+                            denom = (np.linalg.norm(s) * np.linalg.norm(new_embedding))
+                            sim = float(np.dot(s, new_embedding) / denom) if denom > 0 else 0.0
+                            if sim > best_sim:
+                                best_sim = sim
+                        sims.append(best_sim)
                     except Exception as e:
                         app.logger.debug('Proctor variant embed failed: %s', e)
                         continue
-
                 if sims:
                     similarity_score = float(max(sims))
-                    app.logger.info('Proctor identity check for %s similarities=%s max=%s', user_id, sims, similarity_score)
-                    THRESH = float(os.getenv('FACE_SIMILARITY_THRESHOLD', '0.58'))
+                    app.logger.info('Proctor identity (deepface) for %s similarities=%s max=%s', user_id, sims, similarity_score)
+                    THRESH = get_face_threshold(0.58)
                     if similarity_score >= THRESH:
                         identity_verified = True
-            except Exception as e:
-                print(f"DeepFace check failed during proctoring: {e}")
-                identity_verified = False
-        else:
-            # No face embedding available or DeepFace not present; skip identity verification
-            identity_verified = False
     except Exception as e:
         print(f"Error during live identity verification: {e}")
-        
-    # --- Proctoring Behavioral Checks (unchanged) ---
+
+    # Behavioral checks (unchanged)
     results = {
         "faceCount": face_count,
         "identityVerified": identity_verified,
@@ -376,6 +569,83 @@ def proctor_activity():
         "mouthStatus": mouthTrack(faces, frame),
         "headPose": head_pose_detection(faces, frame)
     }
+    # Compute avg brightness to approximate environment changes
+    try:
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        avg_b = float(np.mean(hsv[...,2]))
+    except Exception:
+        avg_b = None
+
+    # Advanced event logic: rolling windows and debounced emits (if examId provided)
+    try:
+        if exam_id and user_id:
+            key = (str(exam_id), str(user_id))
+            st = PROCTOR_STATE.get(key) or {'poses': [], 'gazes': [], 'mouths': [], 'faces': [], 'brightness': [], 'last_emit': {}}
+            now = datetime.datetime.utcnow()
+            # append current metrics
+            st['poses'].append((now, results['headPose']))
+            st['gazes'].append((now, results['gazeDirection']))
+            st['mouths'].append((now, results['mouthStatus']))
+            st['faces'].append((now, face_count))
+            if avg_b is not None:
+                st['brightness'].append((now, avg_b))
+            # keep last 30s window only
+            cutoff = now - datetime.timedelta(seconds=30)
+            for k in ['poses','gazes','mouths','faces','brightness']:
+                st[k] = [(t,v) for (t,v) in st[k] if t >= cutoff]
+
+            def recently_emitted(ev_type: str, cooldown_s=30):
+                ts = st['last_emit'].get(ev_type)
+                return bool(ts and (now - ts).total_seconds() < cooldown_s)
+
+            def emit(ev_type: str, details: dict, severity: str):
+                if recently_emitted(ev_type):
+                    return
+                proctor_events_collection.insert_one({
+                    'examId': str(exam_id), 'userId': str(user_id), 'eventType': ev_type,
+                    'details': details, 'severity': severity, 'timestamp': now
+                })
+                st['last_emit'][ev_type] = now
+
+            # Head pose: frequent changes within window
+            pose_vals = [p for _, p in st['poses']]
+            if len(pose_vals) >= 5:
+                changes = sum(1 for i in range(1,len(pose_vals)) if pose_vals[i] != pose_vals[i-1])
+                if changes >= 4:
+                    emit('head_pose_excess', {'changes': changes}, 'medium')
+
+            # Gaze aversion: off-center majority
+            gaze_vals = [g for _, g in st['gazes']]
+            if len(gaze_vals) >= 6:
+                off = sum(1 for g in gaze_vals if g and str(g).lower() != 'center')
+                if off >= 5:
+                    emit('gaze_aversion', {'off_center': off, 'window': len(gaze_vals)}, 'medium')
+
+            # Talking / mouth open pattern
+            mouth_vals = [m for _, m in st['mouths']]
+            if len(mouth_vals) >= 6:
+                talking = sum(1 for m in mouth_vals if m and str(m).lower() in ('open','talking','speaking'))
+                if talking >= 5:
+                    emit('talking', {'count': talking}, 'medium')
+
+            # Multiple faces
+            if face_count and face_count > 1:
+                emit('multiple_faces', {'count': face_count}, 'high')
+
+            # Face missing/occlusion heuristic: 0 faces for several recent frames
+            face_vals = [c for _, c in st['faces']]
+            if len(face_vals) >= 5 and all((c or 0) == 0 for c in face_vals[-5:]):
+                emit('face_missing', {'consecutive': 5}, 'medium')
+
+            # Environment change: brightness variance
+            if len(st['brightness']) >= 6:
+                vals = [v for _, v in st['brightness']]
+                if max(vals) - min(vals) > 40.0:  # heuristic threshold
+                    emit('environment_change', {'min': float(min(vals)), 'max': float(max(vals))}, 'info')
+
+            PROCTOR_STATE[key] = st
+    except Exception as e:
+        app.logger.debug('Advanced proctor logic error: %s', e)
 
     return jsonify(results), 200
 
@@ -446,109 +716,136 @@ def delete_exam(exam_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/exams/<exam_id>/submit', methods=['POST'])
+@app.route('/api/exams/<exam_id>/submit', methods=['POST', 'OPTIONS'])
 def submit_exam(exam_id):
-    data = request.get_json()
-    user_id = data.get('userId')
-    answers = data.get('answers') 
-
-    if not user_id or not answers:
-        return jsonify({"error": "User ID and answers are required"}), 400
+    # Handle OPTIONS preflight request explicitly
+    if request.method == 'OPTIONS':
+        print(f"[SUBMIT] Handling OPTIONS preflight for exam {exam_id}")
+        return '', 204
     
-    exam = exams_collection.find_one({'_id': ObjectId(exam_id)})
-    if not exam:
-        return jsonify({"error": "Exam not found"}), 404
+    print(f"[SUBMIT] ========== SUBMIT ENDPOINT HIT ==========")
+    print(f"[SUBMIT] Received POST submission request for exam {exam_id}")
+    
+    try:
+        # Get JSON data
+        print(f"[SUBMIT] Attempting to parse JSON body...")
+        data = request.get_json(force=True)
+        print(f"[SUBMIT] JSON parsed successfully")
+        
+        if not data:
+            print(f"[SUBMIT] ERROR: No JSON data in request body")
+            return jsonify({"error": "No data provided"}), 400
+            
+        user_id = data.get('userId')
+        answers = data.get('answers')
+        
+        print(f"[SUBMIT] User ID: {user_id}")
+        print(f"[SUBMIT] Answers count: {len(answers) if answers else 0}")
 
-    total_marks = 0
-    score = 0
-    per_question = []
+        if not user_id or not answers:
+            print(f"[SUBMIT] ERROR: Missing user_id or answers")
+            return jsonify({"error": "User ID and answers are required"}), 400
+        
+        print(f"[SUBMIT] Fetching exam from database...")
+        exam = exams_collection.find_one({'_id': ObjectId(exam_id)})
+            
+        if not exam:
+            print(f"[SUBMIT] ERROR: Exam not found: {exam_id}")
+            return jsonify({"error": "Exam not found"}), 404
 
-    for question in exam.get('questions', []):
-        q_id = str(question['_id'])
-        marks = question.get('marks', 0) or 0
-        total_marks += marks
-        user_answer = answers.get(q_id)
-        correct = False
+        print(f"[SUBMIT] Exam found: {exam.get('title', 'N/A')}")
+        print(f"[SUBMIT] Grading {len(exam.get('questions', []))} questions...")
+        
+        total_marks = 0
+        score = 0
+        per_question = []
 
-        # Robust comparison by question type
-        qtype = question.get('type')
-        correct_answer = question.get('correctAnswer')
+        for question in exam.get('questions', []):
+            q_id = str(question['_id'])
+            marks = question.get('marks', 0) or 0
+            total_marks += marks
+            user_answer = answers.get(q_id)
+            correct = False
 
-        try:
-            if user_answer is not None:
-                # Multiple choice: support numeric (1-based) or option-text answers
-                if qtype == 'multiple-choice':
-                    if isinstance(correct_answer, (int, float)):
-                        try:
-                            if int(user_answer) == int(correct_answer):
-                                correct = True
-                        except Exception:
-                            # fallback to string compare
-                            if str(user_answer) == str(correct_answer):
-                                correct = True
-                    else:
-                        # correct_answer might be option text; attempt to match
-                        if isinstance(user_answer, (int, float)):
-                            # if numeric, map to option text (1-based index)
+            # Robust comparison by question type
+            qtype = question.get('type')
+            correct_answer = question.get('correctAnswer')
+
+            try:
+                if user_answer is not None:
+                    # Multiple choice: support numeric (1-based) or option-text answers
+                    if qtype == 'multiple-choice':
+                        if isinstance(correct_answer, (int, float)):
                             try:
-                                idx = int(user_answer) - 1
-                                opts = question.get('options') or []
-                                if 0 <= idx < len(opts) and str(opts[idx]) == str(correct_answer):
+                                if int(user_answer) == int(correct_answer):
                                     correct = True
                             except Exception:
-                                pass
+                                # fallback to string compare
+                                if str(user_answer) == str(correct_answer):
+                                    correct = True
                         else:
-                            if str(user_answer) == str(correct_answer):
-                                correct = True
+                            # correct_answer might be option text; attempt to match
+                            if isinstance(user_answer, (int, float)):
+                                # if numeric, map to option text (1-based index)
+                                try:
+                                    idx = int(user_answer) - 1
+                                    opts = question.get('options') or []
+                                    if 0 <= idx < len(opts) and str(opts[idx]) == str(correct_answer):
+                                        correct = True
+                                except Exception:
+                                    pass
+                            else:
+                                if str(user_answer) == str(correct_answer):
+                                    correct = True
 
-                elif qtype == 'true-false':
-                    # Coerce to boolean
-                    ua_bool = None
-                    if isinstance(user_answer, bool):
-                        ua_bool = user_answer
-                    else:
-                        # Accept 'true'/'false' strings or '1'/'0'
-                        s = str(user_answer).lower()
-                        if s in ('true', '1', 'yes'): ua_bool = True
-                        elif s in ('false', '0', 'no'): ua_bool = False
-                    if ua_bool is not None and bool(correct_answer) == ua_bool:
-                        correct = True
-
-                else:
-                    # Short answer / essay: perform trimmed case-insensitive match for small keywords
-                    if correct_answer is not None and str(correct_answer).strip() != '':
-                        if str(user_answer).strip().lower() == str(correct_answer).strip().lower():
+                    elif qtype == 'true-false':
+                        # Coerce to boolean
+                        ua_bool = None
+                        if isinstance(user_answer, bool):
+                            ua_bool = user_answer
+                        else:
+                            # Accept 'true'/'false' strings or '1'/'0'
+                            s = str(user_answer).lower()
+                            if s in ('true', '1', 'yes'): ua_bool = True
+                            elif s in ('false', '0', 'no'): ua_bool = False
+                        if ua_bool is not None and bool(correct_answer) == ua_bool:
                             correct = True
+
                     else:
-                        # No ground truth: treat as not auto-gradable
-                        correct = False
+                        # Short answer / essay: perform trimmed case-insensitive match for small keywords
+                        if correct_answer is not None and str(correct_answer).strip() != '':
+                            if str(user_answer).strip().lower() == str(correct_answer).strip().lower():
+                                correct = True
+                        else:
+                            # No ground truth: treat as not auto-gradable
+                            correct = False
 
-        except Exception as e:
-            print(f"Error comparing answers for q {q_id}: {e}")
+            except Exception as e:
+                print(f"[SUBMIT] Error comparing answers for q {q_id}: {e}")
 
-        if correct:
-            score += marks
+            if correct:
+                score += marks
 
-        per_question.append({
-            'questionId': q_id,
-            'question': question.get('question'),
-            'given': user_answer,
-            'expected': correct_answer,
-            'marks': marks,
-            'correct': correct
-        })
+            per_question.append({
+                'questionId': q_id,
+                'question': question.get('question'),
+                'given': user_answer,
+                'expected': correct_answer,
+                'marks': marks,
+                'correct': correct
+            })
 
-    percentage = round((score / total_marks) * 100) if total_marks > 0 else 0
+        percentage = round((score / total_marks) * 100) if total_marks > 0 else 0
 
-    attempt_record = {
-        'userId': user_id,
-        'score': percentage,
-        'completedAt': datetime.datetime.utcnow().isoformat(),
-        'perQuestion': per_question
-    }
+        attempt_record = {
+            'userId': user_id,
+            'score': percentage,
+            'completedAt': datetime.datetime.utcnow().isoformat(),
+            'perQuestion': per_question
+        }
 
-    # Store attempt and mark this user as completed for this exam
-    try:
+        # Store attempt and mark this user as completed for this exam
+        print(f"[SUBMIT] Saving attempt to database...")
         exams_collection.update_one(
             {'_id': ObjectId(exam_id)},
             {
@@ -556,15 +853,21 @@ def submit_exam(exam_id):
                 '$addToSet': {'completedBy': user_id}
             }
         )
-    except Exception as e:
-        print(f"Failed to persist attempt for exam {exam_id}: {e}")
+        print(f"[SUBMIT] Successfully saved attempt")
 
-    return jsonify({
-        "message": "Exam submitted successfully!",
-        "score": percentage,
-        "totalMarks": total_marks,
-        "perQuestion": per_question
-    }), 200
+        print(f"[SUBMIT] Returning success response with score {percentage}%")
+        return jsonify({
+            "message": "Exam submitted successfully!",
+            "score": percentage,
+            "totalMarks": total_marks,
+            "perQuestion": per_question
+        }), 200
+        
+    except Exception as e:
+        print(f"[SUBMIT] CRITICAL ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/exams', methods=['GET'])
 def get_exams():
@@ -814,10 +1117,18 @@ def record_proctor_event():
         'object_detected': 'high',
         'head_pose': 'medium',
         'gaze': 'medium',
-        'blink': 'low'
+        'blink': 'low',
+        # Advanced events
+        'head_pose_excess': 'medium',
+        'gaze_aversion': 'medium',
+        'talking': 'medium',
+        'face_missing': 'medium',
+        'environment_change': 'info',
+        'tab_switch': 'warning'
     }
     severity = severity_map.get(event_type, 'low')
 
+    snapshot = data.get('snapshot')  # Optional small data URL image for evidence
     event = {
         'examId': str(data['examId']),
         'userId': str(data['userId']),
@@ -826,6 +1137,13 @@ def record_proctor_event():
         'severity': severity,
         'timestamp': datetime.datetime.utcnow()
     }
+    if snapshot and isinstance(snapshot, str):
+        # Store snapshot under details to keep schema simple
+        try:
+            event['details'] = event.get('details', {})
+            event['details']['snapshot'] = snapshot
+        except Exception:
+            pass
     try:
         proctor_events_collection.insert_one(event)
         return jsonify({'message': 'Event recorded'}), 201
@@ -974,6 +1292,129 @@ def get_proctoring_recent(exam_id):
         return jsonify({'events': events}), 200
     except Exception as e:
         print(f"Error fetching recent proctor events: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+# --- Recent Global Proctor Events ---
+@app.route('/api/proctoring/recent-global', methods=['GET'])
+def get_proctoring_recent_global():
+    """Return newest proctoring events across all exams since a given ISO timestamp.
+    Requires lecturer role. Sorted newest-first and limited by ?limit=.
+    """
+    requester = request.headers.get('X-User-Id')
+    if not requester:
+        return jsonify({'error': 'X-User-Id header required'}), 403
+    try:
+        req_user = users_collection.find_one({'_id': ObjectId(requester)}) if ObjectId.is_valid(requester) else None
+    except Exception:
+        req_user = None
+    if not req_user or req_user.get('role') != 'lecturer':
+        return jsonify({'error': 'Forbidden: lecturer role required'}), 403
+
+    since = request.args.get('since')
+    limit = int(request.args.get('limit', 100))
+    q = {}
+    if since:
+        try:
+            since_dt = datetime.datetime.fromisoformat(since)
+            q['timestamp'] = {'$gt': since_dt}
+        except Exception:
+            pass
+    try:
+        docs = list(proctor_events_collection.find(q).sort('timestamp', -1).limit(limit))
+        events = []
+        for d in docs:
+            ev = d.copy()
+            ev['_id'] = str(ev.get('_id'))
+            ts = ev.get('timestamp')
+            if isinstance(ts, datetime.datetime):
+                ev['timestamp'] = ts.isoformat()
+            events.append(ev)
+        return jsonify({'events': events}), 200
+    except Exception as e:
+        print(f"Error fetching recent global proctor events: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+# --- Recent Proctor Events for a specific user (student view) ---
+@app.route('/api/proctoring/recent', methods=['GET'])
+def get_proctoring_recent_user():
+    """Return proctoring events for a specific user across all their exams.
+    Query params: userId=<id>, limit=<num>, since=<iso_timestamp>
+    Students can view their own events.
+    """
+    user_id = request.args.get('userId')
+    if not user_id:
+        return jsonify({'error': 'userId is required'}), 400
+    
+    # Verify the requester is either the user themselves or a lecturer
+    requester = request.headers.get('X-User-Id')
+    if not requester:
+        return jsonify({'error': 'X-User-Id header required'}), 403
+    
+    try:
+        req_user = users_collection.find_one({'_id': ObjectId(requester)}) if ObjectId.is_valid(requester) else None
+    except Exception:
+        req_user = None
+    
+    if not req_user:
+        return jsonify({'error': 'Unauthorized'}), 403
+    
+    # Allow if requester is the user themselves or a lecturer
+    is_self = str(requester) == str(user_id)
+    is_lecturer = req_user.get('role') == 'lecturer'
+    
+    if not (is_self or is_lecturer):
+        return jsonify({'error': 'Forbidden'}), 403
+
+    since = request.args.get('since')
+    limit = int(request.args.get('limit', 100))
+    q = {'userId': str(user_id)}
+    if since:
+        try:
+            since_dt = datetime.datetime.fromisoformat(since)
+            q['timestamp'] = {'$gt': since_dt}
+        except Exception:
+            pass
+
+    try:
+        docs = list(proctor_events_collection.find(q).sort('timestamp', -1).limit(limit))
+        events = []
+        for d in docs:
+            ev = d.copy()
+            ev['_id'] = str(ev.get('_id'))
+            ts = ev.get('timestamp')
+            if isinstance(ts, datetime.datetime):
+                ev['timestamp'] = ts.isoformat()
+            events.append(ev)
+        return jsonify({'events': events}), 200
+    except Exception as e:
+        print(f"Error fetching recent user proctor events: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+# --- Student Attempt Retrieval ---
+@app.route('/api/exams/<exam_id>/attempt', methods=['GET'])
+def get_student_attempt(exam_id):
+    """Return the attempt for a specific user on a given exam.
+    Query param: userId=<id>
+    """
+    user_id = request.args.get('userId')
+    if not user_id:
+        return jsonify({'error': 'userId is required'}), 400
+    try:
+        exam = exams_collection.find_one({'_id': ObjectId(exam_id)})
+        if not exam:
+            return jsonify({'error': 'Exam not found'}), 404
+        attempts = exam.get('attempts', []) or []
+        for a in reversed(attempts):
+            if str(a.get('userId')) == str(user_id):
+                att = a.copy()
+                if isinstance(att.get('completedAt'), datetime.datetime):
+                    att['completedAt'] = att['completedAt'].isoformat()
+                return jsonify({'attempt': att}), 200
+        return jsonify({'attempt': None}), 200
+    except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 # --- AI Question Generation ---
@@ -1276,6 +1717,53 @@ def debug_set_selected_model():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/admin/lecturers/<lect_id>', methods=['DELETE'])
+def admin_delete_lecturer(lect_id):
+    """Delete a lecturer and cascade-delete all their data: exams, attempts, proctor events.
+    Note: This is a best-effort cascading delete without multi-document transactions (unless running on a replica set).
+    """
+    # Require lecturer requester (could be extended to admin-only in future)
+    requester = request.headers.get('X-User-Id')
+    if not requester:
+        return jsonify({'error': 'X-User-Id header required'}), 403
+    try:
+        req_user = users_collection.find_one({'_id': ObjectId(requester)}) if ObjectId.is_valid(requester) else None
+    except Exception:
+        req_user = None
+    if not req_user or req_user.get('role') != 'lecturer':
+        return jsonify({'error': 'Forbidden: lecturer role required'}), 403
+
+    try:
+        user = users_collection.find_one({'_id': ObjectId(lect_id)}) if ObjectId.is_valid(lect_id) else None
+        if not user or user.get('role') != 'lecturer':
+            return jsonify({'error': 'Lecturer not found'}), 404
+
+        # Find all exams by this lecturer
+        exam_docs = list(exams_collection.find({'lecturerId': lect_id}))
+        exam_ids = [str(d.get('_id')) for d in exam_docs]
+
+        # Delete proctor events for these exams
+        pe_res = {'deletedCount': 0}
+        if exam_ids:
+            pe_res = proctor_events_collection.delete_many({'examId': {'$in': exam_ids}})
+
+        # Delete exams
+        ex_res = exams_collection.delete_many({'lecturerId': lect_id})
+
+        # Finally, delete the lecturer account
+        u_res = users_collection.delete_one({'_id': ObjectId(lect_id)})
+
+        return jsonify({
+            'message': 'Lecturer and related data deleted',
+            'deletedProctorEvents': getattr(pe_res, 'deleted_count', 0),
+            'deletedExams': getattr(ex_res, 'deleted_count', 0),
+            'deletedLecturer': getattr(u_res, 'deleted_count', 0)
+        }), 200
+    except Exception as e:
+        print(f"Error deleting lecturer {lect_id}: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/users/<user_id>', methods=['PUT'])
 def update_user(user_id):
     """Update user profile fields. Allowed fields: name, phoneNumber, institution, department, year, studentId, lecturerId."""
@@ -1298,6 +1786,109 @@ def update_user(user_id):
         return jsonify({'message': 'User updated', 'user': user}), 200
     except Exception as e:
         print(f"Error updating user {user_id}: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/users/<user_id>/face-samples', methods=['PUT'])
+def add_face_samples(user_id):
+    """Add one or more face samples to the user's enrollment. Enforces max samples.
+    Body: { imageDataUrls: [dataUrl, ...] }
+    """
+    data = request.get_json()
+    urls = data.get('imageDataUrls') if data else None
+    if not urls or not isinstance(urls, list):
+        return jsonify({'error': 'imageDataUrls (array) is required'}), 400
+    max_samples = int(os.getenv('FACE_SAMPLES_MAX', '5'))
+    try:
+        user = users_collection.find_one({'_id': ObjectId(user_id)})
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+        current = user.get('faceEmbeddings', []) or []
+        if len(current) >= max_samples:
+            return jsonify({'error': f'Max samples reached ({max_samples})'}), 400
+
+        new_vecs = []
+        # Embed each
+        for u in urls:
+            img = decode_base64_image(u)
+            if img is None:
+                continue
+            emb = None
+            if ENGINE_AVAILABLE and engine is not None:
+                try:
+                    e = engine.embed(img)
+                    if e is not None:
+                        emb = e.tolist()
+                except Exception:
+                    emb = None
+            if emb is None and DEEPFACE_AVAILABLE and DeepFace is not None:
+                try:
+                    reprs = DeepFace.represent(img_path=img, model_name=MODEL_NAME, detector_backend=DETECTOR_BACKEND, enforce_detection=True)
+                    if reprs and isinstance(reprs, list):
+                        raw = reprs[0]['embedding']
+                        # Normalize DeepFace embedding for consistency
+                        emb_arr = np.array(raw, dtype=np.float32)
+                        norm = np.linalg.norm(emb_arr)
+                        if norm > 0:
+                            emb_arr = emb_arr / norm
+                        emb = emb_arr.tolist()
+                except Exception:
+                    emb = None
+            if emb is not None:
+                new_vecs.append(emb)
+            if len(current) + len(new_vecs) >= max_samples:
+                break
+
+        if not new_vecs:
+            return jsonify({'error': 'No valid face samples were added'}), 400
+
+        updated = current + new_vecs
+        # Ensure first faceEmbedding is set for backcompat if missing
+        update = {'faceEmbeddings': updated}
+        if not user.get('faceEmbedding') and len(updated) > 0:
+            update['faceEmbedding'] = updated[0]
+        users_collection.update_one({'_id': ObjectId(user_id)}, {'$set': update})
+        return jsonify({'message': 'Samples added', 'count': len(updated), 'added': len(new_vecs), 'max': max_samples}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/admin/settings/face-threshold', methods=['GET'])
+def get_face_threshold_setting():
+    requester = request.headers.get('X-User-Id')
+    if not requester:
+        return jsonify({'error': 'X-User-Id header required'}), 403
+    try:
+        req_user = users_collection.find_one({'_id': ObjectId(requester)}) if ObjectId.is_valid(requester) else None
+    except Exception:
+        req_user = None
+    if not req_user or req_user.get('role') != 'lecturer':
+        return jsonify({'error': 'Forbidden: lecturer role required'}), 403
+    return jsonify({'threshold': get_face_threshold()}), 200
+
+
+@app.route('/api/admin/settings/face-threshold', methods=['PUT'])
+def set_face_threshold_setting():
+    requester = request.headers.get('X-User-Id')
+    if not requester:
+        return jsonify({'error': 'X-User-Id header required'}), 403
+    try:
+        req_user = users_collection.find_one({'_id': ObjectId(requester)}) if ObjectId.is_valid(requester) else None
+    except Exception:
+        req_user = None
+    if not req_user or req_user.get('role') != 'lecturer':
+        return jsonify({'error': 'Forbidden: lecturer role required'}), 403
+    body = request.get_json() or {}
+    try:
+        thr = float(body.get('threshold'))
+        if thr <= 0 or thr > 1:
+            return jsonify({'error': 'Threshold must be between 0 and 1'}), 400
+    except Exception:
+        return jsonify({'error': 'Invalid threshold'}), 400
+    try:
+        settings_collection.update_one({'key': 'FACE_SIMILARITY_THRESHOLD'}, {'$set': {'key': 'FACE_SIMILARITY_THRESHOLD', 'value': thr}}, upsert=True)
+        return jsonify({'message': 'Threshold updated', 'threshold': thr}), 200
+    except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 
@@ -1335,16 +1926,38 @@ if __name__ == '__main__':
 
     sys.excepthook = log_uncaught_exceptions
 
+    print(f"About to start Flask server with threading enabled...")
+    print(f"Flask app object: {app}")
+    print(f"Flask routes registered: {[str(rule) for rule in app.url_map.iter_rules()][:5]}")  # Show first 5 routes
+    
     # Run the app inside a restart loop so transient errors don't silently close the terminal.
     max_restarts = 3
     restarts = 0
     while True:
         try:
-            # Avoid Flask reloader spawning extra processes which can close parent terminals on Windows.
-            app.run(host='0.0.0.0', port=port, debug=DEV_MODE, use_reloader=False)
+            # Enable threaded mode to handle multiple concurrent requests
+            # This is critical for exam submissions to work while proctoring is active
+            print(f"Starting Flask on http://0.0.0.0:{port} with threading={True}")
+            import sys
+            sys.stdout.flush()  # Force flush output
+            
+            # Configure Flask to use threaded mode
+            print("Calling app.run() with threaded=True...")
+            app.run(
+                host='0.0.0.0',
+                port=port,
+                debug=False,
+                use_reloader=False,
+                threaded=True,
+                processes=1
+            )
+            print("Flask has exited normally")
             break
         except Exception as e:
             app.logger.exception('Flask server crashed with exception: %s', e)
+            print(f"Flask crashed: {e}")
+            import traceback
+            traceback.print_exc()
             restarts += 1
             if restarts >= max_restarts:
                 print(f"Server crashed {restarts} times; giving up. See {log_file} for details.")

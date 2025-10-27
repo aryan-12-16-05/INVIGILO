@@ -14,3 +14,5 @@ imutils
 pyaudio
 deepface
 tf-keras
+insightface
+onnxruntime

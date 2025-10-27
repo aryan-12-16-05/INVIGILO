@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { ClipboardList, User, Monitor, PlusCircle, BrainCircuit, Users, HelpCircle } from 'lucide-react';
 
 const cn = (...classes: (string | undefined | null | false)[]) => classes.filter(Boolean).join(' ');
@@ -14,6 +14,38 @@ export type SidebarAction =
   | 'live-proctoring';
 
 export default function Sidebar({ user, onAction, onLogout }: { user: any; onAction: (action: SidebarAction) => void; onLogout?: () => void }) {
+  // Live alerts for lecturers
+  const [alerts, setAlerts] = useState<any[]>([]);
+  const lastTsRef = useRef<string | null>(null);
+  const API_URL = 'http://127.0.0.1:5000/api';
+  useEffect(() => {
+    if (user?.role !== 'lecturer') return;
+    let timer: any;
+    const tick = async () => {
+      try {
+        const qs = lastTsRef.current ? `?since=${encodeURIComponent(lastTsRef.current)}&limit=50` : '?limit=50';
+        const res = await fetch(`${API_URL}/proctoring/recent-global${qs}`, { headers: { 'X-User-Id': user._id } });
+        const data = await res.json();
+        if (res.ok && data.events) {
+          // newest-first provided by API; prepend and update lastTs
+          const events = data.events as any[];
+          if (events.length > 0) {
+            lastTsRef.current = events[0].timestamp;
+            setAlerts(prev => {
+              // merge unique by _id
+              const byId: Record<string, any> = {};
+              [...events, ...prev].forEach(e => { byId[e._id] = e; });
+              // Keep newest-first and clip to 30
+              return Object.values(byId).sort((a: any, b: any) => (b.timestamp || '').localeCompare(a.timestamp || '')).slice(0, 30);
+            });
+          }
+        }
+      } catch {}
+    };
+    tick();
+    timer = setInterval(tick, 1000);
+    return () => clearInterval(timer);
+  }, [user]);
   const studentItems = [
     { icon: <ClipboardList className="h-5 w-5" />, label: 'Dashboard', action: 'dashboard' as SidebarAction },
     { icon: <ClipboardList className="h-5 w-5" />, label: 'My Exams', action: 'my-exams' as SidebarAction },
@@ -49,6 +81,28 @@ export default function Sidebar({ user, onAction, onLogout }: { user: any; onAct
             <span>{it.label}</span>
           </button>
         ))}
+
+        {user?.role === 'lecturer' && (
+          <div className="mt-6">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm font-semibold text-white">Live Alerts</span>
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-600 text-white">LIVE</span>
+            </div>
+            <div className="bg-slate-800/50 border border-slate-700 rounded-md max-h-48 overflow-y-auto">
+              {alerts.length === 0 ? (
+                <div className="text-xs text-slate-400 p-2">No recent alerts</div>
+              ) : (
+                alerts.slice(0, 8).map(a => (
+                  <div key={a._id} className="p-2 border-b border-slate-700/50 text-xs">
+                    <div className="text-slate-200 font-medium">{(a.eventType || 'event').replace(/_/g, ' ')}</div>
+                    <div className="text-slate-400">Exam: {a.examId} • Student: {a.userId}</div>
+                    <div className="text-slate-500">{new Date(a.timestamp).toLocaleTimeString()}</div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
       </nav>
 
       <div className="mt-auto">
