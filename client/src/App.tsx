@@ -20,10 +20,209 @@ const API_URL = 'http://127.0.0.1:5000/api';
 
 // --- MOCK INSTITUTION DATA ---
 const INSTITUTIONS: { [key: string]: string[] } = {
-    "Quantum University": ["Computer Science", "Physics", "Mathematics"],
-    "Starlight College": ["Information Technology", "Business Administration"],
-    "Apex Institute": ["Mechanical Engineering", "Civil Engineering"]
+  "Indian Institute of Technology Hyderabad (IIT Hyderabad)": [
+    "Artificial Intelligence",
+    "Biomedical Engineering",
+    "Biotechnology",
+    "Chemical Engineering",
+    "Civil Engineering",
+    "Computer Science and Engineering",
+    "Electrical Engineering",
+    "Engineering Science",
+    "Materials Science and Metallurgical Engineering",
+    "Mechanical and Aerospace Engineering",
+    "Mathematics",
+    "Physics",
+    "Chemistry",
+    "Design"
+  ],
+  "International Institute of Information Technology, Hyderabad (IIIT Hyderabad)": [
+    "Computer Science and Engineering",
+    "Electronics and Communication Engineering",
+    "Computational Linguistics",
+    "Bioinformatics",
+    "Building Science"
+  ],
+  "Jawaharlal Nehru Technological University Hyderabad (JNTU Hyderabad)": [
+    "Civil Engineering",
+    "Electrical and Electronics Engineering",
+    "Mechanical Engineering",
+    "Electronics and Communication Engineering",
+    "Computer Science and Engineering",
+    "Information Technology",
+    "Chemical Engineering",
+    "Metallurgical Engineering"
+  ],
+  "University College of Engineering, Osmania University": [
+    "Civil Engineering",
+    "Mechanical Engineering",
+    "Electrical Engineering",
+    "Electronics & Communication Engineering",
+    "Bio-Medical Engineering",
+    "Computer Science & Engineering",
+    "Artificial Intelligence & Machine Learning",
+    "Mining Engineering"
+  ],
+  "VNR Vignana Jyothi Institute of Engineering and Technology (VNR VJIET)": [
+    "Artificial Intelligence & Data Science",
+    "CSE (Artificial Intelligence & Machine Learning)",
+    "CSE (Data Science)",
+    "CSE (Cyber Security)",
+    "CSE (Internet of Things)",
+    "Computer Science and Business Systems",
+    "Civil Engineering",
+    "Electrical and Electronics Engineering",
+    "Mechanical Engineering",
+    "Electronics and Communication Engineering",
+    "Computer Science and Engineering",
+    "Electronics and Instrumentation Engineering",
+    "Information Technology",
+    "Automobile Engineering"
+  ],
+  "Mahatma Gandhi Institute of Technology (MGIT)": [
+    "Mechanical Engineering (Mechatronics)",
+    "Metallurgical and Materials Engineering",
+    "Information Technology",
+    "Electronics and Communication Engineering",
+    "Electrical and Electronics Engineering",
+    "Computer Science and Engineering",
+    "Civil Engineering",
+    "Mechanical Engineering",
+    "Computer Science and Business System",
+    "Computer Science and Engineering (Artificial Intelligence and Machine Learning)",
+    "Computer Science and Engineering (Data Science)"
+  ],
+  "Sreenidhi Institute of Science & Technology (SNIST)": [
+    "Civil Engineering",
+    "Mechanical Engineering",
+    "Computer Science and Engineering",
+    "Information Technology",
+    "Electrical and Electronics Engineering",
+    "Electronics and Communication Engineering",
+    "Electronics and Computer Engineering",
+    "CSE (Cybersecurity)",
+    "CSE (Artificial Intelligence & Machine Learning)",
+    "CSE (Data Science)",
+    "CSE (Internet of Things)"
+  ],
+  "Chaitanya Bharathi Institute of Technology (CBIT Hyderabad)": [
+    "Civil Engineering",
+    "Mechanical Engineering",
+    "Electronics & Communication Engineering",
+    "Computer Science and Engineering",
+    "Electrical & Electronics Engineering",
+    "Information Technology",
+    "Chemical Engineering",
+    "Biotechnology",
+    "Artificial Intelligence and Data Science",
+    "Computer Science and Engineering (Artificial Intelligence and Machine Learning)",
+    "Computer Science and Engineering (Internet of Things and Cyber Security including Blockchain Technology)",
+    "Electronics Engineering (VLSI Design and Technology)"
+  ],
+  "Vasavi College of Engineering": [
+    "Civil Engineering",
+    "Computer Science and Engineering",
+    "Computer Science (AI & ML)",
+    "Information Technology",
+    "Electronics and Communication Engineering",
+    "Electrical and Electronics Engineering",
+    "Mechanical Engineering"
+  ],
+  "Gokaraju Rangaraju Institute of Engineering and Technology (GRIET)": [
+    "Civil Engineering",
+    "Computer Science and Engineering",
+    "CSE (AI & ML)",
+    "CSE (Data Science)",
+    "Information Technology",
+    "Electrical and Electronics Engineering",
+    "Electronics and Communication Engineering",
+    "Mechanical Engineering"
+  ],
+  "BVRIT Hyderabad College of Engineering for Women": [
+    "Artificial Intelligence and Machine Learning",
+    "Computer Science and Engineering",
+    "Information Technology",
+    "Electronics and Communication Engineering",
+    "Electrical and Electronics Engineering"
+  ],
+  "Institute of Aeronautical Engineering (IARE)": [
+    "Aeronautical Engineering",
+    "Civil Engineering",
+    "Computer Science and Engineering",
+    "Electronics and Communication Engineering",
+    "Mechanical Engineering",
+    "Electrical and Electronics Engineering",
+    "Automobile Engineering",
+    "Information Technology"
+  ],
+  "Malla Reddy Engineering College (MREC)": [
+    "Civil Engineering",
+    "Computer Science and Engineering",
+    "Information Technology",
+    "Electronics and Communication Engineering",
+    "Electrical and Electronics Engineering",
+    "Mechanical Engineering"
+  ],
+  "Anurag University": [
+    "Computer Science and Engineering",
+    "Computer Science (Artificial Intelligence)",
+    "Information Technology",
+    "Electronics and Communication Engineering",
+    "Electrical and Electronics Engineering",
+    "Mechanical Engineering",
+    "Civil Engineering",
+    "Metallurgical Engineering"
+  ],
+  "Keshav Memorial Institute of Technology (KMIT)": [
+    "Computer Science and Engineering",
+    "Information Technology",
+    "Artificial Intelligence and Machine Learning",
+    "Data Science"
+  ],
+  "Vardhaman College of Engineering": [
+    "Computer Science and Engineering",
+    "CSE (AI & ML)",
+    "Information Technology",
+    "Electronics and Communication Engineering",
+    "Electrical and Electronics Engineering",
+    "Civil Engineering",
+    "Mechanical Engineering"
+  ],
+  "CVR College of Engineering": [
+    "Computer Science and Engineering",
+    "Information Technology",
+    "Electronics and Communication Engineering",
+    "Electrical and Electronics Engineering",
+    "Instrumentation Engineering",
+    "Mechanical Engineering",
+    "Civil Engineering"
+  ],
+  "G Narayanamma Institute of Technology and Science (for Women)": [
+    "Computer Science and Engineering",
+    "Information Technology",
+    "Electrical and Electronics Engineering",
+    "Electronics and Communication Engineering",
+    "Electronics and Telematics Engineering"
+  ],
+  "J.B. Institute of Engineering & Technology (JBIET)": [
+    "Computer Science and Engineering",
+    "Information Technology",
+    "Electronics and Communication Engineering",
+    "Electrical and Electronics Engineering",
+    "Civil Engineering",
+    "Mechanical Engineering"
+  ],
+  "CMR College of Engineering & Technology": [
+    "Artificial Intelligence and Machine Learning",
+    "Computer Science and Engineering",
+    "Information Technology",
+    "Electronics and Communication Engineering",
+    "Electrical and Electronics Engineering",
+    "Civil Engineering",
+    "Mechanical Engineering"
+  ]
 };
+
 
 // --- TYPE DEFINITIONS ---
 type AppState = 'loading' | 'landing' | 'auth' | 'student-dashboard' | 'lecturer-dashboard' | 'exam' | 'result' | 'live-proctoring' | 'help' | 'my-exams';
@@ -631,13 +830,20 @@ const getVideoStatus = () => {
                 return;
             }
 
-                    const res = await fetch(`${API_URL}/register`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify(finalData),
-                    });
-                    const data = await res.json();
-                    if (!res.ok) {
+            console.log('[REGISTER] Sending registration request to:', `${API_URL}/register`);
+            console.log('[REGISTER] Payload has imageDataUrl:', !!finalData.imageDataUrl, 'length:', finalData.imageDataUrl?.length);
+            
+            const res = await fetch(`${API_URL}/register`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(finalData),
+            });
+            
+            console.log('[REGISTER] Response status:', res.status);
+            const data = await res.json();
+            console.log('[REGISTER] Response data:', data);
+            
+            if (!res.ok) {
                         // Handle user already exists (conflict) gracefully
                         if (res.status === 409) {
                             showToast(data.error || data.message || "User already exists. Please sign in.", "error");
@@ -707,19 +913,26 @@ const getVideoStatus = () => {
 
         const imageDataUrl = captureFrame();
         if (!imageDataUrl) {
+            console.error('[FACE] Could not capture image - captureFrame returned null');
             showToast("Could not capture image for verification.", "error");
             setIsLoading(false);
             setCaptureMessage("");
             return;
         }
+        
+        console.log('[FACE] Image captured successfully, length:', imageDataUrl.length);
+        console.log('[FACE] Image data URL prefix:', imageDataUrl.substring(0, 50));
 
         try {
+            console.log('[FACE] Sending verification request to:', `${API_URL}/verify-face`);
             const faceRes = await fetch(`${API_URL}/verify-face`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ identifier: currentIdentifier, role: initialRole, imageDataUrl }),
             });
+            console.log('[FACE] Verification response status:', faceRes.status);
             const faceData = await faceRes.json();
+            console.log('[FACE] Verification response data:', faceData);
             if (!faceRes.ok) {
                 const sim = faceData?.similarity ? ` (similarity: ${Number(faceData.similarity).toFixed(3)})` : '';
                 showToast(faceData.error || faceData.message || `Face verification failed${sim}`, 'error');
@@ -1892,13 +2105,23 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
     const videoRef = useRef<HTMLVideoElement>(null);
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const proctoringIntervalRef = useRef<any>(null);
+    const proctoringAbortControllerRef = useRef<AbortController | null>(null); // To abort all pending requests
     const [proctoringStopped, setProctoringStopped] = useState(false);
+    const [proctoringKey, setProctoringKey] = useState(0); // Used to restart proctoring
     // Note: switched to continuous MediaRecorder with timeslice; no need for manual chunks buffer.
     // const audioChunksRef = useRef<Blob[]>([]);
 
     // Function to stop all proctoring activities
     const stopProctoring = useCallback(() => {
         if (proctoringStopped) return; // Already stopped
+        
+        console.log('[SUBMIT] Aborting all pending proctoring requests...');
+        // Abort all ongoing fetch requests immediately
+        if (proctoringAbortControllerRef.current) {
+            proctoringAbortControllerRef.current.abort();
+            proctoringAbortControllerRef.current = null;
+            console.log('[SUBMIT] All pending requests aborted');
+        }
         
         console.log('[SUBMIT] Stopping proctoring interval...');
         if (proctoringIntervalRef.current) {
@@ -1915,18 +2138,34 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
             }
         }
         
+        console.log('[SUBMIT] Stopping audio stream tracks...');
+        if (mediaRecorderRef.current && mediaRecorderRef.current.stream) {
+            mediaRecorderRef.current.stream.getTracks().forEach(track => {
+                track.stop();
+                console.log('[SUBMIT] Stopped audio track:', track.kind);
+            });
+        }
+        
         console.log('[SUBMIT] Stopping video stream...');
         if (videoRef.current && videoRef.current.srcObject) {
             const stream = videoRef.current.srcObject as MediaStream;
             stream.getTracks().forEach(track => {
                 track.stop();
-                console.log('[SUBMIT] Stopped track:', track.kind);
+                console.log('[SUBMIT] Stopped video track:', track.kind);
             });
         }
         
         setProctoringStopped(true);
         console.log('[SUBMIT] All proctoring stopped successfully');
     }, [proctoringStopped]);
+
+    // Function to restart proctoring if student cancels submission
+    const restartProctoring = useCallback(() => {
+        console.log('[PROCTORING] Restarting proctoring after cancel...');
+        setProctoringStopped(false);
+        // Increment key to force useEffect to re-run and restart proctoring
+        setProctoringKey(prev => prev + 1);
+    }, []);
 
     // Handle first submit button click - stop proctoring and show confirmation
     const handleInitialSubmitClick = useCallback(() => {
@@ -1935,22 +2174,28 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
         setShowSubmitConfirm(true);
     }, [stopProctoring]);
 
+    // Handle cancel button in confirmation dialog - RESTART PROCTORING
+    const handleCancelSubmit = useCallback(() => {
+        console.log('[SUBMIT] User cancelled submission - restarting proctoring');
+        setShowSubmitConfirm(false);
+        restartProctoring();
+    }, [restartProctoring]);
+
     // Handle actual submission after confirmation
     const handleSubmit = useCallback(async () => {
         setIsSubmitting(true);
         console.log('[SUBMIT] Starting exam submission...', { examId: exam._id, userId: user._id, answerCount: Object.keys(answers).length });
         
-        // Wait a bit for all pending requests to complete (proctoring already stopped)
-        console.log('[SUBMIT] Waiting for pending requests to complete...');
-        await new Promise(resolve => setTimeout(resolve, 500));
+        // No need to wait - requests are already aborted via AbortController
+        console.log('[SUBMIT] Submitting immediately - requests already aborted');
         
         try {
             const url = `${API_URL}/exams/${exam._id}/submit`;
             console.log('[SUBMIT] Now submitting to:', url);
             
-            // Add timeout to prevent hanging forever
+            // Add timeout to prevent hanging (10 seconds should be enough after optimization)
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+            const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
             
             const res = await fetch(url, {
                 method: 'POST',
@@ -1996,6 +2241,12 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
 
         const startProctoring = async () => {
             console.log('[PROCTORING] Starting camera and audio streams...');
+            
+            // Create a new AbortController for this proctoring session
+            proctoringAbortControllerRef.current = new AbortController();
+            const abortSignal = proctoringAbortControllerRef.current.signal;
+            console.log('[PROCTORING] Created new AbortController for request management');
+            
             try {
                 // Start video stream
                 const videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
@@ -2012,12 +2263,20 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                 const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 mediaRecorderRef.current = new MediaRecorder(audioStream);
                 mediaRecorderRef.current.ondataavailable = async (event) => {
+                    // Check if proctoring was stopped before processing
+                    if (abortSignal.aborted) {
+                        console.log('[PROCTORING] Audio processing skipped - proctoring stopped');
+                        return;
+                    }
+                    
                     try {
                         const blob = event.data;
                         if (!blob || blob.size === 0) return;
                         const reader = new FileReader();
                         reader.readAsDataURL(blob);
                         reader.onloadend = async () => {
+                            if (abortSignal.aborted) return; // Check again before sending
+                            
                             const base64Audio = (reader.result as string) || '';
                             if (!base64Audio.includes(',')) return;
                             try {
@@ -2025,23 +2284,33 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                                     method: 'POST',
                                     headers: { 'Content-Type': 'application/json' },
                                     body: JSON.stringify({ audioData: base64Audio.split(',')[1] }),
+                                    signal: abortSignal // Add abort signal to cancel request
                                 });
                                 const data = await res.json();
                                 if (data && data.audioStatus && String(data.audioStatus).toLowerCase().includes('suspicious')) {
                                     try {
                                         await fetch(`${API_URL}/proctor/event`, {
                                             method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                            body: JSON.stringify({ examId: exam._id, userId: user._id, eventType: 'audio', details: { audioStatus: data.audioStatus } })
+                                            body: JSON.stringify({ examId: exam._id, userId: user._id, eventType: 'audio', details: { audioStatus: data.audioStatus } }),
+                                            signal: abortSignal
                                         });
                                     } catch (err) { /* ignore */ }
                                 }
-                            } catch (error) { /* ignore transient network errors */ }
+                            } catch (error: any) { 
+                                // Don't log AbortError - it's expected when stopping
+                                if (error.name !== 'AbortError') {
+                                    console.error('[PROCTORING] Audio error:', error);
+                                }
+                            }
                         };
                     } catch { /* ignore */ }
                 };
 
                 // Start a recurring loop for proctoring - store in ref so handleSubmit can stop it
                 proctoringIntervalRef.current = setInterval(() => {
+                    // Skip if proctoring was stopped
+                    if (abortSignal.aborted) return;
+                    
                     // Skip if in backoff window
                     if (Date.now() < nextAllowedRef.current) return;
                     const imageDataUrl = captureFrame();
@@ -2049,49 +2318,70 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                         fetch(`${API_URL}/proctor`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            // Include examId so backend can correlate and produce server-side events if needed
                             body: JSON.stringify({ imageDataUrl, userId: user._id, examId: exam._id }),
+                            signal: abortSignal // Add abort signal
                         }).then(async res => {
+                            if (abortSignal.aborted) return; // Check before processing response
+                            
                             if (!res.ok) {
-                                // On server error, apply a short backoff
                                 nextAllowedRef.current = Date.now() + backoffMs();
                                 proctorDegradedRef.current = true;
                             }
                             return res.json();
                         }).then(data => {
+                            if (abortSignal.aborted || !data) return; // Check again
+                            
                             if (data && !data.error) {
-                                // Success: clear degraded flag
                                 proctorDegradedRef.current = false;
-                                // If any suspicious flag found, record it server-side for lecturers to review.
                                 const suspicious = [];
-                                                if (!data.identityVerified) suspicious.push({ event: 'identity', details: { similarity: data.similarity } });
+                                if (!data.identityVerified) suspicious.push({ event: 'identity', details: { similarity: data.similarity } });
                                 if (data.faceCount && data.faceCount > 1) suspicious.push({ event: 'multiple_faces', details: { count: data.faceCount } });
-                                                if (data.objectsDetected && data.objectsDetected.length > 0 && data.objectsDetected[0] !== 'No objects') suspicious.push({ event: 'object_detected', details: { objects: data.objectsDetected } });
+                                if (data.objectsDetected && data.objectsDetected.length > 0 && data.objectsDetected[0] !== 'No objects') suspicious.push({ event: 'object_detected', details: { objects: data.objectsDetected } });
                                 if (data.headPose && data.headPose !== 'Forward') suspicious.push({ event: 'head_pose', details: { pose: data.headPose } });
                                 if (data.gazeDirection && data.gazeDirection !== 'Center') suspicious.push({ event: 'gaze', details: { gaze: data.gazeDirection } });
                                 if (data.blinkStatus && data.blinkStatus === 'suspicious') suspicious.push({ event: 'blink', details: {} });
 
-                                // Send each suspicious event to server. Students should not see these notifications.
+                                // FOR TESTING: Send a test event every 10th proctoring check to verify events are working
+                                // Remove this after testing
+                                if (Math.random() < 0.1) {
+                                    suspicious.push({ event: 'gaze', details: { gaze: 'Test Event', message: 'This is a test event to verify proctoring works' } });
+                                    console.log('[PROCTORING] Sending TEST event to verify system');
+                                }
+
                                 suspicious.forEach(async (ev) => {
+                                    if (abortSignal.aborted) return;
                                     try {
-                                        await fetch(`${API_URL}/proctor/event`, {
+                                        console.log(`[PROCTORING] Sending event: ${ev.event}`);
+                                        const response = await fetch(`${API_URL}/proctor/event`, {
                                             method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                            body: JSON.stringify({ examId: exam._id, userId: user._id, eventType: ev.event, details: ev.details, snapshot: imageDataUrl })
+                                            body: JSON.stringify({ examId: exam._id, userId: user._id, eventType: ev.event, details: ev.details, snapshot: imageDataUrl }),
+                                            signal: abortSignal
                                         });
-                                    } catch (err) {
-                                        console.error('Failed to record proctor event', err);
+                                        if (response.ok) {
+                                            console.log(`[PROCTORING] Event ${ev.event} recorded successfully`);
+                                        }
+                                    } catch (err: any) {
+                                        if (err.name !== 'AbortError') {
+                                            console.error('Failed to record proctor event', err);
+                                        }
                                     }
                                 });
-                                // Keep the student UI calm: only show a generic proctoring active notice if not already shown
                             } else if (data && data.error) {
                                 console.error('Proctoring error:', data.error);
                             }
-                        }).catch(err => { console.error("Image proctoring error:", err); nextAllowedRef.current = Date.now() + backoffMs(); proctorDegradedRef.current = true; });
+                        }).catch(err => { 
+                            // Don't log AbortError
+                            if (err.name !== 'AbortError') {
+                                console.error("Image proctoring error:", err); 
+                                nextAllowedRef.current = Date.now() + backoffMs(); 
+                                proctorDegradedRef.current = true;
+                            }
+                        });
                     }
 
                     // Ensure recorder is running with 1s timeslice for continuous small chunks
                     try {
-                        if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'inactive') {
+                        if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'inactive' && !abortSignal.aborted) {
                             mediaRecorderRef.current.start(1000);
                         }
                     } catch {}
@@ -2109,6 +2399,13 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
         // Cleanup function
         return () => {
             console.log('[PROCTORING] Cleanup: stopping all proctoring activities');
+            
+            // Abort all pending requests
+            if (proctoringAbortControllerRef.current) {
+                proctoringAbortControllerRef.current.abort();
+                proctoringAbortControllerRef.current = null;
+            }
+            
             if (proctoringIntervalRef.current) {
                 clearInterval(proctoringIntervalRef.current);
                 proctoringIntervalRef.current = null;
@@ -2120,7 +2417,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                 mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
             }
         };
-    }, [exam._id, showToast, user._id]);
+    }, [exam._id, showToast, user._id, proctoringKey]); // Added proctoringKey to restart on cancel
 
     const captureFrame = (): string | null => {
         const video = videoRef.current;
@@ -2278,7 +2575,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                         </div>
                     )}
                     <div className="flex space-x-3">
-                        <Button variant="outline" className="flex-1" onClick={() => setShowSubmitConfirm(false)} disabled={isSubmitting}>
+                        <Button variant="outline" className="flex-1" onClick={handleCancelSubmit} disabled={isSubmitting}>
                             Cancel
                         </Button>
                         <Button variant="destructive" className="flex-1" onClick={() => { setShowSubmitConfirm(false); handleSubmit(); }} disabled={isSubmitting}>

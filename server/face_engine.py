@@ -7,13 +7,23 @@ from typing import Optional, List
 INSIGHT_AVAILABLE = True
 _insight_model = None
 try:
+    print('[FACE_ENGINE] Attempting to import InsightFace...')
     from insightface.app import FaceAnalysis
+    print('[FACE_ENGINE] InsightFace.app imported successfully')
     import insightface
+    print('[FACE_ENGINE] insightface module imported')
     # onnxruntime is used under the hood; ensure import doesn't fail
     import onnxruntime  # noqa: F401
+    print('[FACE_ENGINE] onnxruntime imported successfully')
+    print('[FACE_ENGINE] All InsightFace dependencies available')
 except Exception as e:
+    print(f'[FACE_ENGINE] InsightFace import failed: {e}')
+    import traceback
+    traceback.print_exc()
     INSIGHT_AVAILABLE = False
     FaceAnalysis = None  # type: ignore
+
+print(f'[FACE_ENGINE] INSIGHT_AVAILABLE = {INSIGHT_AVAILABLE}')
 
 # Fallbacks will be handled by the caller (e.g., DeepFace usage in app.py)
 
@@ -127,14 +137,23 @@ _engine: Optional[FaceEngine] = None
 
 def get_engine() -> Optional[FaceEngine]:
     global _engine
+    print('[FACE_ENGINE] get_engine() called')
     if _engine is not None:
+        print('[FACE_ENGINE] Returning cached engine')
         return _engine
     if not INSIGHT_AVAILABLE:
+        print('[FACE_ENGINE] InsightFace not available, returning None')
         return None
+    print('[FACE_ENGINE] Creating new FaceEngine instance')
     _engine = FaceEngine()
     try:
+        print('[FACE_ENGINE] Initializing engine...')
         _engine.init()
-    except Exception:
+        print('[FACE_ENGINE] Engine initialized successfully')
+    except Exception as e:
         # InsightFace failed to initialize; fallback will be used by callers
+        print(f'[FACE_ENGINE] Engine initialization failed: {e}')
+        import traceback
+        traceback.print_exc()
         _engine = None
     return _engine

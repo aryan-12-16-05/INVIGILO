@@ -27,11 +27,17 @@ import io
 ENGINE_AVAILABLE = False
 engine = None
 try:
+    print('[ENGINE] Attempting to import face_engine...')
     from face_engine import get_engine
+    print('[ENGINE] face_engine imported successfully, calling get_engine()...')
     engine = get_engine()
+    print(f'[ENGINE] get_engine() returned: {engine}')
     ENGINE_AVAILABLE = engine is not None
+    print(f'[ENGINE] ENGINE_AVAILABLE = {ENGINE_AVAILABLE}')
 except Exception as e:
-    print(f"Face engine unavailable: {e}")
+    print(f"[ENGINE] Face engine unavailable: {e}")
+    import traceback
+    traceback.print_exc()
     engine = None
     ENGINE_AVAILABLE = False
 
@@ -164,10 +170,15 @@ def decode_base64_image(data_url):
 # ✅ REGISTER USER + FACE ENROLLMENT
 @app.route('/api/register', methods=['POST'])
 def register_user():
+    print('[REGISTER] Received registration request')
     data = request.get_json()
+    print(f'[REGISTER] User: {data.get("fullName")}, Email: {data.get("email")}, Role: {data.get("role")}')
+    
     # imageDataUrl (single) OR imageDataUrls (list) is required for face enrollment
     required = ['fullName', 'email', 'phoneNumber', 'roleId', 'password', 'role', 'institution', 'department']
     if not all(field in data for field in required):
+        missing = [f for f in required if f not in data]
+        print(f'[REGISTER] ERROR: Missing required fields: {missing}')
         return jsonify({"error": "Missing required fields"}), 400
 
     existing = {"$or": [{"email": data['email']}, {"phoneNumber": data['phoneNumber']}]}
@@ -176,37 +187,53 @@ def register_user():
     else:
         existing["$or"].append({"lecturerId": data['roleId']})
     if users_collection.find_one(existing):
+        print(f'[REGISTER] ERROR: User already exists: {data.get("email")}')
         return jsonify({"error": "User already exists"}), 409
 
     # --- Decode and process face image ---
     # Collect one or more images for multi-sample enrollment
     images: list = []
     if data.get('imageDataUrls') and isinstance(data.get('imageDataUrls'), list):
+        print(f'[REGISTER] Processing {len(data["imageDataUrls"])} face images')
         for d in data['imageDataUrls']:
             img = decode_base64_image(d)
             if img is not None:
                 images.append(img)
     elif data.get('imageDataUrl'):
+        print(f'[REGISTER] Processing 1 face image, length: {len(data["imageDataUrl"])}')
         img = decode_base64_image(data['imageDataUrl'])
         if img is not None:
             images.append(img)
+    
     if not images:
+        print('[REGISTER] ERROR: Failed to decode any face images')
         return jsonify({"error": "Invalid image data"}), 400
+    
+    print(f'[REGISTER] Successfully decoded {len(images)} face image(s)')
 
     try:
         # Prefer fast InsightFace engine for embedding; fallback to DeepFace.
         face_vectors = []
+        print(f'[REGISTER] Generating face embeddings using engine: {ENGINE_AVAILABLE and engine is not None}')
         if ENGINE_AVAILABLE and engine is not None:
-            for img in images:
+            for i, img in enumerate(images):
                 try:
+                    print(f'[REGISTER] Processing image {i+1}/{len(images)} with InsightFace...')
                     emb = engine.embed(img)
                     if emb is not None:
                         # Engine returns normalized embedding; store as list
                         face_vectors.append(emb.tolist())
+                        print(f'[REGISTER] Successfully generated embedding {i+1}, dimension: {len(emb)}')
+                    else:
+                        print(f'[REGISTER] InsightFace returned None for image {i+1}')
                 except Exception as e:
-                    print(f"InsightFace embedding failed during register: {e}")
+                    print(f"[REGISTER] InsightFace embedding failed for image {i+1}: {e}")
+        
+        print(f'[REGISTER] Generated {len(face_vectors)} embeddings from {len(images)} images')
+        
         # Fallback to DeepFace for any remaining images not embedded
         if DEEPFACE_AVAILABLE and DeepFace is not None and len(face_vectors) < len(images):
+            print('[REGISTER] Falling back to DeepFace for remaining images')
             for img in images:
                 try:
                     embeddings = DeepFace.represent(
@@ -252,18 +279,26 @@ def register_user():
         result = users_collection.insert_one(new_user)
         new_id = str(result.inserted_id)
         new_user['_id'] = new_id
+        
+        print(f'[REGISTER] User registered successfully: {new_id}, faceVerified: {new_user["faceVerified"]}')
+        
         # Cache embedding in engine for faster verification
         try:
             if ENGINE_AVAILABLE and engine is not None and new_user.get('faceEmbedding'):
                 engine.user_cache[new_id] = np.array(new_user['faceEmbedding'], dtype=np.float32)
-        except Exception:
-            pass
+                print(f'[REGISTER] Cached embedding for user {new_id}')
+        except Exception as e:
+            print(f'[REGISTER] Failed to cache embedding: {e}')
+        
         return jsonify({"message": "User registered successfully with face embedding!"}), 201
 
-    except ValueError:
+    except ValueError as e:
+        print(f'[REGISTER] ValueError: {e}')
         return jsonify({"error": "No or multiple faces detected"}), 400
     except Exception as e:
-        print(f"Registration error: {e}")
+        print(f"[REGISTER] Registration error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": "Internal server error"}), 500
 
 # ✅ LOGIN
@@ -303,12 +338,17 @@ def get_face_threshold(default_val=0.58):
 # ✅ FACE VERIFICATION
 @app.route('/api/verify-face', methods=['POST'])
 def verify_face():
+    print('[FACE-VERIFY] Received face verification request')
     data = request.get_json()
     identifier = data.get('identifier')
     role = data.get('role')
     image_data_url = data.get('imageDataUrl')
+    
+    print(f'[FACE-VERIFY] Identifier: {identifier}, Role: {role}')
+    print(f'[FACE-VERIFY] Image data URL length: {len(image_data_url) if image_data_url else 0}')
 
     if not identifier or not image_data_url or not role:
+        print('[FACE-VERIFY] ERROR: Missing parameters')
         return jsonify({"error": "Missing parameters"}), 400
 
     user = users_collection.find_one({
@@ -316,12 +356,22 @@ def verify_face():
         "$or": [{"email": identifier}, {"phoneNumber": identifier},
                 {"studentId": identifier}, {"lecturerId": identifier}]
     })
-    if not user or 'faceEmbedding' not in user:
+    if not user:
+        print(f'[FACE-VERIFY] ERROR: User not found for identifier {identifier}')
         return jsonify({"error": "User not found or no face data"}), 404
+        
+    if 'faceEmbedding' not in user and 'faceEmbeddings' not in user:
+        print(f'[FACE-VERIFY] ERROR: No face embedding stored for user {identifier}')
+        return jsonify({"error": "User not found or no face data"}), 404
+    
+    print(f'[FACE-VERIFY] User found: {user.get("name")}, has embeddings: {bool(user.get("faceEmbedding") or user.get("faceEmbeddings"))}')
 
     image = decode_base64_image(image_data_url)
     if image is None:
+        print('[FACE-VERIFY] ERROR: Failed to decode image')
         return jsonify({"error": "Invalid image data"}), 400
+    
+    print(f'[FACE-VERIFY] Image decoded successfully, shape: {image.shape}')
     try:
         # helper: create simple variants to account for lighting/contrast differences
         def make_variants(img):
@@ -579,6 +629,8 @@ def proctor_activity():
     # Advanced event logic: rolling windows and debounced emits (if examId provided)
     try:
         if exam_id and user_id:
+            print(f"[PROCTOR] Analysis for exam {exam_id}, user {user_id}: identity={identity_verified}, faces={face_count}, headPose={results['headPose']}, gaze={results['gazeDirection']}")
+            
             key = (str(exam_id), str(user_id))
             st = PROCTOR_STATE.get(key) or {'poses': [], 'gazes': [], 'mouths': [], 'faces': [], 'brightness': [], 'last_emit': {}}
             now = datetime.datetime.utcnow()
@@ -647,6 +699,7 @@ def proctor_activity():
     except Exception as e:
         app.logger.debug('Advanced proctor logic error: %s', e)
 
+    print(f"[PROCTOR] Returning results: {results}")
     return jsonify(results), 200
 
 
@@ -720,41 +773,25 @@ def delete_exam(exam_id):
 def submit_exam(exam_id):
     # Handle OPTIONS preflight request explicitly
     if request.method == 'OPTIONS':
-        print(f"[SUBMIT] Handling OPTIONS preflight for exam {exam_id}")
         return '', 204
-    
-    print(f"[SUBMIT] ========== SUBMIT ENDPOINT HIT ==========")
-    print(f"[SUBMIT] Received POST submission request for exam {exam_id}")
     
     try:
         # Get JSON data
-        print(f"[SUBMIT] Attempting to parse JSON body...")
         data = request.get_json(force=True)
-        print(f"[SUBMIT] JSON parsed successfully")
         
         if not data:
-            print(f"[SUBMIT] ERROR: No JSON data in request body")
             return jsonify({"error": "No data provided"}), 400
             
         user_id = data.get('userId')
         answers = data.get('answers')
-        
-        print(f"[SUBMIT] User ID: {user_id}")
-        print(f"[SUBMIT] Answers count: {len(answers) if answers else 0}")
 
         if not user_id or not answers:
-            print(f"[SUBMIT] ERROR: Missing user_id or answers")
             return jsonify({"error": "User ID and answers are required"}), 400
         
-        print(f"[SUBMIT] Fetching exam from database...")
         exam = exams_collection.find_one({'_id': ObjectId(exam_id)})
             
         if not exam:
-            print(f"[SUBMIT] ERROR: Exam not found: {exam_id}")
             return jsonify({"error": "Exam not found"}), 404
-
-        print(f"[SUBMIT] Exam found: {exam.get('title', 'N/A')}")
-        print(f"[SUBMIT] Grading {len(exam.get('questions', []))} questions...")
         
         total_marks = 0
         score = 0
@@ -780,13 +817,10 @@ def submit_exam(exam_id):
                                 if int(user_answer) == int(correct_answer):
                                     correct = True
                             except Exception:
-                                # fallback to string compare
                                 if str(user_answer) == str(correct_answer):
                                     correct = True
                         else:
-                            # correct_answer might be option text; attempt to match
                             if isinstance(user_answer, (int, float)):
-                                # if numeric, map to option text (1-based index)
                                 try:
                                     idx = int(user_answer) - 1
                                     opts = question.get('options') or []
@@ -799,29 +833,38 @@ def submit_exam(exam_id):
                                     correct = True
 
                     elif qtype == 'true-false':
-                        # Coerce to boolean
+                        # Coerce user answer to boolean
                         ua_bool = None
                         if isinstance(user_answer, bool):
                             ua_bool = user_answer
                         else:
-                            # Accept 'true'/'false' strings or '1'/'0'
                             s = str(user_answer).lower()
                             if s in ('true', '1', 'yes'): ua_bool = True
                             elif s in ('false', '0', 'no'): ua_bool = False
-                        if ua_bool is not None and bool(correct_answer) == ua_bool:
+                        
+                        # Coerce correct answer to boolean
+                        ca_bool = None
+                        if isinstance(correct_answer, bool):
+                            ca_bool = correct_answer
+                        else:
+                            s = str(correct_answer).lower()
+                            if s in ('true', '1', 'yes'): ca_bool = True
+                            elif s in ('false', '0', 'no'): ca_bool = False
+                        
+                        # Compare booleans
+                        if ua_bool is not None and ca_bool is not None and ua_bool == ca_bool:
                             correct = True
 
                     else:
-                        # Short answer / essay: perform trimmed case-insensitive match for small keywords
+                        # Short answer / essay: perform trimmed case-insensitive match
                         if correct_answer is not None and str(correct_answer).strip() != '':
                             if str(user_answer).strip().lower() == str(correct_answer).strip().lower():
                                 correct = True
                         else:
-                            # No ground truth: treat as not auto-gradable
                             correct = False
-
+                            
             except Exception as e:
-                print(f"[SUBMIT] Error comparing answers for q {q_id}: {e}")
+                print(f"[SUBMIT] Error grading question {q_id}: {e}")
 
             if correct:
                 score += marks
@@ -845,7 +888,6 @@ def submit_exam(exam_id):
         }
 
         # Store attempt and mark this user as completed for this exam
-        print(f"[SUBMIT] Saving attempt to database...")
         exams_collection.update_one(
             {'_id': ObjectId(exam_id)},
             {
@@ -853,9 +895,18 @@ def submit_exam(exam_id):
                 '$addToSet': {'completedBy': user_id}
             }
         )
-        print(f"[SUBMIT] Successfully saved attempt")
 
-        print(f"[SUBMIT] Returning success response with score {percentage}%")
+        return jsonify({
+            'score': percentage,
+            'totalMarks': total_marks,
+            'perQuestion': per_question
+        }), 200
+
+    except Exception as e:
+        print(f"[SUBMIT] Error processing submission: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": "Failed to submit exam"}), 500
         return jsonify({
             "message": "Exam submitted successfully!",
             "score": percentage,
@@ -1094,8 +1145,11 @@ def update_exam(exam_id):
 def record_proctor_event():
     """Record a proctoring event emitted by the student's client (suspicious detections)."""
     data = request.get_json()
+    print(f"[PROCTOR-EVENT] Received event: {data.get('eventType') if data else 'NO DATA'}")
+    
     required = ['examId', 'userId', 'eventType']
     if not data or not all(k in data for k in required):
+        print(f"[PROCTOR-EVENT] ERROR: Missing required fields. Data: {data}")
         return jsonify({'error': 'Missing required fields'}), 400
 
     # Normalize eventType to a consistent lower_snake format
@@ -1146,9 +1200,10 @@ def record_proctor_event():
             pass
     try:
         proctor_events_collection.insert_one(event)
+        print(f"[PROCTOR-EVENT] Successfully saved event: {event_type} for user {data['userId']}")
         return jsonify({'message': 'Event recorded'}), 201
     except Exception as e:
-        print(f"Error recording proctor event: {e}")
+        print(f"[PROCTOR-EVENT] ERROR saving event: {e}")
         return jsonify({'error': str(e)}), 500
 
 
@@ -1226,6 +1281,8 @@ def get_proctoring_summary(exam_id):
 @app.route('/api/exams/<exam_id>/proctoring/<user_id>', methods=['GET'])
 def get_proctoring_details(exam_id, user_id):
     """Return detailed proctor events for a student in an exam."""
+    print(f"[PROCTOR-FETCH] Fetching events for exam {exam_id}, user {user_id}")
+    
     # Require lecturer role
     requester = request.headers.get('X-User-Id')
     if not requester:
@@ -1239,6 +1296,8 @@ def get_proctoring_details(exam_id, user_id):
 
     try:
         docs = list(proctor_events_collection.find({'examId': str(exam_id), 'userId': str(user_id)}).sort('timestamp', 1))
+        print(f"[PROCTOR-FETCH] Found {len(docs)} events for user {user_id} in exam {exam_id}")
+        
         events = []
         for d in docs:
             ev = d.copy()
@@ -1247,9 +1306,11 @@ def get_proctoring_details(exam_id, user_id):
             if isinstance(ts, datetime.datetime):
                 ev['timestamp'] = ts.isoformat()
             events.append(ev)
+        
+        print(f"[PROCTOR-FETCH] Returning {len(events)} events")
         return jsonify({'events': events}), 200
     except Exception as e:
-        print(f"Error getting proctoring details: {e}")
+        print(f"[PROCTOR-FETCH] ERROR: {e}")
         return jsonify({'error': str(e)}), 500
 
 
