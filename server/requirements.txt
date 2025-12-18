@@ -6,7 +6,7 @@ gunicorn
 eventlet
 python-socketio
 python-engineio
-pymongo[srv]
+pymongo[srv]==4.3.3
 bcrypt
 python-dotenv
 requests
