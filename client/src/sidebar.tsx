@@ -43,13 +43,13 @@ export default function Sidebar({ user, onAction, onLogout }: { user: any; onAct
       } catch {}
     };
     tick();
-    timer = setInterval(tick, 1000);
+    timer = setInterval(tick, 30000); // Poll every 30 seconds (reasonable for live alerts)
     return () => clearInterval(timer);
   }, [user]);
   const studentItems = [
     { icon: <ClipboardList className="h-5 w-5" />, label: 'Dashboard', action: 'dashboard' as SidebarAction },
     { icon: <ClipboardList className="h-5 w-5" />, label: 'My Exams', action: 'my-exams' as SidebarAction },
-    { icon: <Users className="h-5 w-5" />, label: 'Live Proctoring', action: 'live-proctoring' as SidebarAction },
+    { icon: <BrainCircuit className="h-5 w-5" />, label: 'Results', action: 'results' as SidebarAction },
     { icon: <User className="h-5 w-5" />, label: 'Profile', action: 'profile' as SidebarAction },
     { icon: <HelpCircle className="h-5 w-5" />, label: 'Help', action: 'help' as SidebarAction },
   ];

@@ -1,6 +1,10 @@
 import os
-from flask import Flask, jsonify, request
+import re
+from flask import Flask, jsonify, request, redirect, url_for
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from flask_socketio import SocketIO, emit, join_room, leave_room
 from pymongo import MongoClient
 import bcrypt
 from bson import ObjectId
@@ -10,36 +14,72 @@ import json
 import datetime
 import numpy as np
 import base64
-import cv2
+try:
+    import cv2  # type: ignore
+    CV2_AVAILABLE = True
+except Exception as e:
+    print(f"[CV2] OpenCV unavailable: {e}")
+    CV2_AVAILABLE = False
+    cv2 = None  # type: ignore
 import time
 from PIL import Image
-# DeepFace may not be available in all dev environments (native deps).
-DEEPFACE_AVAILABLE = True
-try:
-    from deepface import DeepFace
-except Exception as e:
-    print(f"DeepFace not available: {e}")
-    DeepFace = None
-    DEEPFACE_AVAILABLE = False
 import io
+import hmac
+import hashlib
 
-# Attempt to load the fast face engine (InsightFace) with graceful fallback to DeepFace
+def _bool_env(name: str, default: str = "0") -> bool:
+    v = os.getenv(name, default)
+    return str(v).strip().lower() in {"1", "true", "yes", "on"}
+
+
+# Heavy ML can be disabled for free-tier deployments.
+# When disabled, endpoints should still work but may return "unavailable" for
+# face-recognition specific actions.
+ENABLE_HEAVY_ML = _bool_env("INVIGILO_ENABLE_HEAVY_ML", "0")
+
+# Load the fast face engine (InsightFace) lazily to avoid large memory use at import time.
 ENGINE_AVAILABLE = False
 engine = None
-try:
-    print('[ENGINE] Attempting to import face_engine...')
-    from face_engine import get_engine
-    print('[ENGINE] face_engine imported successfully, calling get_engine()...')
-    engine = get_engine()
-    print(f'[ENGINE] get_engine() returned: {engine}')
-    ENGINE_AVAILABLE = engine is not None
-    print(f'[ENGINE] ENGINE_AVAILABLE = {ENGINE_AVAILABLE}')
-except Exception as e:
-    print(f"[ENGINE] Face engine unavailable: {e}")
-    import traceback
-    traceback.print_exc()
-    engine = None
-    ENGINE_AVAILABLE = False
+_engine_init_attempted = False
+
+
+def get_face_engine():
+    """Lazy getter for the face engine.
+
+    Returns:
+        FaceEngine | None
+    """
+    global engine, ENGINE_AVAILABLE, _engine_init_attempted
+    if not ENABLE_HEAVY_ML:
+        return None
+
+
+# Backwards-compat: some routes may reference the global `engine` or
+# `ENGINE_AVAILABLE`. Keep them in sync via the lazy getter.
+def _ensure_engine_loaded():
+    global engine, ENGINE_AVAILABLE
+    e = get_face_engine()
+    engine = e
+    ENGINE_AVAILABLE = e is not None
+    return e
+    if _engine_init_attempted:
+        return engine
+    _engine_init_attempted = True
+    try:
+        print('[ENGINE] Attempting to import face_engine...')
+        from face_engine import get_engine
+        print('[ENGINE] face_engine imported successfully, calling get_engine()...')
+        engine = get_engine()
+        ENGINE_AVAILABLE = engine is not None
+        print(f'[ENGINE] ENGINE_AVAILABLE = {ENGINE_AVAILABLE}')
+        return engine
+    except Exception as e:
+        print(f"[ENGINE] Face engine unavailable: {e}")
+        import traceback
+        traceback.print_exc()
+        engine = None
+        ENGINE_AVAILABLE = False
+        return None
 
 # --- Your existing imports for proctoring ---
 try:
@@ -64,33 +104,297 @@ except Exception as e:
     def process_audio_chunk(audio_bytes):
         return 'clean'
 
-# --- Configuration ---
-MODEL_NAME = "ArcFace"
-DETECTOR_BACKEND = "retinaface"
-
 # --- Setup ---
 load_dotenv()
 app = Flask(__name__)
-# Enable CORS with explicit configuration to handle all origins and methods
-CORS(app, resources={r"/api/*": {"origins": "*", "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"]}})
+
+app.secret_key = os.getenv('FLASK_SECRET_KEY', os.getenv('SECRET_KEY', 'dev-secret-change-me'))
+
+def _sign_token(user_id: str, ttl_seconds: int = 3600):
+    """Create a simple HMAC-signed token (no external deps).
+
+    Format: v1.<user_id>.<exp_ts>.<sig>
+    """
+    exp = int(time.time()) + int(ttl_seconds)
+    msg = f"v1.{user_id}.{exp}".encode('utf-8')
+    key = app.secret_key.encode('utf-8')
+    sig = hmac.new(key, msg, hashlib.sha256).hexdigest()
+    return f"v1.{user_id}.{exp}.{sig}"
+
+# Initialize rate limiter to prevent abuse and brute force attacks
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    default_limits=["1000 per day", "200 per hour"],  # Global fallback limits
+    storage_uri="memory://",  # In-memory storage (upgrade to Redis for production)
+)
+
+# Enable CORS with comprehensive configuration for all API endpoints
+# Production: set INVIGILO_ALLOWED_ORIGINS to a comma-separated list of frontend origins
+# e.g. https://invigilo.vercel.app,https://invigilo-aryan.vercel.app
+_allowed_origins_env = os.getenv("INVIGILO_ALLOWED_ORIGINS", "*")
+ALLOWED_ORIGINS = "*" if _allowed_origins_env.strip() == "*" else [o.strip() for o in _allowed_origins_env.split(",") if o.strip()]
+
+CORS(app, resources={
+    r"/api/*": {
+        "origins": ALLOWED_ORIGINS,
+        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization", "X-User-Id"],
+        "max_age": 3600
+    }
+})
+
+# ✅ Initialize WebSocket for Real-Time Proctor Updates
+socketio = SocketIO(
+    app,
+    cors_allowed_origins=ALLOWED_ORIGINS,
+    async_mode='threading',
+    logger=True,
+    engineio_logger=False,
+    ping_timeout=60,
+    ping_interval=25
+)
+
 APP_START = datetime.datetime.utcnow()
 
-# Add a before_request hook to log all incoming requests
-@app.before_request
-def log_request():
-    print(f"[REQUEST] {request.method} {request.path} from {request.remote_addr}")
-    if request.method == 'OPTIONS':
-        print(f"[REQUEST] CORS preflight request")
-    return None
 
-# Add an after_request hook to ensure CORS headers are on all responses
-@app.after_request
-def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-User-Id')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
-    response.headers.add('Access-Control-Max-Age', '3600')
-    return response
+@app.route('/api/health', methods=['GET'])
+def health():
+    """Lightweight health endpoint for platform checks (Render)"""
+    return jsonify({
+        "status": "ok",
+        "service": "invigilo-server",
+        "startedAt": APP_START.isoformat() + "Z",
+        "time": datetime.datetime.utcnow().isoformat() + "Z",
+    }), 200
+
+# Rate limit error handler
+@app.errorhandler(429)
+def ratelimit_handler(e):
+    """
+    Custom error handler for rate limit exceeded (429 Too Many Requests).
+    Logs the violation and returns a friendly error message with retry information.
+    """
+    # Log rate limit violation for monitoring
+    app.logger.warning(f"Rate limit exceeded from {get_remote_address()}: {e.description}")
+    
+    # Extract retry-after time from the exception
+    retry_after = getattr(e, 'retry_after', 3600)  # Default to 1 hour if not available
+    
+    return jsonify({
+        "error": "Rate limit exceeded",
+        "message": "Too many requests. Please try again later.",
+        "retry_after": retry_after
+    }), 429
+
+# ================================================================================
+# PASSWORD VALIDATION
+# ================================================================================
+def validate_password(password):
+    """
+    Validates password strength according to security requirements.
+    
+    Requirements:
+    - Minimum 8 characters
+    - At least 1 uppercase letter (A-Z)
+    - At least 1 lowercase letter (a-z)
+    - At least 1 digit (0-9)
+    - At least 1 special character (!@#$%^&*-_=+)
+    
+    Args:
+        password (str): The password to validate
+    
+    Returns:
+        tuple: (is_valid: bool, error_message: str)
+            - is_valid: True if password meets all requirements, False otherwise
+            - error_message: Specific feedback if invalid, empty string if valid
+    
+    Examples:
+        >>> validate_password("abc123")
+        (False, "Password must contain at least one uppercase letter")
+        
+        >>> validate_password("Abc123!")
+        (True, "")
+        
+        >>> validate_password("Pass@123")
+        (True, "")
+    """
+    if not password:
+        return False, "Password is required"
+    
+    # Check minimum length
+    if len(password) < 8:
+        return False, "Password must be at least 8 characters long"
+    
+    # Check for at least one uppercase letter
+    if not re.search(r'[A-Z]', password):
+        return False, "Password must contain at least one uppercase letter"
+    
+    # Check for at least one lowercase letter
+    if not re.search(r'[a-z]', password):
+        return False, "Password must contain at least one lowercase letter"
+    
+    # Check for at least one digit
+    if not re.search(r'[0-9]', password):
+        return False, "Password must contain at least one digit"
+    
+    # Check for at least one special character
+    if not re.search(r'[!@#$%^&*\-_=+]', password):
+        return False, "Password must contain at least one special character (!@#$%^&*-_=+)"
+    
+    # All checks passed
+    return True, ""
+
+# ================================================================================
+# END PASSWORD VALIDATION
+# ================================================================================
+
+# ================================================================================
+# ADMIN ROLE ENFORCEMENT
+# ================================================================================
+def require_admin():
+    """
+    Verifies that the current request is from an admin user.
+    Checks X-User-Id header and validates admin role.
+    
+    Returns:
+        tuple: (is_admin: bool, user: dict or None, error_response: tuple or None)
+            - is_admin: True if user is admin, False otherwise
+            - user: User document if found, None otherwise
+            - error_response: (jsonify, status_code) tuple if not admin, None if admin
+    
+    Usage:
+        is_admin, user, error = require_admin()
+        if not is_admin:
+            return error  # Returns 403 Forbidden or 401 Unauthorized
+        # Continue with admin action...
+    """
+    # Get user ID from header
+    user_id = request.headers.get('X-User-Id')
+    if not user_id:
+        return False, None, (jsonify({
+            'error': 'Unauthorized',
+            'message': 'X-User-Id header required'
+        }), 401)
+    
+    # Validate ObjectId format
+    if not ObjectId.is_valid(user_id):
+        return False, None, (jsonify({
+            'error': 'Unauthorized',
+            'message': 'Invalid user ID format'
+        }), 401)
+    
+    # Fetch user from database
+    try:
+        user = users_collection.find_one({'_id': ObjectId(user_id)})
+    except Exception as e:
+        app.logger.error(f"Error fetching user for admin check: {e}")
+        return False, None, (jsonify({
+            'error': 'Internal error',
+            'message': 'Failed to verify user'
+        }), 500)
+    
+    # Check if user exists
+    if not user:
+        return False, None, (jsonify({
+            'error': 'Unauthorized',
+            'message': 'User not found'
+        }), 401)
+    
+    # Check if user has admin role
+    if user.get('role') != 'admin':
+        app.logger.warning(f"Non-admin user {user_id} attempted to access admin endpoint: {request.path}")
+        return False, user, (jsonify({
+            'error': 'Forbidden',
+            'message': 'Only admins can perform this action'
+        }), 403)
+    
+    # User is admin
+    return True, user, None
+
+def log_admin_action(admin_id, action, details=None):
+    """
+    Logs admin actions to audit_logs collection for security and compliance.
+    
+    Args:
+        admin_id (str): The ObjectId of the admin user
+        action (str): The action performed (e.g., 'delete_lecturer', 'update_settings')
+        details (dict): Additional details about the action (e.g., deleted user ID, old/new values)
+    
+    Example:
+        log_admin_action(admin_id, 'delete_lecturer', {
+            'lecturer_id': lect_id,
+            'lecturer_email': 'john@example.com'
+        })
+    """
+    try:
+        log_entry = {
+            'admin_id': admin_id,
+            'action': action,
+            'details': details or {},
+            'timestamp': datetime.datetime.utcnow(),
+            'ip_address': request.remote_addr,
+            'user_agent': request.headers.get('User-Agent', 'Unknown'),
+            'endpoint': request.path
+        }
+        audit_logs_collection.insert_one(log_entry)
+        app.logger.info(f"Admin action logged: {action} by {admin_id}")
+    except Exception as e:
+        # Don't fail the request if logging fails, but log the error
+        app.logger.error(f"Failed to log admin action: {e}")
+
+# ================================================================================
+# END ADMIN ROLE ENFORCEMENT
+# ================================================================================
+
+# ================================================================================
+# USER DATA SANITIZATION
+# ================================================================================
+def sanitize_user_response(user):
+    """
+    Remove sensitive fields from user object before sending to client.
+    
+    Sensitive fields include:
+    - password: Hashed password
+    - faceEmbedding: Legacy single face embedding (128-dim biometric vector)
+    - faceEmbeddings: Array of face embeddings (biometric data)
+    - salt: Password salt (if stored separately)
+    
+    These fields are PRIVATE and should NEVER be sent to the frontend.
+    Face verification happens on the backend only - clients receive
+    only the verification result (verified: true/false, similarity score).
+    
+    Args:
+        user (dict): User document from database
+    
+    Returns:
+        dict: Sanitized user object safe for client consumption
+    
+    Example:
+        user = users_collection.find_one({'email': email})
+        user = sanitize_user_response(user)
+        return jsonify({'user': user}), 200
+    """
+    if user is None:
+        return None
+    
+    if not isinstance(user, dict):
+        return user
+    
+    # Create a copy to avoid modifying the original
+    sanitized = user.copy()
+    
+    # Remove sensitive biometric and authentication data
+    sanitized.pop('password', None)
+    sanitized.pop('faceEmbedding', None)  # Legacy single embedding
+    sanitized.pop('faceEmbeddings', None)  # Array of embeddings
+    sanitized.pop('salt', None)  # Password salt (if exists)
+    
+    return sanitized
+
+# ================================================================================
+# END USER DATA SANITIZATION
+# ================================================================================
 
 # Simple health check endpoint
 @app.route('/api/health', methods=['GET'])
@@ -121,6 +425,7 @@ db = client['invigilo_db']
 users_collection = db['users']
 exams_collection = db['exams']
 proctor_events_collection = db['proctor_events']
+audit_logs_collection = db['audit_logs']  # For admin action logging
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 settings_collection = db['settings']
 
@@ -169,6 +474,7 @@ def decode_base64_image(data_url):
 
 # ✅ REGISTER USER + FACE ENROLLMENT
 @app.route('/api/register', methods=['POST'])
+#@limiter.limit("5 per hour")
 def register_user():
     print('[REGISTER] Received registration request')
     data = request.get_json()
@@ -180,6 +486,22 @@ def register_user():
         missing = [f for f in required if f not in data]
         print(f'[REGISTER] ERROR: Missing required fields: {missing}')
         return jsonify({"error": "Missing required fields"}), 400
+    
+    # Validate password strength
+    is_valid, error_message = validate_password(data.get('password', ''))
+    if not is_valid:
+        print(f'[REGISTER] ERROR: Password validation failed: {error_message}')
+        return jsonify({
+            "error": "Invalid password",
+            "message": error_message,
+            "requirements": [
+                "At least 8 characters long",
+                "At least one uppercase letter (A-Z)",
+                "At least one lowercase letter (a-z)",
+                "At least one digit (0-9)",
+                "At least one special character (!@#$%^&*-_=+)"
+            ]
+        }), 400
 
     existing = {"$or": [{"email": data['email']}, {"phoneNumber": data['phoneNumber']}]}
     if data['role'] == 'student':
@@ -212,46 +534,33 @@ def register_user():
     print(f'[REGISTER] Successfully decoded {len(images)} face image(s)')
 
     try:
-        # Prefer fast InsightFace engine for embedding; fallback to DeepFace.
+        # Use InsightFace engine for embedding generation
         face_vectors = []
-        print(f'[REGISTER] Generating face embeddings using engine: {ENGINE_AVAILABLE and engine is not None}')
-        if ENGINE_AVAILABLE and engine is not None:
-            for i, img in enumerate(images):
-                try:
-                    print(f'[REGISTER] Processing image {i+1}/{len(images)} with InsightFace...')
-                    emb = engine.embed(img)
-                    if emb is not None:
-                        # Engine returns normalized embedding; store as list
-                        face_vectors.append(emb.tolist())
-                        print(f'[REGISTER] Successfully generated embedding {i+1}, dimension: {len(emb)}')
-                    else:
-                        print(f'[REGISTER] InsightFace returned None for image {i+1}')
-                except Exception as e:
-                    print(f"[REGISTER] InsightFace embedding failed for image {i+1}: {e}")
+        print(f'[REGISTER] Generating face embeddings using InsightFace engine')
+        
+        _ensure_engine_loaded()
+        if not ENGINE_AVAILABLE or engine is None:
+            print('[REGISTER] ERROR: InsightFace engine not available')
+            return jsonify({"error": "Face recognition engine not available. Please ensure InsightFace is properly installed."}), 500
+        
+        for i, img in enumerate(images):
+            try:
+                print(f'[REGISTER] Processing image {i+1}/{len(images)} with InsightFace...')
+                emb = engine.embed(img)
+                if emb is not None:
+                    # Engine returns normalized embedding; store as list
+                    face_vectors.append(emb.tolist())
+                    print(f'[REGISTER] Successfully generated embedding {i+1}, dimension: {len(emb)}')
+                else:
+                    print(f'[REGISTER] InsightFace returned None for image {i+1} - no face detected')
+            except Exception as e:
+                print(f"[REGISTER] InsightFace embedding failed for image {i+1}: {e}")
+        
+        if not face_vectors:
+            print('[REGISTER] ERROR: No face embeddings could be generated')
+            return jsonify({"error": "No face detected in uploaded images. Please ensure your face is clearly visible."}), 400
         
         print(f'[REGISTER] Generated {len(face_vectors)} embeddings from {len(images)} images')
-        
-        # Fallback to DeepFace for any remaining images not embedded
-        if DEEPFACE_AVAILABLE and DeepFace is not None and len(face_vectors) < len(images):
-            print('[REGISTER] Falling back to DeepFace for remaining images')
-            for img in images:
-                try:
-                    embeddings = DeepFace.represent(
-                        img_path=img,
-                        model_name=MODEL_NAME,
-                        detector_backend=DETECTOR_BACKEND,
-                        enforce_detection=True
-                    )
-                    if embeddings and isinstance(embeddings, list):
-                        raw = embeddings[0]['embedding']
-                        # Normalize the DeepFace embedding to ensure consistency with InsightFace
-                        emb_arr = np.array(raw, dtype=np.float32)
-                        norm = np.linalg.norm(emb_arr)
-                        if norm > 0:
-                            emb_arr = emb_arr / norm
-                        face_vectors.append(emb_arr.tolist())
-                except Exception as e:
-                    print(f"DeepFace representation failed during register: {e}")
 
         hashed_pw = bcrypt.hashpw(data['password'].encode('utf-8'), bcrypt.gensalt())
 
@@ -303,6 +612,7 @@ def register_user():
 
 # ✅ LOGIN
 @app.route('/api/login', methods=['POST'])
+#@limiter.limit("10 per hour")
 def login_user():
     data = request.get_json()
     identifier, password, role = data.get('identifier'), data.get('password'), data.get('role')
@@ -317,10 +627,201 @@ def login_user():
 
     if user and bcrypt.checkpw(password.encode('utf-8'), user['password']):
         user = serialize_doc(user)
-        user.pop('password', None)
-        user.pop('faceEmbedding', None)
+        user = sanitize_user_response(user)  # Remove all sensitive fields
         return jsonify({"message": "Login successful", "user": user}), 200
     return jsonify({"error": "Invalid credentials"}), 401
+
+# ✅ ANALYZE FRAME - Server-Side Violation Detection (CRITICAL)
+@app.route('/api/analyze-frame', methods=['POST'])
+@limiter.limit("100 per hour")
+def analyze_frame():
+    """
+    CRITICAL: Server-side frame analysis for proctoring violation detection.
+    
+    Frontend validation can be bypassed - this endpoint provides authoritative violation detection.
+    Analyzes a single frame for multiple violations: face count, identity verification,
+    gaze direction, mouth movement, and head pose.
+    
+    Request Body:
+        examId (str): Exam identifier
+        userId (str): User identifier taking the exam
+        imageDataUrl (str): Base64-encoded image data (data:image/jpeg;base64,...)
+    
+    Returns:
+        200 OK: {violations: [...], score: int, status: "ok"}
+        400 Bad Request: Missing parameters or invalid image
+        404 Not Found: User or exam not found
+        500 Internal Error: Processing failed
+    """
+    try:
+        # 1. Validate input parameters
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Request body is required"}), 400
+        
+        exam_id = data.get('examId')
+        user_id = data.get('userId')
+        image_data_url = data.get('imageDataUrl')
+        
+        if not all([exam_id, user_id, image_data_url]):
+            return jsonify({"error": "examId, userId, and imageDataUrl are required"}), 400
+        
+        # 2. Validate exam exists
+        try:
+            exam = exams_collection.find_one({'_id': ObjectId(exam_id)}) if ObjectId.is_valid(exam_id) else None
+            if not exam:
+                return jsonify({"error": "Exam not found"}), 404
+        except Exception as e:
+            return jsonify({"error": "Invalid exam ID format"}), 400
+        
+        # 3. Validate user exists and is taking this exam
+        try:
+            user = users_collection.find_one({'_id': ObjectId(user_id)}) if ObjectId.is_valid(user_id) else None
+            if not user:
+                return jsonify({"error": "User not found"}), 404
+        except Exception as e:
+            return jsonify({"error": "Invalid user ID format"}), 400
+        
+        # 4. Decode base64 image to OpenCV format
+        try:
+            frame = decode_base64_image(image_data_url)
+            if frame is None:
+                return jsonify({"error": "Invalid image data - could not decode"}), 400
+        except Exception as e:
+            app.logger.error(f"Image decode error: {e}")
+            return jsonify({"error": "Invalid image data format"}), 400
+        
+        # 5. Initialize violations list
+        violations = []
+        
+        # 6. Run face detection
+        try:
+            face_count, faces = detectFace(frame)
+        except Exception as e:
+            app.logger.error(f"Face detection error: {e}")
+            face_count, faces = 0, []
+        
+        # 7. Check face count violations
+        if face_count == 0:
+            violations.append({
+                "type": "no_face",
+                "severity": "critical",
+                "score": 95,
+                "message": "No face detected in frame"
+            })
+        elif face_count > 1:
+            violations.append({
+                "type": "multiple_faces",
+                "severity": "critical",
+                "score": 90,
+                "message": f"{face_count} faces detected"
+            })
+        
+        # 8. If exactly 1 face, run behavioral analysis
+        if face_count == 1:
+            # 8a. Face identity verification
+            try:
+                if ENGINE_AVAILABLE and engine is not None:
+                    # Get stored user embeddings
+                    stored_embeddings = user.get('faceEmbeddings', []) or []
+                    if not stored_embeddings and user.get('faceEmbedding'):
+                        stored_embeddings = [user.get('faceEmbedding')]
+                    
+                    if stored_embeddings:
+                        # Convert to numpy arrays
+                        stored_list = [np.array(e, dtype=np.float32) for e in stored_embeddings]
+                        stored_list = [e / np.linalg.norm(e) if np.linalg.norm(e) > 0 else e for e in stored_list]
+                        
+                        # Verify face identity
+                        variants = [frame]  # Use original frame for verification
+                        is_verified, max_sim, sims = engine.verify_any(stored_list, image_bgr=frame, variants=variants)
+                        
+                        THRESHOLD = get_face_threshold(0.56)
+                        if max_sim < THRESHOLD:
+                            violations.append({
+                                "type": "face_mismatch",
+                                "severity": "critical",
+                                "score": 100,
+                                "message": f"Face identity mismatch (similarity: {max_sim:.2f})"
+                            })
+            except Exception as e:
+                app.logger.error(f"Face verification error: {e}")
+            
+            # 8b. Gaze detection (eyes off screen)
+            try:
+                gaze_direction = gazeDetection(faces, frame)
+                if gaze_direction in ['Left', 'Right']:
+                    violations.append({
+                        "type": "eyes_off_screen",
+                        "severity": "medium",
+                        "score": 15,
+                        "message": f"Eyes looking {gaze_direction.lower()}"
+                    })
+            except Exception as e:
+                app.logger.debug(f"Gaze detection error: {e}")
+            
+            # 8c. Mouth tracking (speaking/suspicious)
+            try:
+                mouth_status = mouthTrack(faces, frame)
+                if "Open" in mouth_status:
+                    violations.append({
+                        "type": "mouth_open",
+                        "severity": "low",
+                        "score": 20,
+                        "message": "Mouth open detected"
+                    })
+            except Exception as e:
+                app.logger.debug(f"Mouth tracking error: {e}")
+            
+            # 8d. Head pose detection (not looking forward)
+            try:
+                head_pose = head_pose_detection(faces, frame)
+                if head_pose not in ["Forward", "N/A"]:
+                    violations.append({
+                        "type": "suspicious_head_pose",
+                        "severity": "medium",
+                        "score": 20,
+                        "message": f"Head pose: {head_pose}"
+                    })
+            except Exception as e:
+                app.logger.debug(f"Head pose detection error: {e}")
+        
+        # 9. Calculate total violation score (capped at 100)
+        total_score = sum(v.get('score', 0) for v in violations)
+        total_score = min(total_score, 100)
+        
+        # 10. Store violations in database
+        timestamp = datetime.datetime.utcnow()
+        for violation in violations:
+            try:
+                proctor_events_collection.insert_one({
+                    'examId': exam_id,
+                    'userId': user_id,
+                    'type': 'violation',
+                    'violationType': violation['type'],
+                    'severity': violation.get('severity', 'unknown'),
+                    'score': violation.get('score', 0),
+                    'message': violation.get('message', ''),
+                    'timestamp': timestamp
+                })
+                
+                # ✅ Broadcast violation to proctors via WebSocket in real-time
+                broadcast_violation(exam_id, user_id, violation)
+                
+            except Exception as e:
+                app.logger.error(f"Failed to store violation: {e}")
+        
+        # 11. Return analysis results
+        return jsonify({
+            "violations": violations,
+            "score": total_score,
+            "status": "ok",
+            "faceCount": face_count
+        }), 200
+        
+    except Exception as e:
+        app.logger.exception("Error in analyze_frame")
+        return jsonify({"error": "Internal processing error", "detail": str(e)}), 500
 
 # Helper: face threshold from settings or env
 def get_face_threshold(default_val=0.58):
@@ -337,6 +838,7 @@ def get_face_threshold(default_val=0.58):
 
 # ✅ FACE VERIFICATION
 @app.route('/api/verify-face', methods=['POST'])
+#@limiter.limit("20 per hour")
 def verify_face():
     print('[FACE-VERIFY] Received face verification request')
     data = request.get_json()
@@ -445,43 +947,8 @@ def verify_face():
             else:
                 return jsonify({"message": "Face verification failed", "verified": False, "similarity": float(max_sim), "similarities": sims}), 401
 
-        # Fallback to DeepFace if engine not available
-        if not DEEPFACE_AVAILABLE or DeepFace is None:
-            return jsonify({"message": "Face verification unavailable in this environment", "verified": False, "similarity": 0.0}), 200
-
-        similarities = []
-        if not stored_list:
-            return jsonify({"message": "No stored face data for user" , "verified": False, "similarities": []}), 200
-
-        for v in variants:
-            try:
-                emb_obj = DeepFace.represent(img_path=v, model_name=MODEL_NAME, detector_backend=DETECTOR_BACKEND, enforce_detection=False)
-                if not emb_obj or not isinstance(emb_obj, list):
-                    continue
-                new_emb = np.array(emb_obj[0].get('embedding'))
-                # Compare to all stored and keep best
-                best_sim = 0.0
-                for s in stored_list:
-                    denom = (np.linalg.norm(s) * np.linalg.norm(new_emb))
-                    sim = float(np.dot(s, new_emb) / denom) if denom > 0 else 0.0
-                    if sim > best_sim:
-                        best_sim = sim
-                similarities.append(best_sim)
-            except Exception as e:
-                app.logger.debug('Variant embedding failed: %s', e)
-                continue
-
-        if not similarities:
-            return jsonify({"message": "Face embedding extraction failed", "verified": False, "similarities": []}), 200
-
-        max_sim = max(similarities)
-        app.logger.info('Face verify (deepface) for %s: similarities=%s, max=%s', identifier, similarities, max_sim)
-
-        THRESHOLD = get_face_threshold(0.58)
-        if max_sim >= THRESHOLD:
-            return jsonify({"message": "Face verified successfully", "verified": True, "similarity": float(max_sim), "similarities": similarities}), 200
-        else:
-            return jsonify({"message": "Face verification failed", "verified": False, "similarity": float(max_sim), "similarities": similarities}), 401
+        # If InsightFace engine not available, return error
+        return jsonify({"error": "Face verification unavailable. InsightFace engine not loaded."}), 500
 
     except ValueError:
         return jsonify({"error": "No face detected"}), 400
@@ -495,11 +962,13 @@ def verify_face():
 
 
 @app.route('/api/proctor', methods=['POST'])
+@limiter.limit("100 per hour")
 def proctor_activity():
     data = request.get_json()
     image_data_url = data.get('imageDataUrl')
     user_id = data.get('userId')
     exam_id = str(data.get('examId') or '')
+    exam_active = data.get('examActive', True)  # True by default for backward compatibility
 
     if not image_data_url or not user_id:
         return jsonify({"error": "Image data and User ID are required"}), 400
@@ -507,6 +976,117 @@ def proctor_activity():
     frame = decode_base64_image(image_data_url)
     if frame is None:
         return jsonify({"error": "Invalid image data"}), 400
+    
+    # Check if frame is blank/black (nearly black or very low brightness)
+    try:
+        mean_brightness = np.mean(frame)
+        
+        # CRITICAL SECURITY CHECK: Distinguish between legitimate and suspicious blank frames
+        if mean_brightness < 10:  # Nearly black frame detected
+            
+            if not exam_active:
+                # LEGITIMATE: Exam submission in progress - camera stopped legitimately
+                print(f"[PROCTOR] Skipping blank frame - exam inactive (brightness: {mean_brightness:.2f})")
+                return jsonify({
+                    "faceCount": 0,
+                    "identityVerified": False,
+                    "similarity": None,
+                    "blinkStatus": "Unknown",
+                    "gazeDirection": "Unknown",
+                    "mouthStatus": "Unknown",
+                    "headPose": "Unknown",
+                    "message": "Blank frame - proctoring stopped"
+                }), 200
+            
+            else:
+                # SUSPICIOUS: Exam is ACTIVE but frame is blank - camera likely covered!
+                print(f"[PROCTOR] ⚠️ CAMERA COVERED/BLOCKED during active exam! (brightness: {mean_brightness:.2f})")
+                
+                # Record HIGH severity event - this is cheating behavior
+                try:
+                    now = datetime.datetime.utcnow()
+                    recent = proctor_events_collection.find_one({
+                        'examId': str(exam_id),
+                        'userId': str(user_id),
+                        'eventType': 'camera_blocked',
+                        'timestamp': {'$gt': now - datetime.timedelta(seconds=5)}
+                    })
+                    
+                    if not recent:
+                        # Encode the blank frame as evidence (shows black screen)
+                        _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                        frame_base64 = base64.b64encode(buffer).decode('utf-8')
+                        frame_evidence = f"data:image/jpeg;base64,{frame_base64}"
+                        
+                        proctor_events_collection.insert_one({
+                            'examId': str(exam_id),
+                            'userId': str(user_id),
+                            'eventType': 'camera_blocked',
+                            'details': {
+                                'brightness': float(mean_brightness),
+                                'message': 'Camera blocked/covered during exam - possible cheating attempt'
+                            },
+                            'severity': 'high',
+                            'timestamp': now,
+                            'frameEvidence': frame_evidence
+                        })
+                        print(f"[PROCTOR-EVENT] camera_blocked (high) for user {user_id} in exam {exam_id}")
+                except Exception as e:
+                    print(f"[PROCTOR] Error recording camera_blocked event: {e}")
+                
+                # Return response indicating blocked camera
+                return jsonify({
+                    "faceCount": 0,
+                    "identityVerified": False,
+                    "similarity": None,
+                    "blinkStatus": "Unknown",
+                    "gazeDirection": "Unknown",
+                    "mouthStatus": "Camera Blocked",
+                    "headPose": "Camera Blocked",
+                    "message": "Camera appears to be blocked or covered"
+                }), 200
+        
+        # ADDITIONAL CHECK: Suspiciously dark environment (possible hand/cloth covering camera partially)
+        elif mean_brightness < 25 and exam_active:  # Very dark but not completely black
+            print(f"[PROCTOR] ⚠️ Suspiciously dark frame during exam (brightness: {mean_brightness:.2f})")
+            
+            # Check if face can be detected in this dark frame
+            temp_face_count, _ = detectFace(frame)
+            
+            if temp_face_count == 0:
+                # No face detected in dark frame - likely covered
+                try:
+                    now = datetime.datetime.utcnow()
+                    recent = proctor_events_collection.find_one({
+                        'examId': str(exam_id),
+                        'userId': str(user_id),
+                        'eventType': 'camera_obscured',
+                        'timestamp': {'$gt': now - datetime.timedelta(seconds=5)}
+                    })
+                    
+                    if not recent:
+                        _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                        frame_base64 = base64.b64encode(buffer).decode('utf-8')
+                        frame_evidence = f"data:image/jpeg;base64,{frame_base64}"
+                        
+                        proctor_events_collection.insert_one({
+                            'examId': str(exam_id),
+                            'userId': str(user_id),
+                            'eventType': 'camera_obscured',
+                            'details': {
+                                'brightness': float(mean_brightness),
+                                'message': 'Camera partially obscured or very dark environment'
+                            },
+                            'severity': 'high',
+                            'timestamp': now,
+                            'frameEvidence': frame_evidence
+                        })
+                        print(f"[PROCTOR-EVENT] camera_obscured (high) for user {user_id} in exam {exam_id}")
+                except Exception as e:
+                    print(f"[PROCTOR] Error recording camera_obscured event: {e}")
+                
+    except Exception as e:
+        print(f"[PROCTOR] Error checking frame brightness: {e}")
 
     # Face count for basic checks
     face_count, faces = detectFace(frame)
@@ -581,31 +1161,8 @@ def proctor_activity():
                 THRESH_P = get_face_threshold(0.56)
                 identity_verified = similarity_score >= THRESH_P
                 app.logger.info('Proctor identity (engine) for %s similarities=%s max=%s thr=%s', user_id, sims, similarity_score, THRESH_P)
-            elif DEEPFACE_AVAILABLE and DeepFace is not None:
-                sims = []
-                for v in variants:
-                    try:
-                        emb_o = DeepFace.represent(img_path=v, model_name=MODEL_NAME, detector_backend=DETECTOR_BACKEND, enforce_detection=False)
-                        if not emb_o or not isinstance(emb_o, list):
-                            continue
-                        new_embedding = np.array(emb_o[0].get('embedding'))
-                        # best vs stored_list
-                        best_sim = 0.0
-                        for s in stored_list:
-                            denom = (np.linalg.norm(s) * np.linalg.norm(new_embedding))
-                            sim = float(np.dot(s, new_embedding) / denom) if denom > 0 else 0.0
-                            if sim > best_sim:
-                                best_sim = sim
-                        sims.append(best_sim)
-                    except Exception as e:
-                        app.logger.debug('Proctor variant embed failed: %s', e)
-                        continue
-                if sims:
-                    similarity_score = float(max(sims))
-                    app.logger.info('Proctor identity (deepface) for %s similarities=%s max=%s', user_id, sims, similarity_score)
-                    THRESH = get_face_threshold(0.58)
-                    if similarity_score >= THRESH:
-                        identity_verified = True
+            else:
+                app.logger.warning('Proctor identity verification skipped - InsightFace engine not available')
     except Exception as e:
         print(f"Error during live identity verification: {e}")
 
@@ -626,94 +1183,309 @@ def proctor_activity():
     except Exception:
         avg_b = None
 
-    # Advanced event logic: rolling windows and debounced emits (if examId provided)
+    # Immediate event recording - no tolerance thresholds
     try:
         if exam_id and user_id:
-            print(f"[PROCTOR] Analysis for exam {exam_id}, user {user_id}: identity={identity_verified}, faces={face_count}, headPose={results['headPose']}, gaze={results['gazeDirection']}")
-            
-            key = (str(exam_id), str(user_id))
-            st = PROCTOR_STATE.get(key) or {'poses': [], 'gazes': [], 'mouths': [], 'faces': [], 'brightness': [], 'last_emit': {}}
             now = datetime.datetime.utcnow()
-            # append current metrics
-            st['poses'].append((now, results['headPose']))
-            st['gazes'].append((now, results['gazeDirection']))
-            st['mouths'].append((now, results['mouthStatus']))
-            st['faces'].append((now, face_count))
-            if avg_b is not None:
-                st['brightness'].append((now, avg_b))
-            # keep last 30s window only
-            cutoff = now - datetime.timedelta(seconds=30)
-            for k in ['poses','gazes','mouths','faces','brightness']:
-                st[k] = [(t,v) for (t,v) in st[k] if t >= cutoff]
-
-            def recently_emitted(ev_type: str, cooldown_s=30):
-                ts = st['last_emit'].get(ev_type)
-                return bool(ts and (now - ts).total_seconds() < cooldown_s)
+            key = (str(exam_id), str(user_id))
+            st = PROCTOR_STATE.get(key) or {
+                'last_emit': {},  # Track last event time to prevent spam (5 second cooldown per event type)
+                'reference_background': None
+            }
+            
+            # Store reference background on first check (for background change detection)
+            if st['reference_background'] is None and frame is not None:
+                try:
+                    ref_small = cv2.resize(frame, (160, 120))
+                    st['reference_background'] = ref_small.copy()
+                except Exception as e:
+                    print(f"[PROCTOR] Error storing reference background: {e}")
 
             def emit(ev_type: str, details: dict, severity: str):
-                if recently_emitted(ev_type):
+                # Short cooldown to prevent spam (5 seconds per event type)
+                last_time = st['last_emit'].get(ev_type)
+                if last_time and (now - last_time).total_seconds() < 5:
                     return
+                
+                # Capture frame evidence as base64 image
+                frame_evidence = None
+                if frame is not None:
+                    try:
+                        # Check if frame is blank/black/very dark - increased threshold to 30
+                        mean_brightness = np.mean(frame)
+                        if mean_brightness < 30:
+                            print(f"[PROCTOR] Skipping event {ev_type} - blank/dark frame detected (brightness: {mean_brightness:.2f})")
+                            return  # Don't record events with blank/dark frames
+                        
+                        # Encode frame to JPEG format
+                        _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                        frame_base64 = base64.b64encode(buffer).decode('utf-8')
+                        frame_evidence = f"data:image/jpeg;base64,{frame_base64}"
+                    except Exception as e:
+                        print(f"[PROCTOR] Error encoding frame: {e}")
+                        return  # Don't record event if frame capture fails
+                
                 proctor_events_collection.insert_one({
-                    'examId': str(exam_id), 'userId': str(user_id), 'eventType': ev_type,
-                    'details': details, 'severity': severity, 'timestamp': now
+                    'examId': str(exam_id),
+                    'userId': str(user_id),
+                    'eventType': ev_type,
+                    'details': details,
+                    'severity': severity,
+                    'timestamp': now,
+                    'frameEvidence': frame_evidence  # Store captured frame
                 })
                 st['last_emit'][ev_type] = now
+                print(f"[PROCTOR-EVENT] {ev_type} ({severity}) for user {user_id} in exam {exam_id}")
 
-            # Head pose: frequent changes within window
-            pose_vals = [p for _, p in st['poses']]
-            if len(pose_vals) >= 5:
-                changes = sum(1 for i in range(1,len(pose_vals)) if pose_vals[i] != pose_vals[i-1])
-                if changes >= 4:
-                    emit('head_pose_excess', {'changes': changes}, 'medium')
 
-            # Gaze aversion: off-center majority
-            gaze_vals = [g for _, g in st['gazes']]
-            if len(gaze_vals) >= 6:
-                off = sum(1 for g in gaze_vals if g and str(g).lower() != 'center')
-                if off >= 5:
-                    emit('gaze_aversion', {'off_center': off, 'window': len(gaze_vals)}, 'medium')
-
-            # Talking / mouth open pattern
-            mouth_vals = [m for _, m in st['mouths']]
-            if len(mouth_vals) >= 6:
-                talking = sum(1 for m in mouth_vals if m and str(m).lower() in ('open','talking','speaking'))
-                if talking >= 5:
-                    emit('talking', {'count': talking}, 'medium')
-
-            # Multiple faces
+            # IMMEDIATE EVENT DETECTION - Record all suspicious activity
+            
+            # 1. IDENTITY VERIFICATION - High severity
+            if not identity_verified and similarity_score is not None:
+                emit('identity_mismatch', {
+                    'similarity': float(similarity_score),
+                    'message': 'Face does not match registered student'
+                }, 'high')
+            
+            # 2. MULTIPLE FACES - High severity (immediate detection)
             if face_count and face_count > 1:
-                emit('multiple_faces', {'count': face_count}, 'high')
-
-            # Face missing/occlusion heuristic: 0 faces for several recent frames
-            face_vals = [c for _, c in st['faces']]
-            if len(face_vals) >= 5 and all((c or 0) == 0 for c in face_vals[-5:]):
-                emit('face_missing', {'consecutive': 5}, 'medium')
-
-            # Environment change: brightness variance
-            if len(st['brightness']) >= 6:
-                vals = [v for _, v in st['brightness']]
-                if max(vals) - min(vals) > 40.0:  # heuristic threshold
-                    emit('environment_change', {'min': float(min(vals)), 'max': float(max(vals))}, 'info')
+                emit('multiple_faces', {
+                    'count': face_count,
+                    'message': f'{face_count} people detected in frame'
+                }, 'high')
+            
+            # 3. NO FACE DETECTED - Medium severity
+            if face_count == 0:
+                emit('face_missing', {
+                    'message': 'No face detected in frame'
+                }, 'medium')
+            
+            # 4. HEAD POSE - Low severity (looking away)
+            head_pose = results.get('headPose')
+            if head_pose and str(head_pose).lower() not in ('forward', 'center', 'normal'):
+                severity = 'medium' if str(head_pose).lower() in ('down', 'extreme_left', 'extreme_right') else 'low'
+                emit('head_pose', {
+                    'pose': head_pose,
+                    'message': f'Head turned {head_pose}'
+                }, severity)
+            
+            # 5. GAZE DIRECTION - Low severity (eyes looking away)
+            gaze = results.get('gazeDirection')
+            if gaze and str(gaze).lower() not in ('center', 'normal', 'forward'):
+                emit('gaze_aversion', {
+                    'direction': gaze,
+                    'message': f'Eyes looking {gaze}'
+                }, 'low')
+            
+            # 6. MOUTH STATUS - Medium severity (talking detected)
+            mouth = results.get('mouthStatus')
+            if mouth and str(mouth).lower() in ('open', 'talking', 'speaking'):
+                emit('talking', {
+                    'status': mouth,
+                    'message': 'Mouth movement detected'
+                }, 'medium')
+            
+            # 7. BACKGROUND CHANGE - High severity (detects hands, objects, people)
+            if st['reference_background'] is not None and frame is not None:
+                try:
+                    current_small = cv2.resize(frame, (160, 120))
+                    diff = cv2.absdiff(st['reference_background'], current_small)
+                    diff_score = np.mean(diff)
+                    
+                    BACKGROUND_THRESHOLD = 20.0  # Detect significant background changes
+                    if diff_score > BACKGROUND_THRESHOLD:
+                        emit('background_change', {
+                            'change_score': float(diff_score),
+                            'message': 'Background changed - possible external assistance'
+                        }, 'high')
+                except Exception as e:
+                    print(f"[PROCTOR] Error in background detection: {e}")
 
             PROCTOR_STATE[key] = st
     except Exception as e:
-        app.logger.debug('Advanced proctor logic error: %s', e)
+        app.logger.debug('Proctor logic error: %s', e)
 
-    print(f"[PROCTOR] Returning results: {results}")
     return jsonify(results), 200
+
+
+@app.route('/api/proctor/reset', methods=['POST'])
+def reset_proctor_state():
+    """Reset proctoring state for a user-exam pair (called when exam starts)"""
+    data = request.get_json()
+    exam_id = data.get('examId')
+    user_id = data.get('userId')
+    
+    if not exam_id or not user_id:
+        return jsonify({"error": "examId and userId are required"}), 400
+    
+    key = (str(exam_id), str(user_id))
+    if key in PROCTOR_STATE:
+        del PROCTOR_STATE[key]
+    
+    return jsonify({"message": "Proctor state reset successfully"}), 200
 
 
 @app.route('/api/proctor/audio', methods=['POST'])
 def proctor_audio():
+    """Process audio chunk and emit event only if human voice is detected."""
     data = request.get_json()
     audio_b64 = data.get('audioData')
+    exam_id = data.get('examId')
+    user_id = data.get('userId')
+    
     if not audio_b64:
         return jsonify({"error": "Audio data is required"}), 400
     
     audio_bytes = base64.b64decode(audio_b64)
     result = process_audio_chunk(audio_bytes)
+    
+    # Record proctoring event only if voice is detected
+    if result == "Voice detected" and exam_id and user_id:
+        try:
+            now = datetime.datetime.utcnow()
+            # Check cooldown (10 seconds for audio to prevent spam)
+            recent = proctor_events_collection.find_one({
+                'examId': str(exam_id),
+                'userId': str(user_id),
+                'eventType': 'audio_voice',
+                'timestamp': {'$gt': now - datetime.timedelta(seconds=10)}
+            })
+            
+            if not recent:
+                proctor_events_collection.insert_one({
+                    'examId': str(exam_id),
+                    'userId': str(user_id),
+                    'eventType': 'audio_voice',
+                    'details': {'status': 'Voice detected', 'message': 'Human voice detected during exam'},
+                    'severity': 'high',  # Voice during exam is high severity
+                    'timestamp': now
+                })
+                print(f"[PROCTOR-EVENT] audio_voice (high) for user {user_id} in exam {exam_id}")
+        except Exception as e:
+            print(f"Error recording audio event: {e}")
 
     return jsonify({"audioStatus": result}), 200
+
+# ✅ LOG SUSPICIOUS ACTIVITY - Browser Lock Violations (CRITICAL)
+@app.route('/api/log-activity', methods=['POST'])
+@limiter.limit("200 per hour")
+def log_suspicious_activity():
+    """
+    CRITICAL: Log suspicious activities like tab switching, fullscreen exit, dev tools.
+    
+    Tracks student attempts to bypass exam security measures including:
+    - Exiting fullscreen mode
+    - Switching tabs/windows
+    - Opening developer tools
+    - Right-click attempts
+    - Copy/paste attempts
+    - Window blur/focus changes
+    
+    Request Body:
+        examId (str): Exam identifier
+        userId (str): User identifier
+        activityType (str): Type of activity (fullscreen_exit, tab_switch, dev_tools, etc.)
+        timestamp (str): ISO timestamp (optional, server will use current time if not provided)
+        details (dict): Optional additional information
+    
+    Returns:
+        200 OK: {message, eventId}
+        400 Bad Request: Missing parameters
+        500 Internal Error: Database error
+    """
+    try:
+        # 1. Get and validate input
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Request body is required"}), 400
+        
+        exam_id = data.get('examId')
+        user_id = data.get('userId')
+        activity_type = data.get('activityType')
+        details = data.get('details', {})
+        
+        if not exam_id:
+            return jsonify({"error": "examId is required"}), 400
+        
+        if not user_id:
+            return jsonify({"error": "userId is required"}), 400
+        
+        if not activity_type:
+            return jsonify({"error": "activityType is required"}), 400
+        
+        # 2. Determine severity based on activity type
+        severity_map = {
+            'fullscreen_exit': 'critical',
+            'tab_switch': 'high',
+            'tab_unfocused': 'high',
+            'window_blur': 'medium',
+            'dev_tools_opened': 'critical',
+            'dev_tools_attempt': 'high',
+            'right_click': 'low',
+            'copy_attempted': 'medium',
+            'paste_attempted': 'medium',
+            'print_screen': 'high',
+            'screenshot_attempt': 'high',
+            'multiple_monitors': 'medium',
+            'browser_resize': 'low'
+        }
+        
+        severity = severity_map.get(activity_type, 'medium')
+        
+        # 3. Calculate violation score
+        score_map = {
+            'critical': 50,
+            'high': 30,
+            'medium': 15,
+            'low': 5
+        }
+        
+        score = score_map.get(severity, 10)
+        
+        # 4. Create activity record
+        activity_record = {
+            'examId': str(exam_id),
+            'userId': str(user_id),
+            'type': 'suspicious_activity',
+            'activityType': activity_type,
+            'severity': severity,
+            'score': score,
+            'details': details,
+            'timestamp': datetime.datetime.utcnow()
+        }
+        
+        # 5. Store in database
+        try:
+            result = proctor_events_collection.insert_one(activity_record)
+            event_id = str(result.inserted_id)
+        except Exception as e:
+            app.logger.error(f"Failed to store activity record: {e}")
+            return jsonify({"error": "Failed to store activity"}), 500
+        
+        # 6. Broadcast to proctors via WebSocket if critical
+        if severity in ['critical', 'high']:
+            try:
+                violation_data = {
+                    'type': activity_type,
+                    'severity': severity,
+                    'score': score,
+                    'message': f"Suspicious activity: {activity_type.replace('_', ' ')}"
+                }
+                broadcast_violation(exam_id, user_id, violation_data)
+            except Exception as e:
+                app.logger.error(f"Failed to broadcast activity: {e}")
+        
+        # 7. Return success
+        return jsonify({
+            "message": "Activity logged successfully",
+            "eventId": event_id,
+            "severity": severity,
+            "score": score
+        }), 200
+        
+    except Exception as e:
+        app.logger.exception("Error in log_suspicious_activity")
+        return jsonify({"error": "Internal processing error", "detail": str(e)}), 500
 
 # --- Exam Routes ---
 @app.route('/api/exams', methods=['POST'])
@@ -757,6 +1529,134 @@ def update_exam_status(exam_id):
         return jsonify({"message": f"Exam status updated to {new_status}"}), 200
     else:
         return jsonify({"error": "Exam not found or status not updated"}), 404
+
+# ✅ GET EXAM STATUS - Time Enforcement and Duration Limits (CRITICAL)
+@app.route('/api/exams/<exam_id>/status', methods=['GET'])
+@limiter.limit("200 per hour")
+def get_exam_status(exam_id):
+    """
+    CRITICAL: Check exam status and enforce time limits.
+    
+    Returns current exam status (not_started, active, expired) based on start time,
+    duration, and current time. Used by frontend to show countdown timer and
+    auto-submit when time expires.
+    
+    Frontend should poll this endpoint every 5 seconds during exam to:
+    - Update countdown timer
+    - Warn user when time is running out
+    - Auto-submit answers when exam expires
+    
+    URL Parameters:
+        exam_id (str): Exam identifier
+    
+    Returns:
+        200 OK with status:
+            - not_started: {status, startTime, timeUntilStart}
+            - active: {status, startTime, endTime, timeRemaining, percentTimeRemaining, duration}
+            - expired: {status, endTime, message}
+        404 Not Found: Exam not found
+        400 Bad Request: Exam start time not set
+        500 Internal Error: Time calculation error
+    """
+    try:
+        # 1. Validate and retrieve exam
+        try:
+            exam = exams_collection.find_one({'_id': ObjectId(exam_id)}) if ObjectId.is_valid(exam_id) else None
+            if not exam:
+                return jsonify({"error": "Exam not found"}), 404
+        except Exception as e:
+            return jsonify({"error": "Invalid exam ID format"}), 400
+        
+        # 2. Get exam timing parameters
+        start_time = exam.get('startTime')
+        duration = exam.get('duration')  # in minutes
+        
+        # Validate required fields
+        if not start_time:
+            return jsonify({"error": "Exam start time not set"}), 400
+        
+        if not duration:
+            return jsonify({"error": "Exam duration not set"}), 400
+        
+        # 3. Parse start time if it's a string (ISO format)
+        if isinstance(start_time, str):
+            try:
+                # Try parsing ISO format with 'Z' or without timezone
+                if start_time.endswith('Z'):
+                    start_time = datetime.datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+                else:
+                    start_time = datetime.datetime.fromisoformat(start_time)
+                
+                # Convert to UTC if timezone-aware
+                if start_time.tzinfo is not None:
+                    start_time = start_time.replace(tzinfo=None)
+            except Exception as e:
+                app.logger.error(f"Failed to parse start time: {e}")
+                return jsonify({"error": "Invalid start time format"}), 400
+        
+        # 4. Calculate end time
+        try:
+            duration_minutes = int(duration)
+            end_time = start_time + datetime.timedelta(minutes=duration_minutes)
+        except Exception as e:
+            return jsonify({"error": "Invalid duration format"}), 400
+        
+        # 5. Get current UTC time
+        now = datetime.datetime.utcnow()
+        
+        # 6. Determine exam status based on time comparison
+        
+        # Case 1: Exam hasn't started yet
+        if now < start_time:
+            time_until_start = (start_time - now).total_seconds()
+            return jsonify({
+                "status": "not_started",
+                "startTime": start_time.isoformat() + 'Z',
+                "timeUntilStart": int(time_until_start)
+            }), 200
+        
+        # Case 2: Exam has expired
+        elif now > end_time:
+            return jsonify({
+                "status": "expired",
+                "endTime": end_time.isoformat() + 'Z',
+                "message": "Exam time exceeded"
+            }), 200
+        
+        # Case 3: Exam is active
+        else:
+            # Calculate remaining time
+            time_remaining = (end_time - now).total_seconds()
+            
+            # Calculate percentage of time remaining
+            total_duration_seconds = duration_minutes * 60
+            percent_time_remaining = (time_remaining / total_duration_seconds) * 100 if total_duration_seconds > 0 else 0
+            
+            # Determine warning level (optional bonus feature)
+            warning = None
+            if time_remaining <= 60:  # 1 minute or less
+                warning = "critical"
+            elif time_remaining <= 300:  # 5 minutes or less
+                warning = "low"
+            
+            response_data = {
+                "status": "active",
+                "startTime": start_time.isoformat() + 'Z',
+                "endTime": end_time.isoformat() + 'Z',
+                "timeRemaining": int(time_remaining),
+                "percentTimeRemaining": round(percent_time_remaining, 2),
+                "duration": duration_minutes
+            }
+            
+            # Add warning if applicable
+            if warning:
+                response_data["warning"] = warning
+            
+            return jsonify(response_data), 200
+        
+    except Exception as e:
+        app.logger.exception("Error in get_exam_status")
+        return jsonify({"error": "Time calculation error", "detail": str(e)}), 500
 
 @app.route('/api/exams/<exam_id>', methods=['DELETE'])
 def delete_exam(exam_id):
@@ -920,6 +1820,194 @@ def submit_exam(exam_id):
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
+# ✅ CALCULATE SCORE - Server-Side Answer Verification (CRITICAL)
+@app.route('/api/exams/<exam_id>/calculate-score', methods=['POST'])
+@limiter.limit("50 per hour")
+def calculate_score(exam_id):
+    """
+    CRITICAL: Server-side answer verification and score calculation.
+    
+    Frontend grading can be bypassed - this endpoint provides authoritative scoring.
+    Compares user answers against correct answers, calculates marks, stores attempt
+    record, and returns detailed results with grade.
+    
+    Request Body:
+        userId (str): User identifier submitting answers
+        answers (list): Array of answer objects with questionId and answer fields
+            Example: [{"questionId": "q1", "answer": "A"}, {"questionId": "q2", "answer": true}]
+    
+    Returns:
+        200 OK: {score, totalMarks, percentage, correctCount, totalCount, grade}
+        400 Bad Request: Missing parameters, exam has no questions, or question not found
+        404 Not Found: Exam not found
+        500 Internal Error: Database or processing error
+    """
+    try:
+        # 1. Validate input parameters
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Request body is required"}), 400
+        
+        user_id = data.get('userId')
+        user_answers = data.get('answers')
+        
+        if not user_id:
+            return jsonify({"error": "userId is required"}), 400
+        
+        if not user_answers or not isinstance(user_answers, list):
+            return jsonify({"error": "answers array is required"}), 400
+        
+        # 2. Validate exam exists
+        try:
+            exam = exams_collection.find_one({'_id': ObjectId(exam_id)}) if ObjectId.is_valid(exam_id) else None
+            if not exam:
+                return jsonify({"error": "Exam not found"}), 404
+        except Exception as e:
+            return jsonify({"error": "Invalid exam ID format"}), 400
+        
+        # 3. Validate exam has questions
+        questions = exam.get('questions', [])
+        if not questions:
+            return jsonify({"error": "Exam has no questions"}), 400
+        
+        # 4. Initialize scoring variables
+        score = 0
+        total_marks = 0
+        correct_count = 0
+        total_count = len(questions)
+        
+        # Create answer lookup for faster access
+        answer_map = {ans.get('questionId'): ans.get('answer') for ans in user_answers if ans.get('questionId')}
+        
+        # 5. Process each question and compare answers
+        for question in questions:
+            try:
+                # Get question details
+                question_id = str(question.get('_id', ''))
+                correct_answer = question.get('correctAnswer')
+                marks = question.get('marks', 0) or 0
+                question_type = question.get('type', 'short-answer')
+                
+                # Add to total marks
+                total_marks += marks
+                
+                # Get user's answer for this question
+                user_answer = answer_map.get(question_id)
+                
+                # Skip if user didn't answer
+                if user_answer is None:
+                    continue
+                
+                # 6. Compare answers based on question type
+                is_correct = False
+                
+                if question_type == 'multiple-choice':
+                    # Multiple choice: exact match (case-sensitive for option letters)
+                    if str(user_answer) == str(correct_answer):
+                        is_correct = True
+                
+                elif question_type == 'true-false':
+                    # Boolean: handle various true/false representations
+                    user_bool = None
+                    correct_bool = None
+                    
+                    # Convert user answer to boolean
+                    if isinstance(user_answer, bool):
+                        user_bool = user_answer
+                    else:
+                        user_str = str(user_answer).lower().strip()
+                        if user_str in ('true', '1', 'yes', 't', 'y'):
+                            user_bool = True
+                        elif user_str in ('false', '0', 'no', 'f', 'n'):
+                            user_bool = False
+                    
+                    # Convert correct answer to boolean
+                    if isinstance(correct_answer, bool):
+                        correct_bool = correct_answer
+                    else:
+                        correct_str = str(correct_answer).lower().strip()
+                        if correct_str in ('true', '1', 'yes', 't', 'y'):
+                            correct_bool = True
+                        elif correct_str in ('false', '0', 'no', 'f', 'n'):
+                            correct_bool = False
+                    
+                    # Compare booleans
+                    if user_bool is not None and correct_bool is not None and user_bool == correct_bool:
+                        is_correct = True
+                
+                else:
+                    # Short answer / essay: case-insensitive, trimmed comparison
+                    if correct_answer is not None:
+                        user_text = str(user_answer).strip().lower()
+                        correct_text = str(correct_answer).strip().lower()
+                        if user_text == correct_text:
+                            is_correct = True
+                
+                # 7. Update score if correct
+                if is_correct:
+                    score += marks
+                    correct_count += 1
+                    
+            except Exception as e:
+                app.logger.error(f"Error grading question {question_id}: {e}")
+                # Continue processing other questions even if one fails
+                continue
+        
+        # 8. Calculate percentage (handle division by zero)
+        percentage = round((score / total_marks) * 100, 2) if total_marks > 0 else 0
+        
+        # 9. Determine grade based on percentage
+        if percentage >= 90:
+            grade = 'A'
+        elif percentage >= 80:
+            grade = 'B'
+        elif percentage >= 70:
+            grade = 'C'
+        elif percentage >= 60:
+            grade = 'D'
+        else:
+            grade = 'F'
+        
+        # 10. Store attempt record in database
+        attempt_record = {
+            'userId': user_id,
+            'score': score,
+            'totalMarks': total_marks,
+            'percentage': percentage,
+            'correctCount': correct_count,
+            'totalCount': total_count,
+            'grade': grade,
+            'submittedAt': datetime.datetime.utcnow(),
+            'answers': user_answers
+        }
+        
+        try:
+            # Push attempt to attempts array and add user to completedBy set
+            exams_collection.update_one(
+                {'_id': ObjectId(exam_id)},
+                {
+                    '$push': {'attempts': attempt_record},
+                    '$addToSet': {'completedBy': user_id}
+                }
+            )
+        except Exception as e:
+            app.logger.error(f"Failed to store attempt record: {e}")
+            return jsonify({"error": "Failed to save exam results"}), 500
+        
+        # 11. Return results (DO NOT include correct answers or answer keys)
+        return jsonify({
+            "score": score,
+            "totalMarks": total_marks,
+            "percentage": percentage,
+            "correctCount": correct_count,
+            "totalCount": total_count,
+            "grade": grade
+        }), 200
+        
+    except Exception as e:
+        app.logger.exception("Error in calculate_score")
+        return jsonify({"error": "Internal processing error", "detail": str(e)}), 500
+
 @app.route('/api/exams', methods=['GET'])
 def get_exams():
     # Optional ?userId= to include per-user attempt info (helps client hide Start button after submission)
@@ -1068,17 +2156,11 @@ def get_exam_report(exam_id):
 
 @app.route('/api/admin/stats', methods=['GET'])
 def get_admin_stats():
-    """Return small set of stats for the lecturer dashboard (mock-friendly)."""
-    # Require lecturer role
-    requester = request.headers.get('X-User-Id')
-    if not requester:
-        return jsonify({'error': 'X-User-Id header required'}), 403
-    try:
-        req_user = users_collection.find_one({'_id': ObjectId(requester)}) if ObjectId.is_valid(requester) else None
-    except Exception:
-        req_user = None
-    if not req_user or req_user.get('role') != 'lecturer':
-        return jsonify({'error': 'Forbidden: lecturer role required'}), 403
+    """Return small set of stats for the admin dashboard (mock-friendly)."""
+    # Require admin role
+    is_admin, admin_user, error = require_admin()
+    if not is_admin:
+        return error
 
     try:
         total_students = users_collection.count_documents({'role': 'student'})
@@ -1145,11 +2227,10 @@ def update_exam(exam_id):
 def record_proctor_event():
     """Record a proctoring event emitted by the student's client (suspicious detections)."""
     data = request.get_json()
-    print(f"[PROCTOR-EVENT] Received event: {data.get('eventType') if data else 'NO DATA'}")
     
     required = ['examId', 'userId', 'eventType']
     if not data or not all(k in data for k in required):
-        print(f"[PROCTOR-EVENT] ERROR: Missing required fields. Data: {data}")
+        print(f"[PROCTOR-EVENT] ERROR: Missing required fields")
         return jsonify({'error': 'Missing required fields'}), 400
 
     # Normalize eventType to a consistent lower_snake format
@@ -1200,7 +2281,6 @@ def record_proctor_event():
             pass
     try:
         proctor_events_collection.insert_one(event)
-        print(f"[PROCTOR-EVENT] Successfully saved event: {event_type} for user {data['userId']}")
         return jsonify({'message': 'Event recorded'}), 201
     except Exception as e:
         print(f"[PROCTOR-EVENT] ERROR saving event: {e}")
@@ -1281,8 +2361,6 @@ def get_proctoring_summary(exam_id):
 @app.route('/api/exams/<exam_id>/proctoring/<user_id>', methods=['GET'])
 def get_proctoring_details(exam_id, user_id):
     """Return detailed proctor events for a student in an exam."""
-    print(f"[PROCTOR-FETCH] Fetching events for exam {exam_id}, user {user_id}")
-    
     # Require lecturer role
     requester = request.headers.get('X-User-Id')
     if not requester:
@@ -1295,8 +2373,8 @@ def get_proctoring_details(exam_id, user_id):
         return jsonify({'error': 'Forbidden: lecturer role required'}), 403
 
     try:
-        docs = list(proctor_events_collection.find({'examId': str(exam_id), 'userId': str(user_id)}).sort('timestamp', 1))
-        print(f"[PROCTOR-FETCH] Found {len(docs)} events for user {user_id} in exam {exam_id}")
+        # Sort by timestamp descending - newest events first
+        docs = list(proctor_events_collection.find({'examId': str(exam_id), 'userId': str(user_id)}).sort('timestamp', -1))
         
         events = []
         for d in docs:
@@ -1304,10 +2382,9 @@ def get_proctoring_details(exam_id, user_id):
             ev['_id'] = str(ev.get('_id'))
             ts = ev.get('timestamp')
             if isinstance(ts, datetime.datetime):
-                ev['timestamp'] = ts.isoformat()
+                ev['timestamp'] = ts.isoformat()  # ISO format for frontend parsing
             events.append(ev)
         
-        print(f"[PROCTOR-FETCH] Returning {len(events)} events")
         return jsonify({'events': events}), 200
     except Exception as e:
         print(f"[PROCTOR-FETCH] ERROR: {e}")
@@ -1341,7 +2418,8 @@ def get_proctoring_recent(exam_id):
             pass
 
     try:
-        docs = list(proctor_events_collection.find(q).sort('timestamp', 1).limit(limit))
+        # Sort by timestamp descending - newest events first
+        docs = list(proctor_events_collection.find(q).sort('timestamp', -1).limit(limit))
         events = []
         for d in docs:
             ev = d.copy()
@@ -1354,6 +2432,426 @@ def get_proctoring_recent(exam_id):
     except Exception as e:
         print(f"Error fetching recent proctor events: {e}")
         return jsonify({'error': str(e)}), 500
+
+# ✅ PAGINATED PROCTOR EVENTS - Performance Optimization (CRITICAL)
+@app.route('/api/proctor-events', methods=['GET'])
+@limiter.limit("100 per hour")
+def get_proctor_events():
+    """
+    CRITICAL: Paginated proctor events to prevent memory/performance issues.
+    
+    Returns paginated list of proctoring events for an exam, preventing memory
+    and performance issues when dealing with thousands of events.
+    
+    Query Parameters:
+        examId (str): Exam identifier (required)
+        userId (str): User identifier to filter by specific student (optional)
+        page (int): Page number starting at 1 (default: 1)
+        limit (int): Events per page, max 200 (default: 50)
+    
+    Returns:
+        200 OK: {events, page, limit, total, pages, hasNext, hasPrev}
+        400 Bad Request: Missing examId or invalid parameters
+        404 Not Found: Exam not found
+        500 Internal Error: Database error
+    """
+    try:
+        # 1. Get and validate query parameters
+        exam_id = request.args.get('examId')
+        user_id = request.args.get('userId')
+        
+        if not exam_id:
+            return jsonify({"error": "examId query parameter is required"}), 400
+        
+        # Get pagination parameters
+        try:
+            page = int(request.args.get('page', 1))
+            if page < 1:
+                return jsonify({"error": "page must be >= 1"}), 400
+        except ValueError:
+            return jsonify({"error": "Invalid page parameter"}), 400
+        
+        try:
+            limit = int(request.args.get('limit', 50))
+            if limit < 1:
+                return jsonify({"error": "limit must be >= 1"}), 400
+            if limit > 200:
+                return jsonify({"error": "limit cannot exceed 200"}), 400
+        except ValueError:
+            return jsonify({"error": "Invalid limit parameter"}), 400
+        
+        # 2. Validate exam exists
+        try:
+            exam = exams_collection.find_one({'_id': ObjectId(exam_id)}) if ObjectId.is_valid(exam_id) else None
+            if not exam:
+                return jsonify({"error": "Exam not found"}), 404
+        except Exception as e:
+            return jsonify({"error": "Invalid exam ID format"}), 400
+        
+        # 3. Build MongoDB query
+        query = {'examId': str(exam_id)}
+        if user_id:
+            query['userId'] = str(user_id)
+        
+        # 4. Calculate skip for pagination
+        skip = (page - 1) * limit
+        
+        # 5. Get total count for pagination info
+        try:
+            total = proctor_events_collection.count_documents(query)
+        except Exception as e:
+            app.logger.error(f"Error counting proctor events: {e}")
+            return jsonify({"error": "Failed to count events"}), 500
+        
+        # 6. Query database with pagination (newest first)
+        try:
+            cursor = proctor_events_collection.find(query).sort('timestamp', -1).skip(skip).limit(limit)
+            docs = list(cursor)
+        except Exception as e:
+            app.logger.error(f"Error fetching proctor events: {e}")
+            return jsonify({"error": "Failed to fetch events"}), 500
+        
+        # 7. Convert ObjectId and datetime to JSON-serializable format
+        events = []
+        for doc in docs:
+            event = doc.copy()
+            
+            # Convert ObjectId to string
+            if '_id' in event and isinstance(event['_id'], ObjectId):
+                event['_id'] = str(event['_id'])
+            
+            # Convert datetime to ISO format
+            if 'timestamp' in event and isinstance(event['timestamp'], datetime.datetime):
+                event['timestamp'] = event['timestamp'].isoformat() + 'Z'
+            
+            events.append(event)
+        
+        # 8. Calculate pagination metadata
+        import math
+        total_pages = math.ceil(total / limit) if total > 0 else 1
+        has_next = page < total_pages
+        has_prev = page > 1
+        
+        LIGHT_MODE = os.getenv('INVIGILO_LIGHT_MODE', '0') == '1'
+        return jsonify({
+            "events": events,
+            "page": page,
+            "limit": limit,
+            "total": total,
+            "pages": total_pages,
+            "hasNext": has_next,
+            "hasPrev": has_prev
+        }), 200
+        
+    except Exception as e:
+        app.logger.exception("Error in get_proctor_events")
+        return jsonify({"error": "Internal processing error", "detail": str(e)}), 500
+
+
+# ✅ UPLOAD EVIDENCE - Screen Recording and Screenshot Upload (CRITICAL)
+@app.route('/api/upload-evidence', methods=['POST'])
+@limiter.limit("100 per hour")
+def upload_evidence():
+    """
+    CRITICAL: Upload screen recording, screenshot, or audio evidence for violations.
+    
+    Stores evidence files with references in database for dispute resolution and proof.
+    Files are saved locally with organized directory structure by exam and user.
+    
+    Form Data:
+        file (binary): Video, image, or audio file
+        examId (str): Exam identifier
+        userId (str): User who triggered violation
+        evidenceType (str): Type of evidence (screenshot, video, audio)
+        violationType (str): Optional - associated violation type
+        violationScore (int): Optional - violation score
+    
+    Returns:
+        200 OK: {message, url, fileId, filePath}
+        400 Bad Request: Missing file or parameters
+        404 Not Found: Exam not found
+        500 Internal Error: File storage error
+    """
+    try:
+        # 1. Validate required parameters
+        exam_id = request.form.get('examId')
+        user_id = request.form.get('userId')
+        evidence_type = request.form.get('evidenceType', 'screenshot')
+        violation_type = request.form.get('violationType', 'unknown')
+        violation_score = request.form.get('violationScore', 0)
+        
+        if not exam_id:
+            return jsonify({"error": "examId is required"}), 400
+        
+        if not user_id:
+            return jsonify({"error": "userId is required"}), 400
+        
+        # 2. Get uploaded file
+        if 'file' not in request.files:
+            return jsonify({"error": "No file provided"}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({"error": "Empty filename"}), 400
+        
+        # 3. Validate exam exists
+        try:
+            exam = exams_collection.find_one({'_id': ObjectId(exam_id)}) if ObjectId.is_valid(exam_id) else None
+            if not exam:
+                return jsonify({"error": "Exam not found"}), 404
+        except Exception as e:
+            return jsonify({"error": "Invalid exam ID format"}), 400
+        
+        # 4. Determine file extension based on evidence type
+        extension_map = {
+            'screenshot': '.jpg',
+            'video': '.webm',
+            'audio': '.wav',
+            'image': '.jpg'
+        }
+        extension = extension_map.get(evidence_type, '.bin')
+        
+        # Allow extension from original filename if available
+        if '.' in file.filename:
+            original_ext = os.path.splitext(file.filename)[1]
+            if original_ext.lower() in ['.jpg', '.jpeg', '.png', '.webm', '.mp4', '.wav', '.mp3', '.ogg']:
+                extension = original_ext.lower()
+        
+        # 5. Create directory structure: evidence/{examId}/{userId}/
+        evidence_base = os.path.join(os.path.dirname(__file__), 'evidence')
+        evidence_dir = os.path.join(evidence_base, str(exam_id), str(user_id))
+        
+        try:
+            os.makedirs(evidence_dir, exist_ok=True)
+        except Exception as e:
+            app.logger.error(f"Failed to create evidence directory: {e}")
+            return jsonify({"error": "Failed to create storage directory"}), 500
+        
+        # 6. Generate unique filename with timestamp
+        timestamp = int(time.time() * 1000)  # milliseconds for uniqueness
+        filename = f"{timestamp}_{evidence_type}{extension}"
+        filepath = os.path.join(evidence_dir, filename)
+        
+        # 7. Save file to disk
+        try:
+            file.save(filepath)
+            file_size = os.path.getsize(filepath)
+        except Exception as e:
+            app.logger.error(f"Failed to save evidence file: {e}")
+            return jsonify({"error": "Failed to save file"}), 500
+        
+        # 8. Create relative path for URL and database storage
+        relative_path = os.path.join('evidence', str(exam_id), str(user_id), filename)
+        relative_path = relative_path.replace('\\', '/')  # Normalize for web URLs
+        
+        # 9. Store evidence record in database
+        evidence_record = {
+            'examId': str(exam_id),
+            'userId': str(user_id),
+            'type': 'evidence',
+            'evidenceType': evidence_type,
+            'violationType': violation_type,
+            'filePath': relative_path,
+            'fileSize': file_size,
+            'timestamp': datetime.datetime.utcnow(),
+            'violationScore': int(violation_score) if violation_score else 0
+        }
+        
+        try:
+            result = proctor_events_collection.insert_one(evidence_record)
+            file_id = str(result.inserted_id)
+        except Exception as e:
+            app.logger.error(f"Failed to store evidence record: {e}")
+            # File is saved but database record failed - log warning
+            app.logger.warning(f"Evidence file saved but DB record failed: {filepath}")
+            return jsonify({"error": "Failed to store evidence record"}), 500
+        
+        # 10. Return success response
+        return jsonify({
+            "message": "Evidence uploaded successfully",
+            "url": f"/api/evidence/{file_id}",
+            "fileId": file_id,
+            "filePath": relative_path,
+            "fileSize": file_size,
+            "evidenceType": evidence_type
+        }), 200
+        
+    except Exception as e:
+        app.logger.exception("Error in upload_evidence")
+        return jsonify({"error": "Internal processing error", "detail": str(e)}), 500
+
+
+# ✅ GET EVIDENCE FILE - Retrieve Evidence for Proctors
+@app.route('/api/evidence/<evidence_id>', methods=['GET'])
+@limiter.limit("200 per hour")
+def get_evidence(evidence_id):
+    """
+    Retrieve evidence file for authorized proctors.
+    
+    Returns the actual file (image, video, audio) for viewing/download.
+    Only accessible by lecturers who have access to the exam.
+    
+    URL Parameters:
+        evidence_id (str): Evidence record ID from database
+    
+    Returns:
+        200 OK: File content with appropriate mime type
+        403 Forbidden: Not authorized
+        404 Not Found: Evidence not found or file missing
+        500 Internal Error: File retrieval error
+    """
+    try:
+        # 1. Require lecturer role (basic security)
+        requester = request.headers.get('X-User-Id')
+        if not requester:
+            return jsonify({'error': 'X-User-Id header required'}), 403
+        
+        try:
+            req_user = users_collection.find_one({'_id': ObjectId(requester)}) if ObjectId.is_valid(requester) else None
+        except Exception:
+            req_user = None
+        
+        if not req_user or req_user.get('role') != 'lecturer':
+            return jsonify({'error': 'Forbidden: lecturer role required'}), 403
+        
+        # 2. Get evidence record from database
+        try:
+            evidence = proctor_events_collection.find_one({'_id': ObjectId(evidence_id)}) if ObjectId.is_valid(evidence_id) else None
+            if not evidence:
+                return jsonify({"error": "Evidence not found"}), 404
+        except Exception as e:
+            return jsonify({"error": "Invalid evidence ID format"}), 400
+        
+        # 3. Verify evidence type
+        if evidence.get('type') != 'evidence':
+            return jsonify({"error": "Invalid evidence record"}), 400
+        
+        # 4. Get file path
+        file_path = evidence.get('filePath')
+        if not file_path:
+            return jsonify({"error": "File path not found in record"}), 404
+        
+        # 5. Construct absolute file path
+        absolute_path = os.path.join(os.path.dirname(__file__), file_path)
+        
+        # 6. Verify file exists
+        if not os.path.exists(absolute_path):
+            app.logger.error(f"Evidence file not found: {absolute_path}")
+            return jsonify({"error": "Evidence file not found on disk"}), 404
+        
+        # 7. Determine mime type based on file extension
+        mime_type_map = {
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.png': 'image/png',
+            '.webm': 'video/webm',
+            '.mp4': 'video/mp4',
+            '.wav': 'audio/wav',
+            '.mp3': 'audio/mpeg',
+            '.ogg': 'audio/ogg'
+        }
+        
+        file_ext = os.path.splitext(absolute_path)[1].lower()
+        mime_type = mime_type_map.get(file_ext, 'application/octet-stream')
+        
+        # 8. Send file
+        from flask import send_file
+        return send_file(
+            absolute_path,
+            mimetype=mime_type,
+            as_attachment=False,  # Display inline in browser
+            download_name=os.path.basename(absolute_path)
+        )
+        
+    except Exception as e:
+        app.logger.exception("Error in get_evidence")
+        return jsonify({"error": "Internal processing error", "detail": str(e)}), 500
+
+
+# ✅ LIST EVIDENCE - Get All Evidence for an Exam/User
+@app.route('/api/evidence', methods=['GET'])
+@limiter.limit("100 per hour")
+def list_evidence():
+    """
+    List all evidence records for an exam or user.
+    
+    Query Parameters:
+        examId (str): Filter by exam (required)
+        userId (str): Filter by specific user (optional)
+        evidenceType (str): Filter by type (screenshot, video, audio) (optional)
+    
+    Returns:
+        200 OK: {evidence: [...]}
+        400 Bad Request: Missing examId
+        403 Forbidden: Not authorized
+        500 Internal Error: Database error
+    """
+    try:
+        # 1. Require lecturer role
+        requester = request.headers.get('X-User-Id')
+        if not requester:
+            return jsonify({'error': 'X-User-Id header required'}), 403
+        
+        try:
+            req_user = users_collection.find_one({'_id': ObjectId(requester)}) if ObjectId.is_valid(requester) else None
+        except Exception:
+            req_user = None
+        
+        if not req_user or req_user.get('role') != 'lecturer':
+            return jsonify({'error': 'Forbidden: lecturer role required'}), 403
+        
+        # 2. Get query parameters
+        exam_id = request.args.get('examId')
+        user_id = request.args.get('userId')
+        evidence_type = request.args.get('evidenceType')
+        
+        if not exam_id:
+            return jsonify({"error": "examId query parameter is required"}), 400
+        
+        # 3. Build query
+        query = {
+            'examId': str(exam_id),
+            'type': 'evidence'
+        }
+        
+        if user_id:
+            query['userId'] = str(user_id)
+        
+        if evidence_type:
+            query['evidenceType'] = evidence_type
+        
+        # 4. Query database
+        try:
+            cursor = proctor_events_collection.find(query).sort('timestamp', -1)
+            docs = list(cursor)
+        except Exception as e:
+            app.logger.error(f"Error querying evidence: {e}")
+            return jsonify({"error": "Failed to query evidence"}), 500
+        
+        # 5. Format results
+        evidence_list = []
+        for doc in docs:
+            evidence = {
+                'id': str(doc.get('_id')),
+                'examId': doc.get('examId'),
+                'userId': doc.get('userId'),
+                'evidenceType': doc.get('evidenceType'),
+                'violationType': doc.get('violationType'),
+                'fileSize': doc.get('fileSize'),
+                'violationScore': doc.get('violationScore'),
+                'url': f"/api/evidence/{str(doc.get('_id'))}",
+                'timestamp': doc.get('timestamp').isoformat() + 'Z' if isinstance(doc.get('timestamp'), datetime.datetime) else doc.get('timestamp')
+            }
+            evidence_list.append(evidence)
+        
+        return jsonify({
+            "evidence": evidence_list,
+            "count": len(evidence_list)
+        }), 200
+        
+    except Exception as e:
+        app.logger.exception("Error in list_evidence")
+        return jsonify({"error": "Internal processing error", "detail": str(e)}), 500
 
 
 # --- Recent Global Proctor Events ---
@@ -1783,21 +3281,26 @@ def admin_delete_lecturer(lect_id):
     """Delete a lecturer and cascade-delete all their data: exams, attempts, proctor events.
     Note: This is a best-effort cascading delete without multi-document transactions (unless running on a replica set).
     """
-    # Require lecturer requester (could be extended to admin-only in future)
-    requester = request.headers.get('X-User-Id')
-    if not requester:
-        return jsonify({'error': 'X-User-Id header required'}), 403
-    try:
-        req_user = users_collection.find_one({'_id': ObjectId(requester)}) if ObjectId.is_valid(requester) else None
-    except Exception:
-        req_user = None
-    if not req_user or req_user.get('role') != 'lecturer':
-        return jsonify({'error': 'Forbidden: lecturer role required'}), 403
+    # Require admin role
+    is_admin, admin_user, error = require_admin()
+    if not is_admin:
+        return error
 
     try:
         user = users_collection.find_one({'_id': ObjectId(lect_id)}) if ObjectId.is_valid(lect_id) else None
         if not user or user.get('role') != 'lecturer':
             return jsonify({'error': 'Lecturer not found'}), 404
+
+        # Log the action before deletion
+        log_admin_action(
+            admin_id=str(admin_user['_id']),
+            action='delete_lecturer',
+            details={
+                'lecturer_id': lect_id,
+                'lecturer_email': user.get('email'),
+                'lecturer_name': user.get('name')
+            }
+        )
 
         # Find all exams by this lecturer
         exam_docs = list(exams_collection.find({'lecturerId': lect_id}))
@@ -1843,7 +3346,7 @@ def update_user(user_id):
             return jsonify({'error': 'User not found'}), 404
         user = users_collection.find_one({'_id': ObjectId(user_id)})
         user = serialize_doc(user)
-        user.pop('password', None)
+        user = sanitize_user_response(user)  # Remove all sensitive fields
         return jsonify({'message': 'User updated', 'user': user}), 200
     except Exception as e:
         print(f"Error updating user {user_id}: {e}")
@@ -1882,26 +3385,17 @@ def add_face_samples(user_id):
                         emb = e.tolist()
                 except Exception:
                     emb = None
-            if emb is None and DEEPFACE_AVAILABLE and DeepFace is not None:
-                try:
-                    reprs = DeepFace.represent(img_path=img, model_name=MODEL_NAME, detector_backend=DETECTOR_BACKEND, enforce_detection=True)
-                    if reprs and isinstance(reprs, list):
-                        raw = reprs[0]['embedding']
-                        # Normalize DeepFace embedding for consistency
-                        emb_arr = np.array(raw, dtype=np.float32)
-                        norm = np.linalg.norm(emb_arr)
-                        if norm > 0:
-                            emb_arr = emb_arr / norm
-                        emb = emb_arr.tolist()
-                except Exception:
-                    emb = None
-            if emb is not None:
+            
+            if emb is None:
+                app.logger.warning('InsightFace failed to generate embedding for image')
+            else:
                 new_vecs.append(emb)
+            
             if len(current) + len(new_vecs) >= max_samples:
                 break
 
         if not new_vecs:
-            return jsonify({'error': 'No valid face samples were added'}), 400
+            return jsonify({'error': 'No valid face samples were added. Please ensure your face is clearly visible.'}), 400
 
         updated = current + new_vecs
         # Ensure first faceEmbedding is set for backcompat if missing
@@ -1916,29 +3410,23 @@ def add_face_samples(user_id):
 
 @app.route('/api/admin/settings/face-threshold', methods=['GET'])
 def get_face_threshold_setting():
-    requester = request.headers.get('X-User-Id')
-    if not requester:
-        return jsonify({'error': 'X-User-Id header required'}), 403
-    try:
-        req_user = users_collection.find_one({'_id': ObjectId(requester)}) if ObjectId.is_valid(requester) else None
-    except Exception:
-        req_user = None
-    if not req_user or req_user.get('role') != 'lecturer':
-        return jsonify({'error': 'Forbidden: lecturer role required'}), 403
+    """Get current face recognition threshold setting. Admin only."""
+    # Require admin role
+    is_admin, admin_user, error = require_admin()
+    if not is_admin:
+        return error
+    
     return jsonify({'threshold': get_face_threshold()}), 200
 
 
 @app.route('/api/admin/settings/face-threshold', methods=['PUT'])
 def set_face_threshold_setting():
-    requester = request.headers.get('X-User-Id')
-    if not requester:
-        return jsonify({'error': 'X-User-Id header required'}), 403
-    try:
-        req_user = users_collection.find_one({'_id': ObjectId(requester)}) if ObjectId.is_valid(requester) else None
-    except Exception:
-        req_user = None
-    if not req_user or req_user.get('role') != 'lecturer':
-        return jsonify({'error': 'Forbidden: lecturer role required'}), 403
+    """Update face recognition threshold setting. Admin only."""
+    # Require admin role
+    is_admin, admin_user, error = require_admin()
+    if not is_admin:
+        return error
+    
     body = request.get_json() or {}
     try:
         thr = float(body.get('threshold'))
@@ -1946,12 +3434,414 @@ def set_face_threshold_setting():
             return jsonify({'error': 'Threshold must be between 0 and 1'}), 400
     except Exception:
         return jsonify({'error': 'Invalid threshold'}), 400
+    
     try:
+        # Log the settings change
+        old_threshold = get_face_threshold()
+        log_admin_action(
+            admin_id=str(admin_user['_id']),
+            action='update_face_threshold',
+            details={
+                'old_threshold': old_threshold,
+                'new_threshold': thr
+            }
+        )
+        
         settings_collection.update_one({'key': 'FACE_SIMILARITY_THRESHOLD'}, {'$set': {'key': 'FACE_SIMILARITY_THRESHOLD', 'value': thr}}, upsert=True)
         return jsonify({'message': 'Threshold updated', 'threshold': thr}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+
+# ================================================================================
+# WebSocket Event Handlers for Real-Time Proctor Updates
+# ================================================================================
+
+@socketio.on('connect', namespace='/proctor')
+def handle_proctor_connect():
+    """
+    Handle proctor client connection to WebSocket.
+    
+    Clients connect to the /proctor namespace for real-time violation updates.
+    Connection is established before joining specific exam rooms.
+    """
+    try:
+        client_id = request.sid
+        app.logger.info(f'[WEBSOCKET] Proctor client connected: {client_id}')
+        emit('status', {
+            'message': 'Connected to proctor updates',
+            'clientId': client_id,
+            'timestamp': datetime.datetime.utcnow().isoformat() + 'Z'
+        })
+    except Exception as e:
+        app.logger.error(f'[WEBSOCKET] Error in connect handler: {e}')
+
+
+@socketio.on('disconnect', namespace='/proctor')
+def handle_proctor_disconnect():
+    """
+    Handle proctor client disconnection from WebSocket.
+    
+    Automatically removes client from all rooms they joined.
+    """
+    try:
+        client_id = request.sid
+        app.logger.info(f'[WEBSOCKET] Proctor client disconnected: {client_id}')
+    except Exception as e:
+        app.logger.error(f'[WEBSOCKET] Error in disconnect handler: {e}')
+
+
+@socketio.on('join_exam', namespace='/proctor')
+def handle_join_exam(data):
+    """
+    Join an exam room to receive real-time violation updates.
+    
+    Args:
+        data (dict): Must contain 'examId' field
+        
+    Emits:
+        - 'status': Success message when joined
+        - 'error': Error message if exam not found or invalid
+    """
+    try:
+        if not data or not isinstance(data, dict):
+            emit('error', {'message': 'Invalid data format'})
+            return
+        
+        exam_id = data.get('examId')
+        if not exam_id:
+            emit('error', {'message': 'examId is required'})
+            return
+        
+        # Validate exam exists
+        try:
+            exam = exams_collection.find_one({'_id': ObjectId(exam_id)}) if ObjectId.is_valid(exam_id) else None
+            if not exam:
+                emit('error', {'message': 'Exam not found'})
+                return
+        except Exception as e:
+            emit('error', {'message': 'Invalid exam ID format'})
+            return
+        
+        # Join the exam room
+        join_room(exam_id, namespace='/proctor')
+        
+        client_id = request.sid
+        app.logger.info(f'[WEBSOCKET] Client {client_id} joined exam room: {exam_id}')
+        
+        emit('status', {
+            'message': f'Joined exam {exam_id}',
+            'examId': exam_id,
+            'examTitle': exam.get('title', 'Unknown'),
+            'timestamp': datetime.datetime.utcnow().isoformat() + 'Z'
+        })
+        
+    except Exception as e:
+        app.logger.error(f'[WEBSOCKET] Error in join_exam: {e}')
+        emit('error', {'message': 'Failed to join exam room'})
+
+
+@socketio.on('leave_exam', namespace='/proctor')
+def handle_leave_exam(data):
+    """
+    Leave an exam room to stop receiving violation updates.
+    
+    Args:
+        data (dict): Must contain 'examId' field
+        
+    Emits:
+        - 'status': Success message when left
+        - 'error': Error message if invalid
+    """
+    try:
+        if not data or not isinstance(data, dict):
+            emit('error', {'message': 'Invalid data format'})
+            return
+        
+        exam_id = data.get('examId')
+        if not exam_id:
+            emit('error', {'message': 'examId is required'})
+            return
+        
+        # Leave the exam room
+        leave_room(exam_id, namespace='/proctor')
+        
+        client_id = request.sid
+        app.logger.info(f'[WEBSOCKET] Client {client_id} left exam room: {exam_id}')
+        
+        emit('status', {
+            'message': f'Left exam {exam_id}',
+            'examId': exam_id,
+            'timestamp': datetime.datetime.utcnow().isoformat() + 'Z'
+        })
+        
+    except Exception as e:
+        app.logger.error(f'[WEBSOCKET] Error in leave_exam: {e}')
+        emit('error', {'message': 'Failed to leave exam room'})
+
+
+@socketio.on('ping', namespace='/proctor')
+def handle_ping():
+    """
+    Handle ping from client to keep connection alive.
+    
+    Emits:
+        - 'pong': Response to ping
+    """
+    emit('pong', {'timestamp': datetime.datetime.utcnow().isoformat() + 'Z'})
+
+
+def broadcast_violation(exam_id, user_id, violation_data):
+    """
+    Broadcast violation to all proctors monitoring this exam.
+    
+    Args:
+        exam_id (str): Exam identifier
+        user_id (str): User who triggered violation
+        violation_data (dict): Violation details (type, severity, score, message)
+    """
+    try:
+        socketio.emit(
+            'violation_detected',
+            {
+                'userId': user_id,
+                'examId': exam_id,
+                'violationType': violation_data.get('type'),
+                'severity': violation_data.get('severity'),
+                'score': violation_data.get('score'),
+                'message': violation_data.get('message'),
+                'timestamp': datetime.datetime.utcnow().isoformat() + 'Z'
+            },
+            room=exam_id,
+            namespace='/proctor'
+        )
+        app.logger.debug(f'[WEBSOCKET] Broadcasted violation to exam room {exam_id}')
+    except Exception as e:
+        app.logger.error(f'[WEBSOCKET] Error broadcasting violation: {e}')
+
+
+@socketio.on('join_student', namespace='/proctor')
+def handle_join_student(data):
+    """Join a student-specific room (examId:userId) for targeted proctor decisions.
+
+    NOTE: For now this is best-effort and not strongly authenticated.
+    """
+    try:
+        if not data or not isinstance(data, dict):
+            emit('error', {'message': 'Invalid data format'})
+            return
+
+        exam_id = data.get('examId')
+        user_id = data.get('userId')
+        if not exam_id or not user_id:
+            emit('error', {'message': 'examId and userId are required'})
+            return
+
+        room_name = f"{exam_id}:{user_id}"
+        join_room(room_name, namespace='/proctor')
+        emit('status', {
+            'message': 'Joined student room',
+            'room': room_name,
+            'timestamp': datetime.datetime.utcnow().isoformat() + 'Z'
+        })
+
+        # Immediately emit current status so student UI can sync on connect
+        try:
+            current = get_proctor_decision(exam_id, user_id)
+            emit('student_paused', {
+                'examId': str(exam_id),
+                'userId': str(user_id),
+                'status': current.get('status', 'active'),
+                'reason': current.get('reason'),
+                'timestamp': datetime.datetime.utcnow().isoformat() + 'Z'
+            })
+        except Exception:
+            pass
+
+    except Exception as e:
+        app.logger.error(f'[WEBSOCKET] Error in join_student: {e}')
+        emit('error', {'message': 'Failed to join student room'})
+
+
+# ================================================================================
+# Proctor Decisions / Student Pausing
+# ================================================================================
+
+# In-memory cache for fast reads (best-effort; DB is source of truth)
+# Key: (examId, userId) -> {status, reason, updatedAt}
+PROCTOR_DECISIONS = {}
+
+
+def _decision_key(exam_id: str, user_id: str):
+    return (str(exam_id), str(user_id))
+
+
+def get_proctor_decision(exam_id: str, user_id: str):
+    """Return current proctor decision for a student in an exam.
+
+    Status values:
+      - active: student can continue
+      - paused: student must pause (awaiting lecturer)
+      - terminated: student must stop/submit
+    """
+    k = _decision_key(exam_id, user_id)
+    cached = PROCTOR_DECISIONS.get(k)
+    if cached:
+        return cached
+
+    try:
+        doc = proctor_events_collection.find_one(
+            {
+                'type': 'proctor_decision',
+                'examId': str(exam_id),
+                'userId': str(user_id),
+            },
+            sort=[('updatedAt', -1), ('timestamp', -1)]
+        )
+    except Exception:
+        doc = None
+
+    if not doc:
+        dec = {
+            'examId': str(exam_id),
+            'userId': str(user_id),
+            'status': 'active',
+            'reason': None,
+            'updatedAt': datetime.datetime.utcnow().isoformat() + 'Z'
+        }
+        PROCTOR_DECISIONS[k] = dec
+        return dec
+
+    updated_at = doc.get('updatedAt') or doc.get('timestamp')
+    if isinstance(updated_at, datetime.datetime):
+        updated_at = updated_at.isoformat() + 'Z'
+
+    dec = {
+        'examId': str(exam_id),
+        'userId': str(user_id),
+        'status': doc.get('status') or 'active',
+        'reason': doc.get('reason'),
+        'updatedAt': updated_at
+    }
+    PROCTOR_DECISIONS[k] = dec
+    return dec
+
+
+def set_proctor_decision(exam_id: str, user_id: str, status: str, reason: str = None, actor_id: str = None):
+    k = _decision_key(exam_id, user_id)
+    now = datetime.datetime.utcnow()
+    dec = {
+        'examId': str(exam_id),
+        'userId': str(user_id),
+        'status': status,
+        'reason': reason,
+        'updatedAt': now.isoformat() + 'Z'
+    }
+    PROCTOR_DECISIONS[k] = dec
+
+    # Persist an audit trail entry
+    try:
+        proctor_events_collection.insert_one({
+            'type': 'proctor_decision',
+            'examId': str(exam_id),
+            'userId': str(user_id),
+            'status': status,
+            'reason': reason,
+            'actorId': str(actor_id) if actor_id else None,
+            'updatedAt': now,
+            'timestamp': now
+        })
+    except Exception as e:
+        app.logger.error(f"[PROCTOR-DECISION] Failed to persist decision: {e}")
+
+    # Broadcast to lecturer dashboard(s) and the student client.
+    try:
+        socketio.emit(
+            'proctor_decision',
+            {
+                'examId': str(exam_id),
+                'userId': str(user_id),
+                'status': status,
+                'reason': reason,
+                'timestamp': now.isoformat() + 'Z'
+            },
+            room=str(exam_id),
+            namespace='/proctor'
+        )
+        # Student-specific room (best-effort; requires student to join it)
+        socketio.emit(
+            'student_paused',
+            {
+                'examId': str(exam_id),
+                'userId': str(user_id),
+                'status': status,
+                'reason': reason,
+                'timestamp': now.isoformat() + 'Z'
+            },
+            room=f"{exam_id}:{user_id}",
+            namespace='/proctor'
+        )
+    except Exception as e:
+        app.logger.error(f"[PROCTOR-DECISION] Failed to broadcast decision: {e}")
+
+    return dec
+
+
+@app.route('/api/exams/<exam_id>/students/<user_id>/proctor-status', methods=['GET'])
+def api_get_proctor_status(exam_id, user_id):
+    """Get current proctor decision status for a student.
+
+    Authorization:
+      - lecturer can query any student
+      - student can query themselves
+    """
+    requester = request.headers.get('X-User-Id')
+    if not requester:
+        return jsonify({'error': 'X-User-Id header required'}), 403
+    try:
+        req_user = users_collection.find_one({'_id': ObjectId(requester)}) if ObjectId.is_valid(requester) else None
+    except Exception:
+        req_user = None
+    if not req_user:
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    is_self = str(requester) == str(user_id)
+    is_lecturer = req_user.get('role') == 'lecturer'
+    if not (is_self or is_lecturer):
+        return jsonify({'error': 'Forbidden'}), 403
+
+    dec = get_proctor_decision(exam_id, user_id)
+    return jsonify({'status': dec}), 200
+
+
+@app.route('/api/exams/<exam_id>/students/<user_id>/proctor-status', methods=['POST'])
+def api_set_proctor_status(exam_id, user_id):
+    """Set proctor decision status for a student (lecturer only)."""
+    requester = request.headers.get('X-User-Id')
+    if not requester:
+        return jsonify({'error': 'X-User-Id header required'}), 403
+    try:
+        req_user = users_collection.find_one({'_id': ObjectId(requester)}) if ObjectId.is_valid(requester) else None
+    except Exception:
+        req_user = None
+    if not req_user or req_user.get('role') != 'lecturer':
+        return jsonify({'error': 'Forbidden: lecturer role required'}), 403
+
+    body = request.get_json() or {}
+    status = (body.get('status') or '').strip().lower()
+    reason = body.get('reason')
+
+    allowed = {'active', 'paused', 'terminated'}
+    if status not in allowed:
+        return jsonify({'error': f"Invalid status. Allowed: {sorted(list(allowed))}"}), 400
+
+    dec = set_proctor_decision(exam_id, user_id, status=status, reason=reason, actor_id=requester)
+    return jsonify({'status': dec}), 200
+
+
+# ================================================================================
+# Main Application Entry Point
+# ================================================================================
 
 if __name__ == '__main__':
     # DEV-friendly server start. Set DEV_MODE=true in .env to enable Flask debug.
@@ -1972,7 +3862,7 @@ if __name__ == '__main__':
     if not root_logger.handlers:
         root_logger.addHandler(handler)
 
-    print(f"Starting Invigilo server on 0.0.0.0:{port} (DEV_MODE={DEV_MODE}, DEEPFACE_AVAILABLE={DEEPFACE_AVAILABLE})")
+    print(f"Starting Invigilo server on 0.0.0.0:{port} (DEV_MODE={DEV_MODE}, InsightFace Engine={ENGINE_AVAILABLE})")
 
     # Install a global exception hook to log uncaught exceptions to file so the terminal doesn't silently close
     import sys, traceback
@@ -1996,21 +3886,21 @@ if __name__ == '__main__':
     restarts = 0
     while True:
         try:
-            # Enable threaded mode to handle multiple concurrent requests
+            # Enable threaded mode to handle multiple concurrent requests + WebSocket connections
             # This is critical for exam submissions to work while proctoring is active
-            print(f"Starting Flask on http://0.0.0.0:{port} with threading={True}")
+            print(f"Starting Flask-SocketIO on http://0.0.0.0:{port} with threading={True}")
             import sys
             sys.stdout.flush()  # Force flush output
-            
-            # Configure Flask to use threaded mode
-            print("Calling app.run() with threaded=True...")
-            app.run(
+
+            # Configure Flask-SocketIO to use threaded mode
+            print("Calling socketio.run() with threading support...")
+            socketio.run(
+                app,
                 host='0.0.0.0',
                 port=port,
                 debug=False,
                 use_reloader=False,
-                threaded=True,
-                processes=1
+                allow_unsafe_werkzeug=True  # Allow for development
             )
             print("Flask has exited normally")
             break

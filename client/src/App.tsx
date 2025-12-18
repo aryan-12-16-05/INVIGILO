@@ -8,6 +8,17 @@ import {
     Lock, Users, Wifi, Mic, Video, Globe, Trash2, Unlock
 } from 'lucide-react';
 
+import { io, type Socket } from 'socket.io-client';
+
+// Auth portal illustrations
+import studentSidebarImg from '../../student_sidebar.png';
+import lecturerSidebarImg from '../../lecturer_sidebar.png';
+
+// Browser lockdown helper (fullscreen + tab/window/devtools restrictions)
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore - browserLock.js is a plain CommonJS module
+import BrowserLock from './browserLock';
+
 
 // Note: This assumes you have a 'cn' utility function for class names, e.g., from 'clsx' and 'tailwind-merge'.
 // If not, you can replace cn(...) with a simple string of class names.
@@ -16,7 +27,8 @@ const cn = (...classes: (string | undefined | null | false)[]) => classes.filter
 
 
 // --- API URL ---
-const API_URL = 'http://127.0.0.1:5000/api';
+// In production set VITE_API_URL to your deployed backend (e.g. https://<service>.onrender.com/api)
+const API_URL = (import.meta as any).env?.VITE_API_URL || 'http://127.0.0.1:5000/api';
 
 // --- MOCK INSTITUTION DATA ---
 const INSTITUTIONS: { [key: string]: string[] } = {
@@ -225,7 +237,7 @@ const INSTITUTIONS: { [key: string]: string[] } = {
 
 
 // --- TYPE DEFINITIONS ---
-type AppState = 'loading' | 'landing' | 'auth' | 'student-dashboard' | 'lecturer-dashboard' | 'exam' | 'result' | 'live-proctoring' | 'help' | 'my-exams';
+type AppState = 'loading' | 'landing' | 'auth' | 'student-dashboard' | 'lecturer-dashboard' | 'exam' | 'result' | 'results-analysis' | 'live-proctoring' | 'help' | 'my-exams';
 type UserRole = 'student' | 'lecturer';
 type ExamStatus = 'Scheduled' | 'Available' | 'Locked' | 'Completed' | 'Live';
 type QuestionType = 'multiple-choice' | 'true-false' | 'short-answer' | 'essay';
@@ -499,9 +511,10 @@ export default function App() {
             case 'landing': return <LandingPage key="landing" onNavigate={navigateTo} />;
             case 'auth': return <AuthPage key="auth" initialRole={authRole} onAuthSuccess={onAuthSuccess} showToast={showToast} onBack={() => navigateTo('landing')} />;
             case 'student-dashboard': return currentUser && <StudentDashboard key="student-dashboard" user={currentUser} exams={exams} onLogout={handleLogout} onStartExam={handleStartExam} onBack={() => navigateTo('landing')} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} />;
-            case 'my-exams': return currentUser && <MyExamsPage key="my-exams" user={currentUser} exams={exams} onLogout={handleLogout} onStartExam={handleStartExam} onBack={() => navigateTo('student-dashboard')} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} />;
+            case 'my-exams': return currentUser && <MyExamsPage key="my-exams" user={currentUser} exams={exams} onLogout={handleLogout} onStartExam={handleStartExam} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} />;
+            case 'results-analysis': return currentUser && <ResultsAnalysisPage key="results-analysis" user={currentUser} exams={exams} onLogout={handleLogout} onBack={() => navigateTo('student-dashboard')} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} />;
                 case 'lecturer-dashboard': return currentUser && <LecturerDashboard key="lecturer-dashboard" user={currentUser} exams={exams} onLogout={handleLogout} onBack={() => navigateTo('landing')} onExamChange={fetchExams} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} />;
-            case 'live-proctoring': return currentUser && <LiveProctoring key="live-proctoring" user={currentUser} onBack={() => navigateTo(currentUser?.role === 'student' ? 'student-dashboard' : 'lecturer-dashboard')} showToast={showToast} />;
+            case 'live-proctoring': return currentUser && <LiveProctoring key="live-proctoring" user={currentUser} onBack={() => navigateTo(currentUser?.role === 'student' ? 'student-dashboard' : 'lecturer-dashboard')} />;
             case 'help': return <HelpPage key="help" onBack={() => navigateTo(currentUser?.role === 'student' ? 'student-dashboard' : 'lecturer-dashboard')} />;
             case 'exam': return currentUser && currentExam && <ExamScreen key="exam" exam={currentExam} user={currentUser} onExit={handleExamSubmit} showToast={showToast} />;
             case 'result': return lastResult && <ResultScreen key="result" result={lastResult} onDone={() => navigateTo('student-dashboard')} />;
@@ -627,6 +640,9 @@ const AuthPage = ({
     const [currentStep, setCurrentStep] = useState<"details" | "face">("details");
   const [isLoading, setIsLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+    const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+        const [signupPassword, setSignupPassword] = useState("");
+        const [signupConfirmPassword, setSignupConfirmPassword] = useState("");
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null); // ✅ Persist webcam stream
   const [captureMessage, setCaptureMessage] = useState<string>("");
@@ -634,6 +650,37 @@ const AuthPage = ({
   const [department, setDepartment] = useState("");
   const formDataRef = useRef<any>({});
     const [enrollSamples, setEnrollSamples] = useState<string[]>([]);
+
+    // --- Basic field validation (client-side UX only; server must still validate) ---
+    const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/i;
+    const IN_PHONE_REGEX = /^[6-9]\d{9}$/; // Indian mobile numbers: 10 digits starting with 6-9
+    const validateEmail = (email: string) => EMAIL_REGEX.test(email.trim());
+    const validateIndianPhone = (phone: string) => IN_PHONE_REGEX.test(phone.replace(/\s+/g, "").trim());
+
+    // Password policy should match backend validate_password() in server/app.py
+    const PASSWORD_RULES = {
+        minLength: (v: string) => v.length >= 8,
+        hasUpper: (v: string) => /[A-Z]/.test(v),
+        hasLower: (v: string) => /[a-z]/.test(v),
+        hasDigit: (v: string) => /[0-9]/.test(v),
+        hasSymbol: (v: string) => /[!@#$%^&*\-_=+]/.test(v),
+    };
+
+    const getPasswordMissing = (v: string) => {
+        const missing: string[] = [];
+        if (!PASSWORD_RULES.minLength(v)) missing.push('at least 8 characters');
+        if (!PASSWORD_RULES.hasUpper(v)) missing.push('one uppercase letter (A-Z)');
+        if (!PASSWORD_RULES.hasLower(v)) missing.push('one lowercase letter (a-z)');
+        if (!PASSWORD_RULES.hasDigit(v)) missing.push('one number (0-9)');
+        if (!PASSWORD_RULES.hasSymbol(v)) missing.push('one special character (!@#$%^&*-_=+)');
+        return missing;
+    };
+
+    const isPasswordValid = (v: string) => getPasswordMissing(v).length === 0;
+
+    const handleForgotPassword = () => {
+        showToast("Forgot password isn't implemented yet.", "error");
+    };
 
   // --- CAMERA INIT & CLEANUP ---
     useEffect(() => {
@@ -708,6 +755,51 @@ const AuthPage = ({
         }
   };
 
+  const stopCamera = () => {
+        const video = videoRef.current;
+        const stream = streamRef.current ?? (video?.srcObject as MediaStream | null);
+
+        if (stream) {
+            stream.getTracks().forEach((t) => {
+                try {
+                    t.stop();
+                } catch {
+                    // no-op
+                }
+            });
+        }
+
+        if (video) video.srcObject = null;
+        streamRef.current = null;
+  };
+
+  const startCamera = async () => {
+        const video = videoRef.current;
+        if (!video) return;
+
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        streamRef.current = stream;
+
+        try {
+            video.muted = true;
+            (video as any).playsInline = true;
+        } catch {
+            // ignore
+        }
+
+        video.srcObject = stream;
+        const p = video.play();
+        if (p && p instanceof Promise) p.catch(() => undefined);
+  };
+
+  const restartCamera = async () => {
+        // Ensure any previous stream is fully torn down before re-acquiring
+        stopCamera();
+        // Small delay helps some browsers release the device immediately
+        await new Promise((r) => setTimeout(r, 150));
+        await startCamera();
+  };
+
 // Wait until video has non-zero dimensions; default timeout kept short for snappy UX
 const waitForVideoReady = (video: HTMLVideoElement, timeout = 5000): Promise<void> => {
     return new Promise((resolve, reject) => {
@@ -762,6 +854,34 @@ const getVideoStatus = () => {
     formData.forEach((value, key) => {
       data[key] = value;
     });
+
+        // Client-side validations before moving to face step
+        const email = String(data.email ?? "").trim();
+        const phone = String(data.phoneNumber ?? "").trim();
+        const pass = String(data.password ?? "");
+        const confirm = String(data.confirmPassword ?? "");
+
+        if (!validateEmail(email)) {
+            showToast("Invalid email. Please use a valid format like name@example.com.", "error");
+            return;
+        }
+
+        if (!validateIndianPhone(phone)) {
+            showToast("Invalid phone number. Enter a 10-digit Indian mobile number starting with 6-9.", "error");
+            return;
+        }
+
+        if (pass !== confirm) {
+            showToast("Passwords do not match. Please re-enter the same password.", "error");
+            return;
+        }
+
+        const missing = getPasswordMissing(pass);
+        if (missing.length > 0) {
+            showToast(`Password is invalid. Add: ${missing.join(', ')}.`, 'error');
+            return;
+        }
+
     formDataRef.current = data;
     setCurrentStep("face");
   };
@@ -780,7 +900,7 @@ const getVideoStatus = () => {
     try {
                 setCaptureMessage('Preparing camera...');
                 try {
-                    await waitForVideoReady(video, 10000);
+                    await waitForVideoReady(video, 1000);
                 } catch (err) {
                     // Try to re-acquire the camera once
                     console.warn('Initial video ready check failed, retrying getUserMedia...', err);
@@ -811,6 +931,8 @@ const getVideoStatus = () => {
             // Allow multi-sample: include existing samples + this capture (unique by string)
             const samples = Array.from(new Set([...enrollSamples, imageDataUrl]));
             const finalData: any = { ...formDataRef.current, role: initialRole };
+            // Never send confirmPassword to backend
+            delete finalData.confirmPassword;
             if (samples.length > 1) finalData.imageDataUrls = samples;
             else finalData.imageDataUrl = imageDataUrl;
 
@@ -969,25 +1091,20 @@ const getVideoStatus = () => {
 
     // Optional: explicit retry handler if you want a separate control
     const handleVerifyRetry = async () => {
-        // Reuse submit handler behavior but do not submit form; simply trigger capture & verify
+        // User explicitly wants the camera to restart on retry.
         setIsLoading(true);
-        setCaptureMessage('Verifying...');
-        const video = videoRef.current;
-        if (!video) {
-            showToast('Webcam not initialized', 'error');
-            setIsLoading(false);
-            return;
-        }
+        setCaptureMessage('Restarting camera...');
+
         try {
-            await waitForVideoReady(video, 8000);
-            const imageDataUrl = captureFrame();
-            if (!imageDataUrl) throw new Error('Could not capture frame');
-            showToast('Captured. Please submit the form to verify.', 'success');
+            await restartCamera();
+            setCaptureMessage('');
+            showToast('Camera restarted. Please verify again.', 'success');
         } catch (err: any) {
-            showToast(err.message || 'Verification retry failed', 'error');
+            console.error('restartCamera failed:', err);
+            setCaptureMessage('');
+            showToast(err?.message || 'Could not restart camera. Please check permissions.', 'error');
         } finally {
             setIsLoading(false);
-            setCaptureMessage('');
         }
     };
 
@@ -1008,9 +1125,9 @@ const getVideoStatus = () => {
         <motion.div initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.2 }}>
           <div className="p-8 bg-slate-800 rounded-xl shadow-lg">
             <img
-              src={`https://placehold.co/600x400/1e293b/4f46e5?text=${initialRole.charAt(0).toUpperCase() + initialRole.slice(1)}`}
-              alt={initialRole}
-              className="rounded-lg w-full h-64 object-cover mb-6"
+                            src={initialRole === 'student' ? studentSidebarImg : lecturerSidebarImg}
+                            alt={initialRole === 'student' ? 'Student portal' : 'Lecturer portal'}
+                            className="rounded-lg w-full h-64 md:h-72 object-cover border border-slate-700 mb-6"
             />
             <h2 className="text-3xl font-bold mb-2 capitalize">{initialRole} Portal</h2>
             <p className="text-slate-400">
@@ -1057,6 +1174,7 @@ const getVideoStatus = () => {
               {authMode === "signin" && (
                 <form onSubmit={handleSignIn} className="space-y-4">
                   <h3 className="text-2xl font-bold text-center text-slate-100">Welcome Back</h3>
+
                   <div className="space-y-1">
                     <Label htmlFor="identifier">Email, Phone, or ID</Label>
                     <Input id="identifier" name="identifier" type="text" placeholder="Enter your identifier" required />
@@ -1078,6 +1196,13 @@ const getVideoStatus = () => {
                       {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                     </button>
                   </div>
+
+                                    <div className="flex justify-end">
+                                        <button type="button" onClick={handleForgotPassword} className="text-sm text-indigo-400 hover:underline" disabled={isLoading}>
+                                            Forgot password?
+                                        </button>
+                                    </div>
+
                   <div className="space-y-2 relative">
                     <Label>Face Verification</Label>
                                         <div className="w-full h-40 bg-slate-800 rounded-lg overflow-hidden relative">
@@ -1096,8 +1221,23 @@ const getVideoStatus = () => {
                     </Button>
                   </div>
                                     <div className="pt-2">
-                                        <button type="button" onClick={handleVerifyRetry} className="w-full mt-2 inline-flex items-center justify-center rounded-md border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800">
-                                            Retry Camera / Capture
+                                                                                <button type="button" onClick={handleVerifyRetry} disabled={isLoading} className="w-full mt-2 inline-flex items-center justify-center rounded-md border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800">
+                                            Retry Verification
+                                        </button>
+                                    </div>
+
+                                    <div className="text-center text-sm text-slate-400 pt-1">
+                                        Don&apos;t have an account?{" "}
+                                        <button
+                                            type="button"
+                                            className="text-indigo-400 hover:underline"
+                                            onClick={() => {
+                                                setAuthMode("signup");
+                                                setCurrentStep("details");
+                                            }}
+                                            disabled={isLoading}
+                                        >
+                                            Sign up
                                         </button>
                                     </div>
                 </form>
@@ -1107,6 +1247,7 @@ const getVideoStatus = () => {
               {authMode === "signup" && currentStep === "details" && (
                 <form onSubmit={handleProceedToFaceStep} className="space-y-4">
                   <h3 className="text-2xl font-bold text-center text-slate-100">Create Account</h3>
+
                   <div className="grid grid-cols-2 gap-4">
                     <div>
                       <Label htmlFor="fullName">Full Name</Label>
@@ -1120,11 +1261,32 @@ const getVideoStatus = () => {
                   <div className="grid grid-cols-2 gap-4">
                     <div>
                       <Label htmlFor="email">Email</Label>
-                      <Input id="email" name="email" type="email" required />
+                                            <Input
+                                                id="email"
+                                                name="email"
+                                                type="email"
+                                                required
+                                                onBlur={(e: React.FocusEvent<HTMLInputElement>) => {
+                                                    const v = e.target.value;
+                                                    if (v && !validateEmail(v)) showToast("Invalid email. Please enter a valid email.", "error");
+                                                }}
+                                            />
                     </div>
                     <div>
-                      <Label htmlFor="phoneNumber">Phone Number</Label>
-                      <Input id="phoneNumber" name="phoneNumber" type="tel" required />
+                                            <Label htmlFor="phoneNumber">Phone Number (India)</Label>
+                                            <Input
+                                                id="phoneNumber"
+                                                name="phoneNumber"
+                                                type="tel"
+                                                inputMode="numeric"
+                                                placeholder="10-digit mobile number"
+                                                required
+                                                onBlur={(e: React.FocusEvent<HTMLInputElement>) => {
+                                                    const v = e.target.value;
+                                                    if (v && !validateIndianPhone(v))
+                                                        showToast("Invalid phone number. Use 10 digits starting with 6-9.", "error");
+                                                }}
+                                            />
                     </div>
                   </div>
                   <div>
@@ -1164,12 +1326,35 @@ const getVideoStatus = () => {
                   {initialRole === "student" && (
                     <div>
                       <Label htmlFor="year">Year of Study</Label>
-                      <Input id="year" name="year" type="text" placeholder="e.g., 3" required />
+                                            <Select id="year" name="year" required defaultValue="">
+                                                <option value="" disabled>
+                                                    Select Year
+                                                </option>
+                                                <option value="1">1</option>
+                                                <option value="2">2</option>
+                                                <option value="3">3</option>
+                                                <option value="4">4</option>
+                                            </Select>
                     </div>
                   )}
                   <div className="relative">
                     <Label htmlFor="password">Password</Label>
-                    <Input id="password" name="password" type={showPassword ? "text" : "password"} required />
+                                        <Input
+                                            id="password"
+                                            name="password"
+                                            type={showPassword ? "text" : "password"}
+                                            required
+                                            value={signupPassword}
+                                            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setSignupPassword(e.target.value)}
+                                            onBlur={(e: React.FocusEvent<HTMLInputElement>) => {
+                                                const v = e.target.value || '';
+                                                if (!v) return;
+                                                const missing = getPasswordMissing(v);
+                                                if (missing.length > 0) {
+                                                    showToast(`Password is invalid. Add: ${missing.join(', ')}.`, 'error');
+                                                }
+                                            }}
+                                        />
                     <button
                       type="button"
                       onClick={() => setShowPassword(!showPassword)}
@@ -1178,11 +1363,109 @@ const getVideoStatus = () => {
                       {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                     </button>
                   </div>
+
+                                    {/* Password rules checklist */}
+                                    <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-3">
+                                        <p className="text-xs font-semibold text-slate-300 mb-2">Password must contain:</p>
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                            <div className="flex items-center gap-2 text-xs">
+                                                {PASSWORD_RULES.minLength(signupPassword) ? (
+                                                    <CheckCircle className="h-4 w-4 text-green-400" />
+                                                ) : (
+                                                    <XCircle className="h-4 w-4 text-slate-500" />
+                                                )}
+                                                <span className={cn(PASSWORD_RULES.minLength(signupPassword) ? 'text-slate-200' : 'text-slate-400')}>At least 8 characters</span>
+                                            </div>
+                                            <div className="flex items-center gap-2 text-xs">
+                                                {PASSWORD_RULES.hasUpper(signupPassword) ? (
+                                                    <CheckCircle className="h-4 w-4 text-green-400" />
+                                                ) : (
+                                                    <XCircle className="h-4 w-4 text-slate-500" />
+                                                )}
+                                                <span className={cn(PASSWORD_RULES.hasUpper(signupPassword) ? 'text-slate-200' : 'text-slate-400')}>One uppercase letter (A-Z)</span>
+                                            </div>
+                                            <div className="flex items-center gap-2 text-xs">
+                                                {PASSWORD_RULES.hasLower(signupPassword) ? (
+                                                    <CheckCircle className="h-4 w-4 text-green-400" />
+                                                ) : (
+                                                    <XCircle className="h-4 w-4 text-slate-500" />
+                                                )}
+                                                <span className={cn(PASSWORD_RULES.hasLower(signupPassword) ? 'text-slate-200' : 'text-slate-400')}>One lowercase letter (a-z)</span>
+                                            </div>
+                                            <div className="flex items-center gap-2 text-xs">
+                                                {PASSWORD_RULES.hasDigit(signupPassword) ? (
+                                                    <CheckCircle className="h-4 w-4 text-green-400" />
+                                                ) : (
+                                                    <XCircle className="h-4 w-4 text-slate-500" />
+                                                )}
+                                                <span className={cn(PASSWORD_RULES.hasDigit(signupPassword) ? 'text-slate-200' : 'text-slate-400')}>One number (0-9)</span>
+                                            </div>
+                                            <div className="flex items-center gap-2 text-xs sm:col-span-2">
+                                                {PASSWORD_RULES.hasSymbol(signupPassword) ? (
+                                                    <CheckCircle className="h-4 w-4 text-green-400" />
+                                                ) : (
+                                                    <XCircle className="h-4 w-4 text-slate-500" />
+                                                )}
+                                                <span className={cn(PASSWORD_RULES.hasSymbol(signupPassword) ? 'text-slate-200' : 'text-slate-400')}>One special character (!@#$%^&*-_=+)</span>
+                                            </div>
+                                        </div>
+                                        {signupPassword.length > 0 && (
+                                            <div className="mt-2 text-xs">
+                                                {isPasswordValid(signupPassword) ? (
+                                                    <span className="text-green-300">Password looks good.</span>
+                                                ) : (
+                                                    <span className="text-slate-400">Keep going—you're almost there.</span>
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    <div className="relative">
+                                        <Label htmlFor="confirmPassword">Re-enter Password</Label>
+                                                                                <Input
+                                                                                    id="confirmPassword"
+                                                                                    name="confirmPassword"
+                                                                                    type={showConfirmPassword ? "text" : "password"}
+                                                                                    required
+                                                                                    value={signupConfirmPassword}
+                                                                                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => setSignupConfirmPassword(e.target.value)}
+                                                                                    onBlur={(e: React.FocusEvent<HTMLInputElement>) => {
+                                                                                        const confirm = e.target.value || '';
+                                                                                        if (!confirm) return;
+                                                                                        if (signupPassword && confirm !== signupPassword) {
+                                                                                            showToast('Passwords do not match. Please re-enter the same password.', 'error');
+                                                                                        }
+                                                                                    }}
+                                                                                />
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+                                            className="absolute right-3 top-8 text-slate-400 hover:text-slate-200"
+                                        >
+                                            {showConfirmPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                                        </button>
+                                    </div>
+
                   <div className="pt-2">
                     <Button type="submit" className="w-full">
                       Proceed to Face Registration
                     </Button>
                   </div>
+
+                                    <div className="text-center text-sm text-slate-400 pt-1">
+                                        Already have an account?{" "}
+                                        <button
+                                            type="button"
+                                            className="text-indigo-400 hover:underline"
+                                            onClick={() => {
+                                                setAuthMode("signin");
+                                                setCurrentStep("details");
+                                            }}
+                                            disabled={isLoading}
+                                        >
+                                            Sign in
+                                        </button>
+                                    </div>
                 </form>
               )}
 
@@ -1395,7 +1678,193 @@ const DashboardLayout = ({ children, user, onLogout, onBack, onAction, onUpdateU
     );
 };
 
-const MyExamsPage = ({ user, exams, onLogout, onStartExam, onBack, showToast, onUpdateUser, navigateTo }: { user: UserProfile; exams: Exam[]; onLogout: () => void; onStartExam: (examId: string) => void; onBack: () => void; showToast: (message:string, type:'success'|'error') => void; onUpdateUser: (u: UserProfile) => void; navigateTo: (state: AppState) => void }) => {
+// --- Results Analysis Page ---
+const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, onUpdateUser, navigateTo }: { user: UserProfile; exams: Exam[]; onLogout: () => void; onBack: () => void; showToast: (message:string, type:'success'|'error') => void; onUpdateUser: (u: UserProfile) => void; navigateTo: (state: AppState) => void }) => {
+    const [selectedExam, setSelectedExam] = useState<Exam | null>(null);
+    const [resultAttempt, setResultAttempt] = useState<any>(null);
+
+    const userExams = exams.filter(exam => 
+        exam.institution.toLowerCase() === user.institution.toLowerCase() && 
+        exam.department.toLowerCase() === user.department.toLowerCase() && 
+        exam.targetYear === user.year
+    );
+
+    const completedExams = userExams.filter(e => (e as any).attemptForUser || (e as any).completedByUser);
+    const averageScore = completedExams.length > 0 ? Math.round(completedExams.reduce((acc, e) => acc + ((e as any).attemptForUser?.score || 0), 0) / completedExams.length) : 0;
+
+    const loadExamResults = async (exam: Exam) => {
+        try {
+            const res = await fetch(`${API_URL}/exams/${exam._id}/attempt?userId=${user._id}`);
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Failed to load results');
+            if (!data.attempt) {
+                showToast('No results found for this exam.', 'error');
+                return;
+            }
+            setResultAttempt(data.attempt);
+            setSelectedExam(exam);
+        } catch (err: any) {
+            showToast(err.message || 'Failed to load results', 'error');
+        }
+    };
+
+    return (
+        <DashboardLayout user={user} onLogout={onLogout} onBack={onBack} showToast={showToast} onUpdateUser={onUpdateUser} onAction={(a) => {
+            if (a === 'dashboard') { navigateTo('student-dashboard'); return; }
+            if (a === 'my-exams') { navigateTo('my-exams'); return; }
+            if (a === 'results') { /* already here */ return; }
+            if (a === 'help') { navigateTo('help'); return; }
+        }}>
+            <div className="space-y-6">
+                <div className="flex items-center justify-between">
+                    <h1 className="text-3xl font-bold text-white">Results & Analysis</h1>
+                </div>
+
+                {/* Summary Stats */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <Card className="p-6 bg-gradient-to-br from-indigo-600/20 to-indigo-800/20 border-indigo-500/50">
+                        <div className="flex items-center justify-between">
+                            <div>
+                                <p className="text-slate-400 text-sm">Average Score</p>
+                                <p className="text-4xl font-bold text-white mt-2">{averageScore}%</p>
+                            </div>
+                            <BrainCircuit className="h-12 w-12 text-indigo-400" />
+                        </div>
+                    </Card>
+                    <Card className="p-6 bg-gradient-to-br from-green-600/20 to-green-800/20 border-green-500/50">
+                        <div className="flex items-center justify-between">
+                            <div>
+                                <p className="text-slate-400 text-sm">Exams Completed</p>
+                                <p className="text-4xl font-bold text-white mt-2">{completedExams.length}</p>
+                            </div>
+                            <Monitor className="h-12 w-12 text-green-400" />
+                        </div>
+                    </Card>
+                    <Card className="p-6 bg-gradient-to-br from-yellow-600/20 to-yellow-800/20 border-yellow-500/50">
+                        <div className="flex items-center justify-between">
+                            <div>
+                                <p className="text-slate-400 text-sm">Best Score</p>
+                                <p className="text-4xl font-bold text-white mt-2">
+                                    {completedExams.length > 0 ? Math.max(...completedExams.map(e => (e as any).attemptForUser?.score || 0)) : 0}%
+                                </p>
+                            </div>
+                            <Monitor className="h-12 w-12 text-yellow-400" />
+                        </div>
+                    </Card>
+                </div>
+
+                {/* Exam Results List */}
+                <Card className="p-6">
+                    <h2 className="text-2xl font-bold text-white mb-4">Your Exam Results</h2>
+                    {completedExams.length > 0 ? (
+                        <div className="space-y-4">
+                            {completedExams.map((exam: Exam) => {
+                                const attempt = (exam as any).attemptForUser;
+                                const score = attempt?.score || 0;
+                                const correctCount = Array.isArray(attempt?.answers)
+                                    ? attempt.answers.filter((a: any) => a?.isCorrect).length
+                                    : (attempt?.correctCount ?? 0);
+                                const totalQuestions = Array.isArray(attempt?.answers)
+                                    ? attempt.answers.length
+                                    : (attempt?.totalQuestions ?? (exam as any)?.questions?.length ?? 0);
+                                return (
+                                    <div key={exam._id} 
+                                        className="p-4 bg-slate-800 rounded-lg hover:bg-slate-700 transition-colors cursor-pointer border border-slate-700 hover:border-indigo-500"
+                                        onClick={() => loadExamResults(exam)}
+                                    >
+                                        <div className="flex items-center justify-between">
+                                            <div>
+                                                <h3 className="text-lg font-semibold text-white">{exam.title}</h3>
+                                                <p className="text-slate-400 text-sm mt-1">
+                                                    Score: <span className="text-white font-medium">{score}%</span>
+                                                    {totalQuestions ? (
+                                                        <>
+                                                            {' '}•{' '}
+                                                            {correctCount}/{totalQuestions} correct
+                                                        </>
+                                                    ) : null}
+                                                </p>
+                                            </div>
+                                            <div className="flex items-center gap-2">
+                                                <span
+                                                    className={cn(
+                                                        'px-3 py-1 rounded-full text-sm font-semibold',
+                                                        score >= 70
+                                                            ? 'bg-green-900/30 text-green-300 border border-green-600/40'
+                                                            : score >= 40
+                                                                ? 'bg-yellow-900/30 text-yellow-300 border border-yellow-600/40'
+                                                                : 'bg-red-900/30 text-red-300 border border-red-600/40'
+                                                    )}
+                                                >
+                                                    {score}%
+                                                </span>
+                                                <ChevronLeft className="h-4 w-4 text-slate-500 rotate-180" />
+                                            </div>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    ) : (
+                        <p className="text-slate-400 text-center py-12">No completed exams yet. Take an exam to see your results here!</p>
+                    )}
+                </Card>
+
+                {/* Detailed Results View */}
+                {selectedExam && resultAttempt && (
+                    <Card className="p-6">
+                        <div className="flex items-center justify-between mb-6">
+                            <h2 className="text-2xl font-bold text-white">{selectedExam.title} - Detailed Results</h2>
+                            <Button variant="outline" onClick={() => { setSelectedExam(null); setResultAttempt(null); }}>Close</Button>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                            <div className="p-4 bg-slate-800 rounded-lg">
+                                <p className="text-slate-400 text-sm mb-1">Final Score</p>
+                                <p className="text-3xl font-bold text-white">{resultAttempt.score}%</p>
+                            </div>
+                            <div className="p-4 bg-slate-800 rounded-lg">
+                                <p className="text-slate-400 text-sm mb-1">Completed At</p>
+                                <p className="text-lg font-semibold text-white">{new Date(resultAttempt.completedAt).toLocaleString()}</p>
+                            </div>
+                        </div>
+
+                        <h3 className="text-xl font-bold text-white mb-4">Question Breakdown</h3>
+                        <div className="space-y-3">
+                            {resultAttempt.perQuestion && resultAttempt.perQuestion.map((q: any, idx: number) => (
+                                <div key={idx} className={cn(
+                                    'p-4 rounded-lg border',
+                                    q.correct ? 'bg-green-900/20 border-green-600/50' : 'bg-red-900/20 border-red-600/50'
+                                )}>
+                                    <div className="flex items-start justify-between">
+                                        <div>
+                                            <p className="text-white font-medium">Question {idx + 1}</p>
+                                            {q.question && (
+                                                <p className="text-slate-300 text-sm mt-1 line-clamp-2">{q.question}</p>
+                                            )}
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            {q.correct ? (
+                                                <CheckCircle className="h-5 w-5 text-green-400" />
+                                            ) : (
+                                                <XCircle className="h-5 w-5 text-red-400" />
+                                            )}
+                                            <span className={cn('text-sm font-semibold', q.correct ? 'text-green-300' : 'text-red-300')}>
+                                                {q.correct ? 'Correct' : 'Incorrect'}
+                                            </span>
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </Card>
+                )}
+            </div>
+        </DashboardLayout>
+    );
+};
+
+const MyExamsPage = ({ user, exams, onLogout, onStartExam, showToast, onUpdateUser, navigateTo }: { user: UserProfile; exams: Exam[]; onLogout: () => void; onStartExam: (examId: string) => void; showToast: (message:string, type:'success'|'error') => void; onUpdateUser: (u: UserProfile) => void; navigateTo: (state: AppState) => void }) => {
     const [activeTab, setActiveTab] = useState<'upcoming' | 'finished'>('upcoming');
     const [selectedExam, setSelectedExam] = useState<Exam | null>(null);
     const [detailsOpen, setDetailsOpen] = useState(false);
@@ -1677,16 +2146,7 @@ const StudentDashboard = ({ user, exams, onLogout, onStartExam, onBack, showToas
         // Keep students on the main dashboard unless explicitly opening tools
         if (a === 'dashboard') { setSystemCheckOpen(false); return; }
         if (a === 'my-exams') { navigateTo('my-exams'); return; }
-        if (a === 'results') {
-            // Open the most recent completed exam's results, if any
-            try {
-                const last = completedExams[completedExams.length - 1];
-                if (last) { (async () => await openResults(last))(); }
-                else { showToast('No results available yet.', 'error'); }
-            } catch { showToast('Unable to open results.', 'error'); }
-            return;
-        }
-        if (a === 'live-proctoring') { navigateTo('live-proctoring'); return; }
+        if (a === 'results') { navigateTo('results-analysis'); return; }
         if (a === 'help') { navigateTo('help'); return; }
         if (a === 'profile') { /* handled in DashboardLayout */ return; }
     }}>
@@ -2066,14 +2526,39 @@ const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showTo
                                 {attemptEvents.length === 0 && <div className="text-slate-400">No proctoring events recorded.</div>}
                                 {attemptEvents.map((ev: any) => (
                                     <div key={ev._id} className="p-2 bg-slate-800 rounded">
-                                        <div className="text-sm font-medium">{ev.eventType}</div>
-                                        <div className="text-xs text-slate-400">{new Date(ev.timestamp).toLocaleString()}</div>
-                                        {ev.details?.snapshot ? (
-                                            <div className="mt-2">
-                                                <img src={ev.details.snapshot} alt="snapshot" className="w-40 h-28 object-cover rounded border border-slate-700" />
+                                        <div className="flex items-start justify-between">
+                                            <div className="flex-1">
+                                                <div className="text-sm font-medium text-white">{ev.eventType}</div>
+                                                <div className="text-xs text-slate-400">{new Date(ev.timestamp).toLocaleString()}</div>
+                                                {ev.severity && (
+                                                    <span className={cn(
+                                                        'inline-block px-2 py-0.5 text-xs rounded mt-1',
+                                                        ev.severity === 'high' && 'bg-red-600/20 text-red-400 border border-red-500/30',
+                                                        ev.severity === 'medium' && 'bg-yellow-600/20 text-yellow-400 border border-yellow-500/30',
+                                                        ev.severity === 'low' && 'bg-blue-600/20 text-blue-400 border border-blue-500/30'
+                                                    )}>
+                                                        {ev.severity.toUpperCase()}
+                                                    </span>
+                                                )}
                                             </div>
-                                        ) : null}
-                                        <pre className="text-xs mt-2 text-slate-300 bg-black/10 p-2 rounded overflow-x-auto">{JSON.stringify(ev.details)}</pre>
+                                            {/* Display frame evidence (new field) or legacy snapshot */}
+                                            {(ev.frameEvidence || ev.details?.snapshot) && (
+                                                <div className="ml-3">
+                                                    <img 
+                                                        src={ev.frameEvidence || ev.details.snapshot} 
+                                                        alt="evidence" 
+                                                        className="w-32 h-24 object-cover rounded border border-slate-700" 
+                                                    />
+                                                </div>
+                                            )}
+                                        </div>
+                                        {ev.details?.message && (
+                                            <div className="text-xs text-slate-300 mt-2 italic">{ev.details.message}</div>
+                                        )}
+                                        <details className="text-xs mt-2">
+                                            <summary className="cursor-pointer text-slate-400 hover:text-slate-300">Show raw details</summary>
+                                            <pre className="text-xs mt-1 text-slate-300 bg-black/10 p-2 rounded overflow-x-auto">{JSON.stringify(ev.details, null, 2)}</pre>
+                                        </details>
                                     </div>
                                 ))}
                             </div>
@@ -2102,6 +2587,17 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
     const [timeLeft, setTimeLeft] = useState(exam.duration * 60);
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [showSubmitConfirm, setShowSubmitConfirm] = useState(false);
+    const [submitStatus, setSubmitStatus] = useState<'idle' | 'review' | 'sending' | 'error'>('idle');
+    const [submitError, setSubmitError] = useState<string | null>(null);
+    const [secureModeEnabled, setSecureModeEnabled] = useState(false);
+    const [secureModeBusy, setSecureModeBusy] = useState(false);
+    const [autoSubmitRequested, setAutoSubmitRequested] = useState(false);
+    const [securityModalOpen, setSecurityModalOpen] = useState(false);
+    const [securityTitle, setSecurityTitle] = useState<string>('Security warning');
+    const [securityMessage, setSecurityMessage] = useState<string>('');
+    const [securityCount, setSecurityCount] = useState<number>(0);
+    const [securityMax, setSecurityMax] = useState<number>(5);
+    const securityModalOpenRef = useRef(false);
     const videoRef = useRef<HTMLVideoElement>(null);
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const proctoringIntervalRef = useRef<any>(null);
@@ -2111,8 +2607,321 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
     // Note: switched to continuous MediaRecorder with timeslice; no need for manual chunks buffer.
     // const audioChunksRef = useRef<Blob[]>([]);
 
+    const lockRef = useRef<any>(null);
+
+    // Proctor decision / pause state (lecturer can pause/terminate)
+    const [proctorDecision, setProctorDecision] = useState<{ status: 'active' | 'paused' | 'terminated'; reason?: string | null; updatedAt?: string }>(
+        { status: 'active' }
+    );
+    const [proctorPauseOpen, setProctorPauseOpen] = useState(false);
+    const pauseReasonRef = useRef<string>('');
+    const proctorDecisionPollRef = useRef<number | null>(null);
+    const proctorDecisionAbortRef = useRef<AbortController | null>(null);
+
+    // Camera proctoring reliability + observability
+    const proctorSchedulerRef = useRef<number | null>(null);
+    const proctorInFlightRef = useRef(false);
+    const lastFrameAtRef = useRef<number>(0);
+    const backoffUntilRef = useRef<number>(0);
+    const jitterSeedRef = useRef<number>(Math.floor(Math.random() * 100000));
+    const [proctorStats, setProctorStats] = useState({
+        framesSent: 0,
+        uploadErrors: 0,
+        lastUploadMs: 0,
+        lastFrameAt: 0,
+        backoff: false,
+        paused: false,
+        cameraOk: true,
+    });
+
+    // Strict proctoring policy knobs
+    const [proctorPolicy] = useState(() => ({
+        // If server reports "no face" continuously for this long, raise a violation.
+        faceMissingGraceMs: 4000,
+        // If camera appears covered/dark for this long, raise a violation.
+        darkGraceMs: 5000,
+        // How often we log repeated violations of the same type (cooldown)
+        violationCooldownMs: 7000,
+    }));
+
+    const faceMissingSinceRef = useRef<number | null>(null);
+    const darkSinceRef = useRef<number | null>(null);
+    const lastViolationAtRef = useRef<Record<string, number>>({});
+
+    // Adaptive encoding settings (updated based on latency/backoff)
+    const encodeQualityRef = useRef<number>(0.72); // 0..1
+    const encodeWidthRef = useRef<number>(320);
+
+    // --- Screen capture (student sharing) ---
+    const [screenShareEnabled, setScreenShareEnabled] = useState(false);
+    const [screenShareBusy, setScreenShareBusy] = useState(false);
+    const [lastScreenThumb, setLastScreenThumb] = useState<string | null>(null);
+    const screenVideoRef = useRef<HTMLVideoElement | null>(null);
+    const screenStreamRef = useRef<MediaStream | null>(null);
+    const screenCaptureTimerRef = useRef<number | null>(null);
+
+    const stopScreenShare = useCallback(() => {
+        try {
+            if (screenCaptureTimerRef.current) {
+                window.clearInterval(screenCaptureTimerRef.current);
+                screenCaptureTimerRef.current = null;
+            }
+            if (screenStreamRef.current) {
+                screenStreamRef.current.getTracks().forEach(t => t.stop());
+            }
+        } catch {
+            // ignore
+        } finally {
+            screenStreamRef.current = null;
+            if (screenVideoRef.current) {
+                try { (screenVideoRef.current as any).srcObject = null; } catch {}
+            }
+            setScreenShareEnabled(false);
+        }
+    }, []);
+
+    const uploadEvidence = useCallback(async (dataUrl: string, meta: { evidenceType: string; violationType: string; violationScore?: number }) => {
+        try {
+            // Backend expects multipart/form-data with a binary file.
+            const r = await fetch(dataUrl);
+            const blob = await r.blob();
+            const file = new File([blob], `${meta.violationType || 'evidence'}-${Date.now()}.jpg`, { type: blob.type || 'image/jpeg' });
+
+            const form = new FormData();
+            form.append('file', file);
+            form.append('examId', exam._id);
+            form.append('userId', user._id);
+            form.append('evidenceType', meta.evidenceType);
+            form.append('violationType', meta.violationType);
+            form.append('violationScore', String(meta.violationScore ?? 0));
+
+            const res = await fetch(`${API_URL}/upload-evidence`, {
+                method: 'POST',
+                body: form,
+            });
+
+            const j = await res.json();
+            if (!res.ok) return null;
+            return j;
+        } catch {
+            return null;
+        }
+    }, [exam._id, user._id]);
+
+    const captureScreenFrame = useCallback((targetW: number = 420, quality: number = 0.7): string | null => {
+        const v = screenVideoRef.current;
+        if (!v || v.readyState < 2) return null;
+        const srcW = v.videoWidth || 1280;
+        const srcH = v.videoHeight || 720;
+        const scale = targetW / srcW;
+        const targetH = Math.max(1, Math.round(srcH * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = targetW;
+        canvas.height = targetH;
+        const ctx = canvas.getContext('2d');
+        try {
+            ctx?.drawImage(v, 0, 0, targetW, targetH);
+            return canvas.toDataURL('image/jpeg', quality);
+        } catch {
+            return null;
+        }
+    }, []);
+
+    const startScreenShare = useCallback(async () => {
+        if (screenShareEnabled || screenShareBusy) return;
+        setScreenShareBusy(true);
+        try {
+            if (!('mediaDevices' in navigator) || !(navigator.mediaDevices as any).getDisplayMedia) {
+                showToast('Screen sharing is not supported by this browser.', 'error');
+                return;
+            }
+
+            // Must be called via user gesture.
+            const stream = await (navigator.mediaDevices as any).getDisplayMedia({
+                video: { frameRate: 5 },
+                audio: false,
+            });
+
+            // keep a hidden video element to read pixels
+            const v = document.createElement('video');
+            v.muted = true;
+            (v as any).playsInline = true;
+            v.srcObject = stream;
+            await v.play().catch(() => {});
+            screenVideoRef.current = v;
+            screenStreamRef.current = stream;
+
+            // If user stops sharing via browser UI, reflect it
+            try {
+                const track = stream.getVideoTracks?.()[0];
+                if (track) {
+                    track.onended = () => {
+                        showToast('Screen sharing stopped.', 'error');
+                        stopScreenShare();
+                    };
+                }
+            } catch {}
+
+            setScreenShareEnabled(true);
+            showToast('Screen sharing enabled. Keep sharing during the exam.', 'success');
+
+            // Initial capture immediately (best-effort)
+            const frame = captureScreenFrame();
+            if (frame) {
+                setLastScreenThumb(frame);
+                await uploadEvidence(frame, { evidenceType: 'screenshot', violationType: 'screen_snapshot' });
+            }
+
+            // Periodic snapshots (low frequency; keeps lecturer “screen” preview fresh)
+            if (screenCaptureTimerRef.current) window.clearInterval(screenCaptureTimerRef.current);
+            screenCaptureTimerRef.current = window.setInterval(async () => {
+                if (proctorDecision.status !== 'active') return;
+                const shot = captureScreenFrame();
+                if (!shot) return;
+                setLastScreenThumb(shot);
+                await uploadEvidence(shot, { evidenceType: 'screenshot', violationType: 'screen_snapshot' });
+            }, 15000);
+        } catch (err: any) {
+            const msg = err?.name === 'NotAllowedError'
+                ? 'Screen sharing permission denied.'
+                : err?.message || 'Failed to start screen sharing.';
+            showToast(msg, 'error');
+            stopScreenShare();
+        } finally {
+            setScreenShareBusy(false);
+        }
+    }, [captureScreenFrame, proctorDecision.status, screenShareBusy, screenShareEnabled, showToast, stopScreenShare, uploadEvidence]);
+
+    useEffect(() => {
+        securityModalOpenRef.current = securityModalOpen;
+    }, [securityModalOpen]);
+
+    const logProctorEvent = useCallback(async (eventType: string, details: any = {}) => {
+        try {
+            await fetch(`${API_URL}/proctor/event`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    examId: exam._id,
+                    userId: user._id,
+                    eventType,
+                    details: { ...details, at: new Date().toISOString() }
+                })
+            });
+        } catch {
+            // best-effort: don't block exam if logging fails
+        }
+    }, [exam._id, user._id]);
+
+    const requestPauseFromClient = useCallback(async (reason: string) => {
+        // Freeze the exam immediately. Lecturer can later resume.
+        pauseReasonRef.current = reason;
+        setProctorDecision(prev => ({ ...prev, status: 'paused', reason }));
+        setProctorPauseOpen(true);
+        // Stop uploads to avoid wasting bandwidth while awaiting decision.
+        try { stopProctoring(); } catch {}
+
+        // Best-effort notify backend so lecturer dashboards can see state consistently.
+        try {
+            await fetch(`${API_URL}/exams/${exam._id}/students/${user._id}/proctor-status`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-User-Id': user._id },
+                body: JSON.stringify({ status: 'paused', reason })
+            });
+        } catch {
+            // ignore (polling will reconcile)
+        }
+    }, [exam._id, user._id]);
+
+    const canLogViolation = useCallback((type: string) => {
+        const now = Date.now();
+        const last = lastViolationAtRef.current[type] || 0;
+        if (now - last < proctorPolicy.violationCooldownMs) return false;
+        lastViolationAtRef.current[type] = now;
+        return true;
+    }, [proctorPolicy.violationCooldownMs]);
+
+    const disableBrowserLock = useCallback(() => {
+        try {
+            lockRef.current?.disable?.();
+        } catch {
+            // ignore
+        } finally {
+            lockRef.current = null;
+            setSecureModeEnabled(false);
+        }
+    }, []);
+
+    const enableBrowserLock = useCallback(async () => {
+        // Must be triggered by a user gesture to allow fullscreen.
+        if (secureModeEnabled) return true;
+        setSecureModeBusy(true);
+        try {
+            const lock = new (BrowserLock as any)(exam._id, user._id, API_URL);
+            lock.onViolation = (title: string, message: string) => {
+                // Show a professional in-app modal (instead of browser alert)
+                setSecurityTitle(title || 'Security warning');
+                setSecurityMessage(message || 'Security policy violation detected.');
+                setSecurityCount(lock.getWarningCount?.() ?? 0);
+                setSecurityMax(lock.maxWarnings ?? 5);
+                setSecurityModalOpen(true);
+                logProctorEvent('browser_lock_violation', { title, message, count: lock.getWarningCount?.() ?? undefined });
+            };
+            lock.onMaxWarnings = (count: number, details?: { title?: string; message?: string }) => {
+                setSecurityTitle(details?.title || 'Final warning');
+                setSecurityMessage(details?.message || 'Maximum violations reached. The exam will be submitted now.');
+                setSecurityCount(count);
+                setSecurityMax(lock.maxWarnings ?? 5);
+                setSecurityModalOpen(true);
+                logProctorEvent('browser_lock_max_warnings', { count, details });
+
+                // Defer actual submission to an effect declared later
+                setAutoSubmitRequested(true);
+            };
+
+            const ok = await lock.enable();
+            if (!ok) {
+                showToast('Secure mode could not be enabled. Please allow fullscreen and try again.', 'error');
+                logProctorEvent('browser_lock_enable_failed', {});
+                return false;
+            }
+
+            lockRef.current = lock;
+            setSecureModeEnabled(true);
+            showToast('Secure exam mode enabled.', 'success');
+            logProctorEvent('browser_lock_enabled', {});
+            setSecurityMax(lock.maxWarnings ?? 5);
+            return true;
+        } catch (err: any) {
+            console.error('BrowserLock enable failed:', err);
+            showToast(err?.message || 'Could not enable secure mode.', 'error');
+            logProctorEvent('browser_lock_enable_failed', { error: String(err?.message || err) });
+            return false;
+        } finally {
+            setSecureModeBusy(false);
+        }
+    }, [exam._id, logProctorEvent, secureModeEnabled, showToast, user._id]);
+
+    // When the warning modal is acknowledged, try to re-enter fullscreen and continue.
+    const handleAcknowledgeSecurityWarning = useCallback(async () => {
+        setSecurityModalOpen(false);
+
+        // If it was a final (>= max) warning, request auto-submit.
+        if (securityCount >= securityMax) {
+            setAutoSubmitRequested(true);
+            return;
+        }
+
+        // Best-effort re-lock (fullscreen) to continue the exam neatly.
+        try {
+            await lockRef.current?.enterFullscreen?.();
+        } catch {
+            // If fullscreen fails, student can click Enable secure mode again.
+        }
+    }, [securityCount, securityMax]);
+
     // Function to stop all proctoring activities
-    const stopProctoring = useCallback(() => {
+    function stopProctoring() {
         if (proctoringStopped) return; // Already stopped
         
         console.log('[SUBMIT] Aborting all pending proctoring requests...');
@@ -2157,7 +2966,93 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
         
         setProctoringStopped(true);
         console.log('[SUBMIT] All proctoring stopped successfully');
-    }, [proctoringStopped]);
+
+        // Also stop screen sharing (best-effort)
+        try { stopScreenShare(); } catch {}
+    }
+
+    // Handle actual submission after confirmation
+    async function handleSubmit() {
+        if (isSubmitting) return; // Guard against double clicks or retries while pending
+
+        setIsSubmitting(true);
+        setSubmitStatus('sending');
+        setSubmitError(null);
+        console.log('[SUBMIT] Starting exam submission...', { examId: exam._id, userId: user._id, answerCount: Object.keys(answers).length });
+        
+        // Ensure proctoring is fully stopped (in case it was restarted after cancel)
+        console.log('[SUBMIT] Ensuring proctoring is completely stopped before final submission...');
+        stopProctoring();
+        
+        console.log('[SUBMIT] Submitting immediately - requests already aborted');
+        
+        const SLOW_SUBMISSION_WARNING_MS = 45000;
+        let warningShown = false;
+        const warningTimer = window.setTimeout(() => {
+            warningShown = true;
+            showToast('Submission is taking longer than expected. Please stay on this page while we finish.', 'error');
+        }, SLOW_SUBMISSION_WARNING_MS);
+
+        try {
+            const url = `${API_URL}/exams/${exam._id}/submit`;
+            console.log('[SUBMIT] Now submitting to:', url);
+            
+            const res = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ userId: user._id, answers })
+            });
+            
+            console.log('[SUBMIT] Submit response status:', res.status);
+            const data = await res.json();
+            console.log('[SUBMIT] Submit response data:', data);
+            
+            if (!res.ok) throw new Error(data.error || 'Failed to submit exam');
+
+            showToast('Exam submitted successfully!', 'success');
+            setShowSubmitConfirm(false);
+            onExit({ score: data.score, totalMarks: data.totalMarks, examTitle: exam.title, perQuestion: data.perQuestion });
+
+        } catch (error: any) {
+            console.error('[SUBMIT] Exam submission error:', error);
+            let message = error?.message || 'Failed to submit exam. Please try again.';
+            if (warningShown && message === 'Failed to fetch') {
+                message = 'Network interruption detected during submission. Please reconnect and try again.';
+            }
+            showToast(message, 'error');
+            setSubmitStatus('error');
+            setSubmitError(message);
+            setIsSubmitting(false);
+        } finally {
+            clearTimeout(warningTimer);
+        }
+    }
+
+    useEffect(() => {
+        if (!autoSubmitRequested) return;
+        if (submitStatus === 'sending') return;
+
+        // Ensure lock is released and proctoring is stopped before submit
+        disableBrowserLock();
+        try {
+            stopProctoring();
+        } catch {}
+
+        setShowSubmitConfirm(false);
+        setSubmitStatus('idle');
+        setSubmitError(null);
+        setAutoSubmitRequested(false);
+
+        // Trigger the existing submission pipeline
+        handleSubmit();
+    }, [autoSubmitRequested, disableBrowserLock, handleSubmit, stopProctoring, submitStatus]);
+
+    useEffect(() => {
+        return () => {
+            disableBrowserLock();
+            try { stopScreenShare(); } catch {}
+        };
+    }, [disableBrowserLock, stopScreenShare]);
 
     // Function to restart proctoring if student cancels submission
     const restartProctoring = useCallback(() => {
@@ -2169,78 +3064,165 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
 
     // Handle first submit button click - stop proctoring and show confirmation
     const handleInitialSubmitClick = useCallback(() => {
+        if (submitStatus === 'sending') return; // ignore clicks while finalizing
         console.log('[SUBMIT] Initial submit button clicked');
+        // Release lock so user can interact with dialogs / exit fullscreen if needed
+        disableBrowserLock();
         stopProctoring();
+        setSubmitError(null);
+        setSubmitStatus('review');
         setShowSubmitConfirm(true);
-    }, [stopProctoring]);
+    }, [disableBrowserLock, stopProctoring, submitStatus]);
 
     // Handle cancel button in confirmation dialog - RESTART PROCTORING
     const handleCancelSubmit = useCallback(() => {
+        if (submitStatus === 'sending') return; // cannot cancel while submitting
         console.log('[SUBMIT] User cancelled submission - restarting proctoring');
         setShowSubmitConfirm(false);
+        setSubmitStatus('idle');
+        setSubmitError(null);
+        restartProctoring();
+        // Cancel button click counts as a user gesture; try restoring secure mode
+        enableBrowserLock();
+    }, [enableBrowserLock, restartProctoring, submitStatus]);
+
+    const handleReturnAfterError = useCallback(() => {
+        console.log('[SUBMIT] Returning to exam after submission error');
+        setShowSubmitConfirm(false);
+        setSubmitStatus('idle');
+        setSubmitError(null);
+        setIsSubmitting(false);
         restartProctoring();
     }, [restartProctoring]);
 
-    // Handle actual submission after confirmation
-    const handleSubmit = useCallback(async () => {
-        setIsSubmitting(true);
-        console.log('[SUBMIT] Starting exam submission...', { examId: exam._id, userId: user._id, answerCount: Object.keys(answers).length });
-        
-        // No need to wait - requests are already aborted via AbortController
-        console.log('[SUBMIT] Submitting immediately - requests already aborted');
-        
-        try {
-            const url = `${API_URL}/exams/${exam._id}/submit`;
-            console.log('[SUBMIT] Now submitting to:', url);
-            
-            // Add timeout to prevent hanging (10 seconds should be enough after optimization)
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
-            
-            const res = await fetch(url, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ userId: user._id, answers }),
-                signal: controller.signal
-            });
-            
-            clearTimeout(timeoutId);
-            console.log('[SUBMIT] Submit response status:', res.status);
-            
-            const data = await res.json();
-            console.log('[SUBMIT] Submit response data:', data);
-            
-            if (!res.ok) throw new Error(data.error || 'Failed to submit exam');
-
-            showToast('Exam submitted successfully!', 'success');
-            onExit({ score: data.score, totalMarks: data.totalMarks, examTitle: exam.title, perQuestion: data.perQuestion });
-
-        } catch (error: any) {
-            console.error('[SUBMIT] Exam submission error:', error);
-            if (error.name === 'AbortError') {
-                showToast('Submission timeout. The server took too long to respond. Please try again.', 'error');
-            } else {
-                showToast(error.message || 'Failed to submit exam. Please try again.', 'error');
-            }
-            setIsSubmitting(false);
+    const handleSubmitDialogChange = useCallback((open: boolean) => {
+        if (open) {
+            // State is controlled elsewhere; ignore programmatic open requests from dialog internals.
+            return;
         }
-    }, [answers, exam._id, exam.title, onExit, showToast, user._id]);
 
-    // Proctoring Loop
+        if (!showSubmitConfirm) return; // already closed
+
+        if (submitStatus === 'sending') {
+            // Ignore attempts to close while submission is in-flight; keep dialog visible.
+            setShowSubmitConfirm(true);
+            return;
+        }
+
+        if (submitStatus === 'error') {
+            handleReturnAfterError();
+        } else {
+            handleCancelSubmit();
+        }
+    }, [handleCancelSubmit, handleReturnAfterError, showSubmitConfirm, submitStatus]);
+
+    // Helpers for camera health + scheduling
+    const clearProctorScheduler = useCallback(() => {
+        if (proctorSchedulerRef.current) {
+            window.clearTimeout(proctorSchedulerRef.current);
+            proctorSchedulerRef.current = null;
+        }
+    }, []);
+
+    const isCameraHealthy = useCallback(() => {
+        const video = videoRef.current;
+        if (!video) return false;
+        // readyState >= HAVE_CURRENT_DATA
+        if (video.readyState < 2) return false;
+        if (!video.videoWidth || !video.videoHeight) return false;
+        return true;
+    }, []);
+
+    const computeFrameBrightness = useCallback((dataUrl: string): number | null => {
+        // Fast, approximate luminance check using a tiny downscaled canvas.
+        try {
+            if (!dataUrl.startsWith('data:image')) return null;
+            const img = new Image();
+            img.src = dataUrl;
+            // WARNING: sync access to pixels requires image decode; we use a small canvas + best-effort.
+            // This is acceptable at our low frame rate and helps strict realism.
+            // If decode isn't ready immediately, return null and let next tick check.
+            if (!img.complete) return null;
+            const w = 32;
+            const h = 24;
+            const canvas = document.createElement('canvas');
+            canvas.width = w;
+            canvas.height = h;
+            const ctx = canvas.getContext('2d', { willReadFrequently: true } as any) as CanvasRenderingContext2D | null;
+            if (!ctx) return null;
+            ctx.drawImage(img, 0, 0, w, h);
+            const pixels = ctx.getImageData(0, 0, w, h).data;
+            let sum = 0;
+            const n = w * h;
+            for (let i = 0; i < pixels.length; i += 4) {
+                // relative luminance approximation
+                sum += (0.2126 * pixels[i] + 0.7152 * pixels[i + 1] + 0.0722 * pixels[i + 2]);
+            }
+            return sum / n;
+        } catch {
+            return null;
+        }
+    }, []);
+
+    // Proctoring Loop (upgraded)
     useEffect(() => {
+        if (submitStatus !== 'idle') {
+            return () => {};
+        }
+
+        // If proctor has paused or terminated this student, do not run proctoring.
+        if (proctorDecision.status !== 'active') {
+            return () => {};
+        }
+
+        // Require secure mode before starting proctoring (realistic proctoring flow)
+        if (!secureModeEnabled) {
+            return () => {};
+        }
+
         // Reset proctoring stopped state when starting a new exam
         console.log('[PROCTORING] Initializing proctoring for exam:', exam._id);
         setProctoringStopped(false);
         
-        const [proctorDegradedRef] = [
-            { current: false } as { current: boolean }
-        ];
         // Simple network backoff to avoid spamming server if unreachable
-        const nextAllowedRef = { current: 0 } as any;
+        const minIntervalMs = 2500; // faster than before, but adaptive
+        const maxIntervalMs = 6000;
         const backoffMs = () => 10000; // 10s backoff on network failure
+        const computeNextInterval = () => {
+            // If a warning modal is open, pause uploads to reduce noise and avoid multiple violations.
+            if (securityModalOpenRef.current) return maxIntervalMs;
+            // If page isn't visible, slow down (still logs server-side, but reduce bandwidth)
+            if (document.hidden) return maxIntervalMs;
+            // If camera looks unhealthy, slow down.
+            if (!isCameraHealthy()) return maxIntervalMs;
+            // Normal operation
+            return minIntervalMs;
+        };
+
+        const withJitter = (ms: number) => {
+            // Add jitter so multiple clients don't synchronize (reduces burst load)
+            jitterSeedRef.current = (jitterSeedRef.current * 9301 + 49297) % 233280;
+            const jitter = (jitterSeedRef.current / 233280) * 400; // 0..400ms
+            return Math.max(400, Math.floor(ms + jitter));
+        };
 
         const startProctoring = async () => {
+            if (submitStatus !== 'idle') {
+                return;
+            }
             console.log('[PROCTORING] Starting camera and audio streams...');
+            
+            // Reset proctoring state on server (clears reference background and violation counts)
+            try {
+                await fetch(`${API_URL}/proctor/reset`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ examId: exam._id, userId: user._id })
+                });
+                console.log('[PROCTORING] Server state reset - fresh reference image will be captured');
+            } catch (err) {
+                console.error('[PROCTORING] Failed to reset server state:', err);
+            }
             
             // Create a new AbortController for this proctoring session
             proctoringAbortControllerRef.current = new AbortController();
@@ -2258,6 +3240,17 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                     } catch (e) {}
                     videoRef.current.srcObject = videoStream;
                 }
+
+                // Track video track end events (camera unplugged / permission revoked)
+                try {
+                    const [videoTrack] = videoStream.getVideoTracks();
+                    if (videoTrack) {
+                        videoTrack.onended = () => {
+                            setProctorStats(s => ({ ...s, cameraOk: false }));
+                            logProctorEvent('camera_stream_ended', { kind: videoTrack.kind, label: videoTrack.label });
+                        };
+                    }
+                } catch {}
 
                 // Start audio stream and recorder
                 const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -2283,19 +3276,15 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                                 const res = await fetch(`${API_URL}/proctor/audio`, {
                                     method: 'POST',
                                     headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ audioData: base64Audio.split(',')[1] }),
+                                    body: JSON.stringify({ 
+                                        audioData: base64Audio.split(',')[1],
+                                        examId: exam._id,
+                                        userId: user._id
+                                    }),
                                     signal: abortSignal // Add abort signal to cancel request
                                 });
-                                const data = await res.json();
-                                if (data && data.audioStatus && String(data.audioStatus).toLowerCase().includes('suspicious')) {
-                                    try {
-                                        await fetch(`${API_URL}/proctor/event`, {
-                                            method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                            body: JSON.stringify({ examId: exam._id, userId: user._id, eventType: 'audio', details: { audioStatus: data.audioStatus } }),
-                                            signal: abortSignal
-                                        });
-                                    } catch (err) { /* ignore */ }
-                                }
+                                await res.json();
+                                // Audio events are now handled server-side (only voice detection triggers events)
                             } catch (error: any) { 
                                 // Don't log AbortError - it's expected when stopping
                                 if (error.name !== 'AbortError') {
@@ -2306,78 +3295,14 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                     } catch { /* ignore */ }
                 };
 
-                // Start a recurring loop for proctoring - store in ref so handleSubmit can stop it
-                proctoringIntervalRef.current = setInterval(() => {
-                    // Skip if proctoring was stopped
+                // Start adaptive scheduler (instead of fixed setInterval)
+                const tick = async () => {
                     if (abortSignal.aborted) return;
-                    
-                    // Skip if in backoff window
-                    if (Date.now() < nextAllowedRef.current) return;
-                    const imageDataUrl = captureFrame();
-                    if (imageDataUrl) {
-                        fetch(`${API_URL}/proctor`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ imageDataUrl, userId: user._id, examId: exam._id }),
-                            signal: abortSignal // Add abort signal
-                        }).then(async res => {
-                            if (abortSignal.aborted) return; // Check before processing response
-                            
-                            if (!res.ok) {
-                                nextAllowedRef.current = Date.now() + backoffMs();
-                                proctorDegradedRef.current = true;
-                            }
-                            return res.json();
-                        }).then(data => {
-                            if (abortSignal.aborted || !data) return; // Check again
-                            
-                            if (data && !data.error) {
-                                proctorDegradedRef.current = false;
-                                const suspicious = [];
-                                if (!data.identityVerified) suspicious.push({ event: 'identity', details: { similarity: data.similarity } });
-                                if (data.faceCount && data.faceCount > 1) suspicious.push({ event: 'multiple_faces', details: { count: data.faceCount } });
-                                if (data.objectsDetected && data.objectsDetected.length > 0 && data.objectsDetected[0] !== 'No objects') suspicious.push({ event: 'object_detected', details: { objects: data.objectsDetected } });
-                                if (data.headPose && data.headPose !== 'Forward') suspicious.push({ event: 'head_pose', details: { pose: data.headPose } });
-                                if (data.gazeDirection && data.gazeDirection !== 'Center') suspicious.push({ event: 'gaze', details: { gaze: data.gazeDirection } });
-                                if (data.blinkStatus && data.blinkStatus === 'suspicious') suspicious.push({ event: 'blink', details: {} });
 
-                                // FOR TESTING: Send a test event every 10th proctoring check to verify events are working
-                                // Remove this after testing
-                                if (Math.random() < 0.1) {
-                                    suspicious.push({ event: 'gaze', details: { gaze: 'Test Event', message: 'This is a test event to verify proctoring works' } });
-                                    console.log('[PROCTORING] Sending TEST event to verify system');
-                                }
-
-                                suspicious.forEach(async (ev) => {
-                                    if (abortSignal.aborted) return;
-                                    try {
-                                        console.log(`[PROCTORING] Sending event: ${ev.event}`);
-                                        const response = await fetch(`${API_URL}/proctor/event`, {
-                                            method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                            body: JSON.stringify({ examId: exam._id, userId: user._id, eventType: ev.event, details: ev.details, snapshot: imageDataUrl }),
-                                            signal: abortSignal
-                                        });
-                                        if (response.ok) {
-                                            console.log(`[PROCTORING] Event ${ev.event} recorded successfully`);
-                                        }
-                                    } catch (err: any) {
-                                        if (err.name !== 'AbortError') {
-                                            console.error('Failed to record proctor event', err);
-                                        }
-                                    }
-                                });
-                            } else if (data && data.error) {
-                                console.error('Proctoring error:', data.error);
-                            }
-                        }).catch(err => { 
-                            // Don't log AbortError
-                            if (err.name !== 'AbortError') {
-                                console.error("Image proctoring error:", err); 
-                                nextAllowedRef.current = Date.now() + backoffMs(); 
-                                proctorDegradedRef.current = true;
-                            }
-                        });
-                    }
+                    const now = Date.now();
+                    const paused = document.hidden || securityModalOpenRef.current;
+                    const cameraOk = isCameraHealthy();
+                    setProctorStats(s => ({ ...s, paused, cameraOk, backoff: now < backoffUntilRef.current }));
 
                     // Ensure recorder is running with 1s timeslice for continuous small chunks
                     try {
@@ -2385,9 +3310,162 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                             mediaRecorderRef.current.start(1000);
                         }
                     } catch {}
-                }, 3000); // Run every 3 seconds (faster proctoring)
-                
-                console.log('[PROCTORING] Proctoring started successfully - interval set');
+
+                    // If we're backing off or paused, schedule next tick and skip sending.
+                    if (now < backoffUntilRef.current || paused || !cameraOk) {
+                        const interval = withJitter(computeNextInterval());
+                        proctorSchedulerRef.current = window.setTimeout(tick, interval);
+                        return;
+                    }
+
+                    // Backpressure: only one in-flight frame upload at a time.
+                    if (proctorInFlightRef.current) {
+                        const interval = withJitter(computeNextInterval());
+                        proctorSchedulerRef.current = window.setTimeout(tick, interval);
+                        return;
+                    }
+
+                    const imageDataUrl = captureFrame();
+                    if (!imageDataUrl) {
+                        // camera might be warming up; try later
+                        const interval = withJitter(computeNextInterval());
+                        proctorSchedulerRef.current = window.setTimeout(tick, interval);
+                        return;
+                    }
+
+                    // Strict rule: covered/dark camera detection (client-side)
+                    const bright = computeFrameBrightness(imageDataUrl);
+                    const isDark = typeof bright === 'number' ? bright < 35 : false; // threshold tuned for JPEG baseline
+                    if (isDark) {
+                        if (!darkSinceRef.current) darkSinceRef.current = Date.now();
+                    } else {
+                        darkSinceRef.current = null;
+                    }
+                    if (darkSinceRef.current && Date.now() - darkSinceRef.current >= proctorPolicy.darkGraceMs) {
+                        if (canLogViolation('camera_dark')) {
+                            logProctorEvent('camera_dark_or_covered', {
+                                message: 'Camera feed appears dark/covered for an extended period.',
+                                brightness: bright,
+                                graceMs: proctorPolicy.darkGraceMs,
+                                frameEvidence: imageDataUrl,
+                                severity: 'high'
+                            });
+
+                            // High severity: pause immediately until lecturer decides
+                            requestPauseFromClient('Camera appears covered/dark for too long. Waiting for invigilator approval.');
+                        }
+                    }
+
+                    proctorInFlightRef.current = true;
+                    lastFrameAtRef.current = now;
+                    setProctorStats(s => ({ ...s, lastFrameAt: now }));
+
+                    const t0 = performance.now();
+                    try {
+                        const res = await fetch(`${API_URL}/proctor`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                imageDataUrl,
+                                userId: user._id,
+                                examId: exam._id,
+                                examActive: submitStatus === 'idle'
+                            }),
+                            signal: abortSignal
+                        });
+
+                        const t1 = performance.now();
+                        const uploadMs = Math.round(t1 - t0);
+                        setProctorStats(s => ({ ...s, lastUploadMs: uploadMs }));
+
+                        // Adaptive encoding: if uploads are slow, reduce size/quality; if fast, slowly recover.
+                        if (uploadMs > 1200) {
+                            encodeQualityRef.current = Math.max(0.45, +(encodeQualityRef.current - 0.05).toFixed(2));
+                            encodeWidthRef.current = Math.max(240, encodeWidthRef.current - 40);
+                        } else if (uploadMs < 450) {
+                            encodeQualityRef.current = Math.min(0.8, +(encodeQualityRef.current + 0.02).toFixed(2));
+                            encodeWidthRef.current = Math.min(360, encodeWidthRef.current + 20);
+                        }
+
+                        if (!res.ok) {
+                            backoffUntilRef.current = Date.now() + backoffMs();
+                            setProctorStats(s => ({ ...s, uploadErrors: s.uploadErrors + 1, backoff: true }));
+                            proctorInFlightRef.current = false;
+                            const interval = maxIntervalMs;
+                            proctorSchedulerRef.current = window.setTimeout(tick, interval);
+                            return;
+                        }
+
+                        const data = await res.json();
+                        if (abortSignal.aborted) return;
+
+                        setProctorStats(s => ({ ...s, framesSent: s.framesSent + 1 }));
+
+                        if (data && data.error) {
+                            console.error('Proctoring error:', data.error);
+                        } else {
+                            // Strict rule: face missing escalation using server output
+                            const faceCount = typeof data?.faceCount === 'number' ? data.faceCount : null;
+                            if (faceCount === 0) {
+                                if (!faceMissingSinceRef.current) faceMissingSinceRef.current = Date.now();
+                            } else {
+                                faceMissingSinceRef.current = null;
+                            }
+
+                            if (faceMissingSinceRef.current && Date.now() - faceMissingSinceRef.current >= proctorPolicy.faceMissingGraceMs) {
+                                if (canLogViolation('face_missing')) {
+                                    logProctorEvent('face_missing', {
+                                        message: 'No face detected for an extended period.',
+                                        graceMs: proctorPolicy.faceMissingGraceMs,
+                                        faceCount,
+                                        frameEvidence: imageDataUrl,
+                                        severity: 'high'
+                                    });
+
+                                    // High severity: pause immediately until lecturer decides
+                                    requestPauseFromClient('Face not detected for too long. Exam is paused pending invigilator decision.');
+                                }
+                            }
+
+                            // Strict: multiple faces (client reinforces server detection)
+                            if (typeof faceCount === 'number' && faceCount > 1) {
+                                if (canLogViolation('multiple_faces')) {
+                                    logProctorEvent('multiple_faces_detected', {
+                                        message: `Multiple faces detected (${faceCount}).`,
+                                        faceCount,
+                                        frameEvidence: imageDataUrl,
+                                        severity: 'high'
+                                    });
+
+                                    // High severity: pause immediately until lecturer decides
+                                    requestPauseFromClient('Multiple faces detected. Exam is paused pending invigilator decision.');
+                                }
+                            }
+                        }
+                    } catch (err: any) {
+                        if (err?.name !== 'AbortError') {
+                            console.error('Image proctoring error:', err);
+                            backoffUntilRef.current = Date.now() + backoffMs();
+                            setProctorStats(s => ({ ...s, uploadErrors: s.uploadErrors + 1, backoff: true }));
+
+                            // When in backoff, drop quality aggressively to recover quickly.
+                            encodeQualityRef.current = Math.max(0.4, +(encodeQualityRef.current - 0.08).toFixed(2));
+                            encodeWidthRef.current = Math.max(220, encodeWidthRef.current - 60);
+                        }
+                    } finally {
+                        proctorInFlightRef.current = false;
+                        if (!abortSignal.aborted) {
+                            const interval = withJitter(computeNextInterval());
+                            proctorSchedulerRef.current = window.setTimeout(tick, interval);
+                        }
+                    }
+                };
+
+                // Kick off first tick
+                clearProctorScheduler();
+                proctorSchedulerRef.current = window.setTimeout(tick, withJitter(computeNextInterval()));
+
+                console.log('[PROCTORING] Proctoring started successfully - adaptive scheduler running');
             } catch (error) {
                 console.error("[PROCTORING] Failed to start proctoring streams:", error);
                 showToast("Could not start camera or microphone for proctoring.", "error");
@@ -2399,6 +3477,9 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
         // Cleanup function
         return () => {
             console.log('[PROCTORING] Cleanup: stopping all proctoring activities');
+
+            clearProctorScheduler();
+            proctorInFlightRef.current = false;
             
             // Abort all pending requests
             if (proctoringAbortControllerRef.current) {
@@ -2417,7 +3498,90 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                 mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
             }
         };
-    }, [exam._id, showToast, user._id, proctoringKey]); // Added proctoringKey to restart on cancel
+    }, [clearProctorScheduler, exam._id, isCameraHealthy, proctorDecision.status, requestPauseFromClient, secureModeEnabled, showToast, submitStatus, user._id, proctoringKey]);
+
+    // Poll server for lecturer decisions (pause/resume/terminate)
+    useEffect(() => {
+        // Stop polling if exam is submitting/exited
+        if (submitStatus !== 'idle') return;
+
+        // Clear any existing poll timers
+        if (proctorDecisionPollRef.current) {
+            window.clearInterval(proctorDecisionPollRef.current);
+            proctorDecisionPollRef.current = null;
+        }
+
+        // Abort any in-flight status calls
+        if (proctorDecisionAbortRef.current) {
+            proctorDecisionAbortRef.current.abort();
+            proctorDecisionAbortRef.current = null;
+        }
+
+        const poll = async () => {
+            try {
+                const ac = new AbortController();
+                proctorDecisionAbortRef.current = ac;
+                const res = await fetch(`${API_URL}/exams/${exam._id}/students/${user._id}/proctor-status`, {
+                    headers: { 'X-User-Id': user._id },
+                    signal: ac.signal
+                });
+                if (!res.ok) return;
+                const data = await res.json();
+                const status = data?.status?.status as ('active' | 'paused' | 'terminated') | undefined;
+                const reason = data?.status?.reason as string | undefined;
+
+                if (!status) return;
+
+                setProctorDecision(prev => {
+                    if (prev.status === status && (prev.reason || '') === (reason || '')) return prev;
+                    return { status, reason, updatedAt: data?.status?.updatedAt };
+                });
+
+                if (status === 'paused') {
+                    pauseReasonRef.current = reason || pauseReasonRef.current || 'Paused by invigilator.';
+                    setProctorPauseOpen(true);
+                    try { stopProctoring(); } catch {}
+                    try { stopScreenShare(); } catch {}
+                }
+
+                if (status === 'terminated') {
+                    // Force submission immediately
+                    showToast(reason || 'Your exam was terminated by the invigilator.', 'error');
+                    try { disableBrowserLock(); } catch {}
+                    try { stopProctoring(); } catch {}
+                    try { stopScreenShare(); } catch {}
+                    // Trigger final submit
+                    handleSubmit();
+                }
+
+                if (status === 'active') {
+                    setProctorPauseOpen(false);
+                    // Resume proctoring if we were stopped due to pause
+                    if (proctoringStopped) {
+                        setProctoringStopped(false);
+                        setProctoringKey(k => k + 1);
+                    }
+                }
+            } catch (e: any) {
+                if (e?.name === 'AbortError') return;
+            }
+        };
+
+        // initial sync, then interval polling
+        poll();
+        proctorDecisionPollRef.current = window.setInterval(poll, 2000);
+
+        return () => {
+            if (proctorDecisionPollRef.current) {
+                window.clearInterval(proctorDecisionPollRef.current);
+                proctorDecisionPollRef.current = null;
+            }
+            if (proctorDecisionAbortRef.current) {
+                proctorDecisionAbortRef.current.abort();
+                proctorDecisionAbortRef.current = null;
+            }
+        };
+    }, [disableBrowserLock, exam._id, handleSubmit, proctoringStopped, showToast, stopProctoring, submitStatus, user._id]);
 
     const captureFrame = (): string | null => {
         const video = videoRef.current;
@@ -2425,7 +3589,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
         // Downscale to reduce bandwidth and backend load, keep aspect ratio
         const srcW = video.videoWidth || 640;
         const srcH = video.videoHeight || 480;
-        const targetW = 320; // small fixed width
+        const targetW = encodeWidthRef.current; // adaptive width
         const scale = targetW / srcW;
         const targetH = Math.max(1, Math.round(srcH * scale));
 
@@ -2435,8 +3599,8 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
         const ctx = canvas.getContext('2d');
         try {
             ctx?.drawImage(video, 0, 0, targetW, targetH);
-            // Slightly lower quality to reduce payload size
-            return canvas.toDataURL('image/jpeg', 0.7);
+            // Adaptive quality reduces payload when network is slow
+            return canvas.toDataURL('image/jpeg', encodeQualityRef.current);
         } catch (e) {
             return null;
         }
@@ -2444,6 +3608,10 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
 
     // Timer logic
     useEffect(() => {
+        // When paused/terminated, freeze timer.
+        if (proctorDecision.status !== 'active') {
+            return;
+        }
         if (timeLeft <= 0) {
             handleSubmit();
             return;
@@ -2452,7 +3620,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
             setTimeLeft(t => t - 1);
         }, 1000);
         return () => clearInterval(timerId);
-    }, [timeLeft, handleSubmit]);
+    }, [proctorDecision.status, timeLeft, handleSubmit]);
     
     // Tab switch monitoring
     useEffect(() => {
@@ -2532,7 +3700,138 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                     </div>
                 </header>
                 <div className="flex-1 p-8 overflow-y-auto relative">
+                    {/* Proctor pause overlay (blocks the exam until lecturer decision) */}
+                    {proctorPauseOpen && (
+                        <div className="absolute inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm">
+                            <div className="w-full max-w-lg rounded-xl border border-slate-700 bg-slate-900 p-6 shadow-2xl">
+                                <div className="flex items-start gap-3">
+                                    <div className="mt-0.5 rounded-full bg-yellow-500/20 p-2 text-yellow-300">
+                                        <AlertTriangle className="h-5 w-5" />
+                                    </div>
+                                    <div className="flex-1">
+                                        <h3 className="text-lg font-semibold text-white">Exam paused</h3>
+                                        <p className="mt-1 text-sm text-slate-300">
+                                            {proctorDecision.reason || pauseReasonRef.current || 'Paused by invigilator. Please wait for a decision.'}
+                                        </p>
+                                        <div className="mt-4 rounded-lg border border-slate-700 bg-slate-800/70 p-3">
+                                            <p className="text-xs text-slate-300">Your answers are safe. Don’t refresh the page.</p>
+                                            <p className="text-xs text-slate-400 mt-1">We’ll automatically resume when the invigilator allows you to continue.</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    <Dialog open={securityModalOpen} onOpenChange={(open) => {
+                        // prevent closing by clicking outside; only the OK/Submit button closes it
+                        if (!open) {
+                            setSecurityModalOpen(true);
+                            return;
+                        }
+                        setSecurityModalOpen(open);
+                    }}>
+                        <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                            <AlertTriangle className="h-5 w-5 text-yellow-400" />
+                            {securityTitle}
+                        </h2>
+                        <p className="text-slate-300 mt-3">{securityMessage}</p>
+                        <div className="mt-4 flex items-center justify-between">
+                            <div className="text-sm text-slate-400">
+                                Warning <span className="text-slate-200 font-semibold">{securityCount}</span>/{securityMax}
+                            </div>
+                            <Button onClick={handleAcknowledgeSecurityWarning} className={securityCount >= securityMax ? 'bg-red-600 hover:bg-red-500' : ''}>
+                                {securityCount >= securityMax ? 'Submit exam' : 'OK'}
+                            </Button>
+                        </div>
+                        <p className="text-xs text-slate-500 mt-3">
+                            After you click OK, secure mode will be restored automatically and you can continue from where you stopped.
+                        </p>
+                    </Dialog>
+
+                    {!secureModeEnabled && (
+                        <div className="absolute inset-0 z-20 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-6">
+                            <div className="w-full max-w-lg rounded-xl border border-slate-800 bg-slate-900/80 p-6 shadow-xl">
+                                <h3 className="text-xl font-semibold text-white mb-2">Start Secure Exam Mode</h3>
+                                <p className="text-slate-300 text-sm mb-4">
+                                    This exam requires fullscreen and proctoring restrictions. Click below to enable secure mode.
+                                </p>
+                                <ul className="text-slate-400 text-sm space-y-1 mb-5 list-disc pl-5">
+                                    <li>Stay in fullscreen during the exam</li>
+                                    <li>Tab switching and focus changes are recorded</li>
+                                    <li>DevTools shortcuts and copy/paste are blocked where possible</li>
+                                </ul>
+                                <div className="flex items-center gap-3">
+                                    <Button className="flex-1" onClick={enableBrowserLock} isLoading={secureModeBusy}>
+                                        Enable Secure Mode
+                                    </Button>
+                                    <Button
+                                        variant="outline"
+                                        className="flex-1"
+                                        onClick={() => showToast('Secure mode is required to start the exam.', 'error')}
+                                        disabled={secureModeBusy}
+                                    >
+                                        Not now
+                                    </Button>
+                                </div>
+                                <p className="text-xs text-slate-500 mt-4">
+                                    Note: Browsers can’t fully block OS-level shortcuts. These controls are best-effort and all suspicious activity is logged.
+                                </p>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Screen-share control (must be a user gesture) */}
+                    {secureModeEnabled && (
+                        <div className="absolute top-44 right-4 z-10 w-48">
+                            <div className="rounded-lg border border-slate-700 bg-slate-900/70 backdrop-blur p-3">
+                                <div className="flex items-center justify-between">
+                                    <div className="text-[11px] font-semibold text-slate-200">Screen</div>
+                                    <div className={cn('text-[10px] px-2 py-0.5 rounded-full border', screenShareEnabled ? 'bg-emerald-500/10 text-emerald-200 border-emerald-500/20' : 'bg-slate-800/50 text-slate-300 border-slate-700')}>
+                                        {screenShareEnabled ? 'Sharing' : 'Off'}
+                                    </div>
+                                </div>
+                                {lastScreenThumb ? (
+                                    <img src={lastScreenThumb} alt="Screen snapshot" className="mt-2 h-20 w-full object-cover rounded border border-slate-700" />
+                                ) : (
+                                    <div className="mt-2 h-20 w-full rounded border border-slate-700 bg-slate-800/40 flex items-center justify-center text-[10px] text-slate-400">
+                                        No preview yet
+                                    </div>
+                                )}
+                                <div className="mt-2 flex gap-2">
+                                    {!screenShareEnabled ? (
+                                        <Button size="sm" className="flex-1" onClick={startScreenShare} isLoading={screenShareBusy}>
+                                            Share
+                                        </Button>
+                                    ) : (
+                                        <Button size="sm" variant="outline" className="flex-1" onClick={stopScreenShare}>
+                                            Stop
+                                        </Button>
+                                    )}
+                                </div>
+                                <div className="mt-2 text-[10px] text-slate-500">
+                                    Tip: choose “Entire Screen” for best evidence quality.
+                                </div>
+                            </div>
+                        </div>
+                    )}
                     <video ref={videoRef} autoPlay playsInline muted className="absolute top-4 right-4 w-48 h-36 rounded-md object-cover border-2 border-slate-700"></video>
+                    {secureModeEnabled && (
+                        <div className="absolute top-4 right-56 z-10 rounded-lg border border-slate-700 bg-slate-900/70 backdrop-blur px-3 py-2 text-xs text-slate-200">
+                            <div className="flex items-center gap-2">
+                                <span className={cn('h-2 w-2 rounded-full', proctorStats.cameraOk ? 'bg-green-400' : 'bg-red-400')} />
+                                <span className="font-semibold">Proctor</span>
+                                {proctorStats.paused && <span className="text-yellow-300">Paused</span>}
+                                {proctorStats.backoff && <span className="text-yellow-300">Backoff</span>}
+                            </div>
+                            <div className="mt-1 text-slate-300">
+                                Frames: {proctorStats.framesSent} · Errors: {proctorStats.uploadErrors}
+                            </div>
+                            <div className="mt-0.5 text-slate-400">
+                                Last upload: {proctorStats.lastUploadMs}ms · Q: {Math.round(encodeQualityRef.current * 100)} · W: {encodeWidthRef.current}px
+                            </div>
+                        </div>
+                    )}
                     <div className="max-w-4xl mx-auto">
                         {exam.questions[currentQuestion] ? (
                             <QuestionRenderer 
@@ -2552,7 +3851,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
             </main>
             
             {/* Submit Confirmation Dialog */}
-            <Dialog open={showSubmitConfirm} onOpenChange={setShowSubmitConfirm}>
+            <Dialog open={showSubmitConfirm} onOpenChange={handleSubmitDialogChange}>
                 <div className="text-center p-6">
                     <AlertTriangle className="h-16 w-16 text-yellow-400 mx-auto mb-4" />
                     <h2 className="text-2xl font-bold text-white mb-2">Submit Exam?</h2>
@@ -2569,17 +3868,41 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                             <span className="text-white font-semibold">{formatTime(timeLeft)}</span>
                         </div>
                     </div>
-                    {Object.keys(answers).length < exam.questions.length && (
+                    {Object.keys(answers).length < exam.questions.length && submitStatus !== 'sending' && (
                         <div className="bg-yellow-500/20 text-yellow-300 p-3 rounded-lg mb-4 text-sm">
                             ⚠️ You have unanswered questions. They will be marked as incorrect.
                         </div>
                     )}
+
+                    {submitStatus === 'sending' && (
+                        <div className="bg-blue-500/10 text-blue-300 p-3 rounded-lg mb-4 text-sm flex items-center justify-center space-x-2">
+                            <span className="animate-pulse">Submitting your exam... Please wait.</span>
+                        </div>
+                    )}
+
+                    {submitStatus === 'error' && submitError && (
+                        <div className="bg-red-500/10 text-red-300 p-3 rounded-lg mb-4 text-sm">
+                            <p className="font-semibold mb-1">Submission failed</p>
+                            <p>{submitError}</p>
+                        </div>
+                    )}
+
                     <div className="flex space-x-3">
-                        <Button variant="outline" className="flex-1" onClick={handleCancelSubmit} disabled={isSubmitting}>
-                            Cancel
+                        <Button
+                            variant="outline"
+                            className="flex-1"
+                            onClick={submitStatus === 'error' ? handleReturnAfterError : handleCancelSubmit}
+                            disabled={submitStatus === 'sending'}
+                        >
+                            {submitStatus === 'error' ? 'Return to Exam' : 'Cancel'}
                         </Button>
-                        <Button variant="destructive" className="flex-1" onClick={() => { setShowSubmitConfirm(false); handleSubmit(); }} disabled={isSubmitting}>
-                            {isSubmitting ? 'Submitting...' : 'Submit Now'}
+                        <Button
+                            variant="destructive"
+                            className="flex-1"
+                            onClick={handleSubmit}
+                            disabled={submitStatus === 'sending'}
+                        >
+                            {submitStatus === 'sending' ? 'Submitting...' : submitStatus === 'error' ? 'Try Again' : 'Submit Now'}
                         </Button>
                     </div>
                 </div>
@@ -2587,39 +3910,159 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
         </motion.div>
     );
 };
-const ResultScreen = ({ result, onDone }: { result: ExamResult, onDone: () => void }) => (
-    <motion.div
-        className="min-h-screen flex flex-col items-center justify-center p-4"
-        initial={{ opacity: 0, scale: 0.9 }}
-        animate={{ opacity: 1, scale: 1 }}
-    >
-        <Card className="p-8 text-center max-w-md w-full">
-            <CheckCircle className="h-16 w-16 text-green-400 mx-auto mb-4" />
-            <h2 className="text-2xl font-bold text-white mb-2">Exam Submitted!</h2>
-            <p className="text-slate-400 mb-6">You have successfully completed the exam: <span className="font-semibold text-slate-200">{result.examTitle}</span>.</p>
-            <div className="bg-slate-800/50 rounded-lg p-6 my-6">
-                <p className="text-slate-400 text-sm">YOUR SCORE</p>
-                <p className="text-6xl font-bold text-green-400 my-2">{result.score}%</p>
-            </div>
-            {result.perQuestion && result.perQuestion.length > 0 && (
-                <div className="mb-4 bg-slate-900 p-4 rounded">
-                    <h3 className="text-lg font-semibold text-white mb-2">Question Breakdown</h3>
-                    <div className="space-y-2 max-h-64 overflow-y-auto">
-                        {result.perQuestion.map((q, idx) => (
-                            <div key={idx} className={cn('p-2 rounded', q.correct ? 'bg-green-800/30' : 'bg-red-800/20')}>
-                                <div className="font-medium text-sm text-white">{idx + 1}. {q.question}</div>
-                                <div className="text-xs text-slate-300">Your answer: {String(q.given)}</div>
-                                <div className="text-xs text-slate-300">Correct answer: {String(q.expected)}</div>
-                                <div className="text-xs text-slate-300">Marks: {q.marks} — {q.correct ? 'Correct' : 'Incorrect'}</div>
-                            </div>
-                        ))}
+const ResultScreen = ({ result, onDone }: { result: ExamResult, onDone: () => void }) => {
+    const totalQuestions = result.perQuestion?.length ?? 0;
+    const correctCount = (result.perQuestion ?? []).filter(q => q.correct).length;
+    const wrongCount = Math.max(0, totalQuestions - correctCount);
+
+    const score = Number.isFinite(Number(result.score)) ? Number(result.score) : 0;
+    const scoreTone = score >= 85 ? 'emerald' : score >= 60 ? 'sky' : 'amber';
+    const scoreRing = scoreTone === 'emerald'
+        ? 'from-emerald-400/30 via-emerald-400/10 to-transparent'
+        : scoreTone === 'sky'
+            ? 'from-sky-400/30 via-sky-400/10 to-transparent'
+            : 'from-amber-400/30 via-amber-400/10 to-transparent';
+    const scoreText = scoreTone === 'emerald' ? 'text-emerald-300' : scoreTone === 'sky' ? 'text-sky-300' : 'text-amber-300';
+
+    return (
+        <motion.div
+            className="min-h-screen w-full bg-gradient-to-b from-slate-950 via-slate-950 to-slate-900"
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+        >
+            {/* Top bar */}
+            <div className="sticky top-0 z-10 border-b border-slate-800/70 bg-slate-950/80 backdrop-blur">
+                <div className="mx-auto max-w-7xl px-4 py-4 flex items-center justify-between gap-4">
+                    <div className="flex items-center gap-3 min-w-0">
+                        <div className="h-10 w-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center">
+                            <CheckCircle className="h-6 w-6 text-emerald-300" />
+                        </div>
+                        <div className="min-w-0">
+                            <div className="text-slate-200 font-semibold truncate">Exam submitted</div>
+                            <div className="text-slate-400 text-sm truncate">{result.examTitle}</div>
+                        </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <Button onClick={onDone} className="px-4">Back to Dashboard</Button>
                     </div>
                 </div>
-            )}
-            <Button onClick={onDone} className="w-full">Back to Dashboard</Button>
-        </Card>
-    </motion.div>
-);
+            </div>
+
+            {/* Content */}
+            <div className="mx-auto max-w-7xl px-4 py-8">
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                    {/* Hero score */}
+                    <Card className="lg:col-span-5 p-6 sm:p-8 relative overflow-hidden">
+                        <div className={cn('pointer-events-none absolute inset-0 bg-gradient-to-br', scoreRing)} />
+                        <div className="relative">
+                            <div className="flex items-start justify-between gap-4">
+                                <div>
+                                    <div className="text-slate-200 text-xl font-bold">Your result</div>
+                                    <div className="text-slate-400 text-sm mt-1">You’ve completed the exam successfully.</div>
+                                </div>
+                                <div className={cn('px-3 py-1 rounded-full text-xs font-semibold border',
+                                    scoreTone === 'emerald'
+                                        ? 'bg-emerald-500/10 text-emerald-200 border-emerald-500/20'
+                                        : scoreTone === 'sky'
+                                            ? 'bg-sky-500/10 text-sky-200 border-sky-500/20'
+                                            : 'bg-amber-500/10 text-amber-200 border-amber-500/20'
+                                )}>
+                                    Final Score
+                                </div>
+                            </div>
+
+                            <div className="mt-8 flex items-end gap-4">
+                                <div className={cn('text-7xl sm:text-8xl font-extrabold leading-none tracking-tight', scoreText)}>
+                                    {Math.round(score)}
+                                </div>
+                                <div className="pb-2 text-slate-300 font-semibold text-xl">%</div>
+                            </div>
+
+                            <div className="mt-6 grid grid-cols-3 gap-3">
+                                <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+                                    <div className="text-slate-400 text-xs">Questions</div>
+                                    <div className="text-slate-100 font-bold text-lg mt-1">{totalQuestions}</div>
+                                </div>
+                                <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+                                    <div className="text-slate-400 text-xs">Correct</div>
+                                    <div className="text-emerald-200 font-bold text-lg mt-1">{correctCount}</div>
+                                </div>
+                                <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+                                    <div className="text-slate-400 text-xs">Incorrect</div>
+                                    <div className="text-rose-200 font-bold text-lg mt-1">{wrongCount}</div>
+                                </div>
+                            </div>
+
+                            <div className="mt-6 text-sm text-slate-400">
+                                Tip: You can review your answers below. If you were paused/terminated by a proctor, the event timeline remains available in the proctoring logs.
+                            </div>
+                        </div>
+                    </Card>
+
+                    {/* Breakdown */}
+                    <Card className="lg:col-span-7 p-6 sm:p-8">
+                        <div className="flex items-center justify-between gap-4">
+                            <div>
+                                <div className="text-slate-200 text-lg font-bold">Question breakdown</div>
+                                <div className="text-slate-400 text-sm mt-1">Detailed per-question evaluation.</div>
+                            </div>
+                            <div className="text-slate-400 text-xs">
+                                {totalQuestions > 0 ? `${correctCount}/${totalQuestions} correct` : 'No questions found'}
+                            </div>
+                        </div>
+
+                        {result.perQuestion && result.perQuestion.length > 0 ? (
+                            <div className="mt-5 rounded-xl border border-slate-800 overflow-hidden">
+                                <div className="max-h-[60vh] overflow-y-auto">
+                                    {result.perQuestion.map((q, idx) => (
+                                        <div
+                                            key={idx}
+                                            className={cn(
+                                                'px-4 sm:px-5 py-4 border-b border-slate-800 last:border-b-0',
+                                                q.correct ? 'bg-emerald-500/5' : 'bg-rose-500/5'
+                                            )}
+                                        >
+                                            <div className="flex items-start justify-between gap-4">
+                                                <div className="min-w-0">
+                                                    <div className="font-semibold text-slate-100 text-sm">
+                                                        {idx + 1}. {q.question}
+                                                    </div>
+                                                    <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                                                        <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-2">
+                                                            <div className="text-slate-400">Your answer</div>
+                                                            <div className="text-slate-200 mt-0.5 break-words">{String(q.given)}</div>
+                                                        </div>
+                                                        <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-2">
+                                                            <div className="text-slate-400">Correct answer</div>
+                                                            <div className="text-slate-200 mt-0.5 break-words">{String(q.expected)}</div>
+                                                        </div>
+                                                    </div>
+                                                    <div className="mt-2 text-xs text-slate-400">Marks: {q.marks}</div>
+                                                </div>
+                                                <div className={cn(
+                                                    'shrink-0 px-3 py-1 rounded-full text-xs font-semibold border',
+                                                    q.correct
+                                                        ? 'bg-emerald-500/10 text-emerald-200 border-emerald-500/20'
+                                                        : 'bg-rose-500/10 text-rose-200 border-rose-500/20'
+                                                )}>
+                                                    {q.correct ? 'Correct' : 'Incorrect'}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="mt-6 rounded-xl border border-slate-800 bg-slate-900/30 p-6 text-slate-400">
+                                No per-question breakdown was provided for this exam.
+                            </div>
+                        )}
+                    </Card>
+                </div>
+            </div>
+        </motion.div>
+    );
+};
 const SystemCheckDialog = ({ open, onOpenChange }: { open: boolean, onOpenChange: (open: boolean) => void }) => {
     const checks = [
         { name: 'Camera', icon: <Video className="h-8 w-8 text-green-400"/>, status: 'Working' },
@@ -2988,156 +4431,445 @@ const AIGenerateQuestionsDialog = ({ open, onOpenChange, onAddQuestions, showToa
 };
 
 // --- Live Proctoring Page ---
-const LiveProctoring = ({ user, onBack, showToast }: { user: UserProfile; onBack: () => void; showToast: (msg:string, type:'success'|'error') => void }) => {
+const LiveProctoring = ({ user, onBack }: { user: UserProfile; onBack: () => void }) => {
+    // Student view (keep the existing simple recent list)
     const [events, setEvents] = React.useState<any[]>([]);
+
+    // Lecturer view (new grid + alert queue)
+    const [examId, setExamId] = React.useState<string>('');
+    const [summary, setSummary] = React.useState<{ userId: string; name: string; count: number; lastEvent: any; countsByType?: any }[]>([]);
+    const [latestByUser, setLatestByUser] = React.useState<Record<string, any>>({});
+    const [decisionByUser, setDecisionByUser] = React.useState<Record<string, { status: 'active'|'paused'|'terminated'; reason?: string }>>({});
+    const [page, setPage] = React.useState(0);
+    const pageSize = 15; // 5 columns x 3 rows
+
+    // alert queue: holds unresolved high/critical events without collisions
+    const [alertQueue, setAlertQueue] = React.useState<any[]>([]);
+    const [activeAlert, setActiveAlert] = React.useState<any | null>(null);
+    const alertSeenRef = React.useRef<Record<string, number>>({});
+
+    const socketRef = React.useRef<Socket | null>(null);
     const pollRef = React.useRef<number | null>(null);
-
-    React.useEffect(() => {
-        // For students: fetch their own recent proctor events
-        // For lecturers: fetch global recent events
-        const fetchEvents = async () => {
-            try {
-                const endpoint = user.role === 'lecturer' 
-                    ? `${API_URL}/proctoring/recent-global?limit=50` 
-                    : `${API_URL}/proctoring/recent?userId=${user._id}&limit=50`;
-                const res = await fetch(endpoint, { headers: { 'X-User-Id': user._id } });
-                const data = await res.json();
-                if (res.ok && data.events) {
-                    setEvents(data.events);
-                }
-            } catch (err) {
-                console.error('Failed to fetch events', err);
-            }
-        };
-
-        fetchEvents();
-        pollRef.current = window.setInterval(fetchEvents, 2000);
-
-        return () => {
-            if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; }
-        };
-    }, [user]);
 
     const getSeverityColor = (severity: string) => {
         switch (severity) {
-            case 'high': return 'text-red-400 bg-red-500/10 border-red-500/50';
-            case 'medium': return 'text-orange-400 bg-orange-500/10 border-orange-500/50';
-            case 'warning': return 'text-yellow-400 bg-yellow-500/10 border-yellow-500/50';
-            default: return 'text-blue-400 bg-blue-500/10 border-blue-500/50';
+            case 'critical':
+            case 'high': return 'text-red-300 bg-red-500/10 border-red-500/40';
+            case 'medium': return 'text-orange-300 bg-orange-500/10 border-orange-500/40';
+            case 'warning': return 'text-yellow-300 bg-yellow-500/10 border-yellow-500/40';
+            default: return 'text-blue-300 bg-blue-500/10 border-blue-500/40';
         }
     };
 
+    const normalizeEventKey = (ev: any) => {
+        const ts = ev?.timestamp || ev?.time || '';
+        const u = ev?.userId || ev?.user || 'unknown';
+        const ex = ev?.examId || 'unknown';
+        const type = ev?.eventType || ev?.violationType || 'event';
+        // If two events arrive same ms, this still collides; but we also keep a TTL that still results in safe dedupe behavior.
+        return `${ex}:${u}:${type}:${ts}`;
+    };
+
+    const enqueueAlert = React.useCallback((ev: any) => {
+        const sev = String(ev?.severity || ev?.details?.severity || 'info').toLowerCase();
+        if (!(sev === 'high' || sev === 'critical')) return;
+
+        const k = normalizeEventKey(ev);
+        const now = Date.now();
+        const last = alertSeenRef.current[k] || 0;
+        if (now - last < 10_000) return; // dedupe window
+        alertSeenRef.current[k] = now;
+
+        setAlertQueue((q) => {
+            // Prevent endless growth: cap at 100
+            const next = [ev, ...q];
+            return next.slice(0, 100);
+        });
+    }, []);
+
+    // Show next alert if none currently active
+    React.useEffect(() => {
+        if (activeAlert) return;
+        if (alertQueue.length === 0) return;
+        setActiveAlert(alertQueue[0]);
+        setAlertQueue(q => q.slice(1));
+    }, [activeAlert, alertQueue]);
+
+    const refreshSummary = React.useCallback(async () => {
+        if (!examId) return;
+        try {
+            const res = await fetch(`${API_URL}/exams/${examId}/proctoring`, { headers: { 'X-User-Id': user._id } });
+            const data = await res.json();
+            if (!res.ok) return;
+            const s = Array.isArray(data?.summary) ? data.summary : [];
+            setSummary(s);
+            setLatestByUser(prev => {
+                const next = { ...prev };
+                for (const row of s) {
+                    if (row?.userId && row?.lastEvent) next[row.userId] = row.lastEvent;
+                }
+                return next;
+            });
+        } catch {}
+    }, [examId, user._id]);
+
+    const refreshDecisions = React.useCallback(async (userIds: string[]) => {
+        if (!examId) return;
+        try {
+            const results = await Promise.all(userIds.map(async (uid) => {
+                try {
+                    const r = await fetch(`${API_URL}/exams/${examId}/students/${uid}/proctor-status`, { headers: { 'X-User-Id': user._id } });
+                    const j = await r.json();
+                    if (!r.ok) return null;
+                    return { uid, status: j?.status?.status as any, reason: j?.status?.reason as any };
+                } catch {
+                    return null;
+                }
+            }));
+            setDecisionByUser(prev => {
+                const next = { ...prev };
+                for (const it of results) {
+                    if (!it?.uid || !it?.status) continue;
+                    next[it.uid] = { status: it.status, reason: it.reason };
+                }
+                return next;
+            });
+        } catch {}
+    }, [examId, user._id]);
+
+    // Student polling (unchanged behavior)
+    React.useEffect(() => {
+        if (user.role !== 'student') return;
+        let timer: number | null = null;
+        const fetchEvents = async () => {
+            try {
+                const endpoint = `${API_URL}/proctoring/recent?userId=${user._id}&limit=50`;
+                const res = await fetch(endpoint, { headers: { 'X-User-Id': user._id } });
+                const data = await res.json();
+                if (res.ok && data.events) setEvents(data.events);
+            } catch {}
+        };
+        fetchEvents();
+        timer = window.setInterval(fetchEvents, 2000);
+        return () => { if (timer) window.clearInterval(timer); };
+    }, [user]);
+
+    // Lecturer: poll summary + connect socket
+    React.useEffect(() => {
+        if (user.role !== 'lecturer') return;
+        if (!examId) return;
+
+        refreshSummary();
+        if (pollRef.current) window.clearInterval(pollRef.current);
+        pollRef.current = window.setInterval(() => {
+            refreshSummary();
+        }, 2500);
+
+        // SocketIO connect for instant alerts
+        try {
+            if (socketRef.current) {
+                socketRef.current.disconnect();
+                socketRef.current = null;
+            }
+            const s = io('http://127.0.0.1:5000/proctor', {
+                transports: ['websocket'],
+            });
+            socketRef.current = s;
+
+            s.on('connect', () => {
+                s.emit('join_exam', { examId });
+            });
+            s.on('violation_detected', (payload: any) => {
+                // Shape it like a normal proctor event for display
+                const ev = {
+                    _id: payload?.id,
+                    examId: payload?.examId,
+                    userId: payload?.userId,
+                    eventType: payload?.violationType,
+                    severity: payload?.severity,
+                    details: {
+                        score: payload?.score,
+                        message: payload?.message,
+                        snapshot: payload?.snapshot || payload?.details?.snapshot,
+                        screen: payload?.screen || payload?.details?.screen,
+                    },
+                    timestamp: payload?.timestamp,
+                };
+                setLatestByUser(prev => ({ ...prev, [String(ev.userId || 'unknown')]: ev }));
+                enqueueAlert(ev);
+            });
+            s.on('proctor_decision', (payload: any) => {
+                const uid = String(payload?.userId || '');
+                if (!uid) return;
+                setDecisionByUser(prev => ({ ...prev, [uid]: { status: payload?.status, reason: payload?.reason } }));
+            });
+        } catch {
+            // keep polling-only fallback
+        }
+
+        return () => {
+            if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; }
+            if (socketRef.current) {
+                socketRef.current.disconnect();
+                socketRef.current = null;
+            }
+        };
+    }, [enqueueAlert, examId, refreshSummary, user._id, user.role]);
+
+    React.useEffect(() => {
+        if (user.role !== 'lecturer') return;
+        const ids = summary.map(s => s.userId).filter(Boolean);
+        if (ids.length === 0) return;
+        refreshDecisions(ids.slice(0, 50));
+    }, [refreshDecisions, summary, user.role]);
+
     return (
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="min-h-screen p-8">
-            <div className="flex items-center justify-between mb-6">
-                <h2 className="text-2xl font-bold">Live Proctoring Monitor</h2>
-                <Button variant="outline" onClick={onBack}>Back to Dashboard</Button>
+        <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="min-h-screen w-full bg-gradient-to-b from-slate-950 via-slate-950 to-slate-900"
+        >
+            <div className="sticky top-0 z-10 border-b border-slate-800/70 bg-slate-950/80 backdrop-blur">
+                <div className="mx-auto max-w-7xl px-4 py-4 flex items-center justify-between gap-4">
+                    <div className="min-w-0">
+                        <h2 className="text-xl sm:text-2xl font-bold text-slate-100 truncate">Live Proctoring Monitor</h2>
+                        <p className="text-xs sm:text-sm text-slate-400 truncate">Real-time alerts + invigilator decisions (pause / allow / stop).</p>
+                    </div>
+                    <Button variant="outline" onClick={onBack}>Back to Dashboard</Button>
+                </div>
             </div>
 
-            <div className="grid grid-cols-1 gap-6">
-                <Card className="p-6 bg-slate-900 border-slate-800">
-                    <div className="flex items-center justify-between mb-4">
-                        <h3 className="text-xl font-semibold text-white">Recent Proctoring Events</h3>
-                        <div className="flex items-center space-x-2">
-                            <div className="h-2 w-2 rounded-full bg-green-500 animate-pulse"></div>
-                            <span className="text-sm text-slate-400">Live Updates</span>
+            <div className="mx-auto max-w-7xl px-4 py-6">
+
+            {user.role === 'student' ? (
+                <div className="grid grid-cols-1 gap-6">
+                    <Card className="p-6 bg-slate-900 border-slate-800">
+                        <div className="flex items-center justify-between mb-4">
+                            <h3 className="text-xl font-semibold text-white">Recent Proctoring Events</h3>
+                            <div className="flex items-center space-x-2">
+                                <div className="h-2 w-2 rounded-full bg-green-500 animate-pulse"></div>
+                                <span className="text-sm text-slate-400">Live Updates</span>
+                            </div>
                         </div>
-                    </div>
-                    <div className="text-sm text-slate-400 mb-4">
-                        {user.role === 'student' ? 'Your recent proctoring activity' : 'All recent proctoring events across exams'}
-                    </div>
-                    
-                    <div className="space-y-3 max-h-[600px] overflow-y-auto">
-                        {events.length > 0 ? events.map((evt, idx) => (
-                            <div key={evt._id || idx} className={cn('p-4 rounded-lg border', getSeverityColor(evt.severity || 'info'))}>
-                                <div className="flex items-start justify-between">
-                                    <div className="flex-1">
-                                        <div className="flex items-center space-x-2 mb-1">
-                                            <span className="font-semibold text-white capitalize">
-                                                {(evt.eventType || 'event').replace(/_/g, ' ')}
-                                            </span>
-                                            <Badge variant={evt.severity === 'high' ? 'danger' : evt.severity === 'medium' ? 'warning' : 'info'}>
-                                                {evt.severity || 'info'}
-                                            </Badge>
+                        <div className="space-y-3 max-h-[600px] overflow-y-auto">
+                            {events.length > 0 ? events.map((evt, idx) => (
+                                <div key={evt._id || idx} className={cn('p-4 rounded-lg border', getSeverityColor(evt.severity || 'info'))}>
+                                    <div className="flex items-start justify-between">
+                                        <div className="flex-1">
+                                            <div className="flex items-center space-x-2 mb-1">
+                                                <span className="font-semibold text-white capitalize">
+                                                    {(evt.eventType || 'event').replace(/_/g, ' ')}
+                                                </span>
+                                                <Badge variant={evt.severity === 'high' ? 'danger' : evt.severity === 'medium' ? 'warning' : 'info'}>
+                                                    {evt.severity || 'info'}
+                                                </Badge>
+                                            </div>
+                                            <p className="text-xs text-slate-500">{new Date(evt.timestamp).toLocaleString()}</p>
                                         </div>
-                                        <p className="text-xs text-slate-400 mb-1">
-                                            {user.role === 'lecturer' && `Student: ${evt.userId || 'Unknown'} | `}
-                                            Exam: {evt.examId || 'Unknown'}
-                                        </p>
-                                        <p className="text-xs text-slate-500">
-                                            {new Date(evt.timestamp).toLocaleString()}
-                                        </p>
-                                        {evt.details && Object.keys(evt.details).length > 0 && (
-                                            <div className="mt-2 text-xs text-slate-400">
-                                                {Object.entries(evt.details).map(([key, val]) => (
-                                                    <div key={key}>
-                                                        <span className="font-medium">{key}:</span> {String(val)}
-                                                    </div>
-                                                ))}
+                                        {evt.details?.snapshot && (
+                                            <img src={evt.details.snapshot} alt="Snapshot" className="h-16 w-20 object-cover rounded ml-3" />
+                                        )}
+                                    </div>
+                                </div>
+                            )) : (
+                                <div className="text-center py-12 text-slate-400">
+                                    <AlertTriangle className="h-12 w-12 mx-auto mb-3 text-slate-600" />
+                                    <p>No recent proctoring events</p>
+                                </div>
+                            )}
+                        </div>
+                    </Card>
+                </div>
+            ) : (
+                <div className="space-y-6">
+                    <Card className="p-5 bg-slate-900 border-slate-800">
+                        <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+                            <div className="flex-1">
+                                <h3 className="text-lg font-semibold text-white">Select exam to monitor</h3>
+                                <p className="text-sm text-slate-400">Enter an exam ID, then you’ll see a live 5×3 grid and an action queue for high-severity alerts.</p>
+                            </div>
+                            <div className="flex gap-2">
+                                <Input value={examId} onChange={(e: any) => setExamId(e.target.value)} placeholder="Exam ID" className="w-80" />
+                                <Button onClick={() => { setPage(0); refreshSummary(); }}>Load</Button>
+                            </div>
+                        </div>
+                    </Card>
+
+                    {/* Action-required alert modal (one at a time, no collisions) */}
+                    <Dialog open={!!activeAlert} onOpenChange={(open) => { if (!open) setActiveAlert(null); }}>
+                        <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                            <AlertTriangle className="h-5 w-5 text-red-400" />
+                            Action required
+                        </h2>
+                        {activeAlert && (
+                            <div className="mt-3 space-y-3">
+                                <div className={cn('rounded-lg border p-3', getSeverityColor(String(activeAlert.severity || 'high')))}>
+                                    <div className="text-sm text-slate-200 font-semibold">
+                                        {(activeAlert.eventType || 'violation').replace(/_/g, ' ')}
+                                    </div>
+                                    <div className="mt-1 text-xs text-slate-300">Student: {activeAlert.userId} • Exam: {activeAlert.examId}</div>
+                                    <div className="mt-2 text-sm text-slate-200">{activeAlert?.details?.message || activeAlert?.message || 'High severity event detected.'}</div>
+                                </div>
+
+                                {(activeAlert?.details?.snapshot || activeAlert?.details?.screen) && (
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                        {activeAlert?.details?.snapshot && (
+                                            <div>
+                                                <div className="text-[11px] text-slate-400 mb-1">Camera</div>
+                                                <img src={activeAlert.details.snapshot} alt="Camera evidence" className="w-full max-h-64 object-cover rounded border border-slate-700" />
+                                            </div>
+                                        )}
+                                        {activeAlert?.details?.screen && (
+                                            <div>
+                                                <div className="text-[11px] text-slate-400 mb-1">Screen</div>
+                                                <img src={activeAlert.details.screen} alt="Screen evidence" className="w-full max-h-64 object-cover rounded border border-slate-700" />
                                             </div>
                                         )}
                                     </div>
-                                    {evt.details?.snapshot && (
-                                        <img src={evt.details.snapshot} alt="Snapshot" className="h-16 w-20 object-cover rounded ml-3" />
-                                    )}
+                                )}
+
+                                <div className="flex flex-col md:flex-row gap-2 md:justify-end">
+                                    <Button variant="outline" onClick={async () => {
+                                        // keep paused
+                                        try {
+                                            await fetch(`${API_URL}/exams/${activeAlert.examId}/students/${activeAlert.userId}/proctor-status`, {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json', 'X-User-Id': user._id },
+                                                body: JSON.stringify({ status: 'paused', reason: 'Paused for review by invigilator.' })
+                                            });
+                                        } catch {}
+                                        setActiveAlert(null);
+                                    }}>Keep paused</Button>
+                                    <Button onClick={async () => {
+                                        try {
+                                            await fetch(`${API_URL}/exams/${activeAlert.examId}/students/${activeAlert.userId}/proctor-status`, {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json', 'X-User-Id': user._id },
+                                                body: JSON.stringify({ status: 'active', reason: 'Allowed to continue.' })
+                                            });
+                                        } catch {}
+                                        setActiveAlert(null);
+                                    }}>Allow continue</Button>
+                                    <Button variant="destructive" onClick={async () => {
+                                        try {
+                                            await fetch(`${API_URL}/exams/${activeAlert.examId}/students/${activeAlert.userId}/proctor-status`, {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json', 'X-User-Id': user._id },
+                                                body: JSON.stringify({ status: 'terminated', reason: 'Terminated by invigilator due to high severity violation.' })
+                                            });
+                                        } catch {}
+                                        setActiveAlert(null);
+                                    }}>Terminate exam</Button>
                                 </div>
                             </div>
-                        )) : (
-                            <div className="text-center py-12 text-slate-400">
-                                <AlertTriangle className="h-12 w-12 mx-auto mb-3 text-slate-600" />
-                                <p>No recent proctoring events</p>
-                                <p className="text-xs text-slate-500 mt-1">Events will appear here when exams are in progress</p>
-                            </div>
                         )}
-                    </div>
-                </Card>
+                    </Dialog>
 
-                {user.role === 'lecturer' && (
                     <Card className="p-6 bg-slate-900 border-slate-800">
-                        <h3 className="text-lg font-semibold text-white mb-2">Monitoring Information</h3>
-                        <p className="text-sm text-slate-400">
-                            This dashboard displays real-time proctoring events from all active exams. Events are color-coded by severity:
-                        </p>
-                        <ul className="mt-3 space-y-2 text-sm">
-                            <li className="flex items-center space-x-2">
-                                <div className="h-3 w-3 rounded-full bg-red-500"></div>
-                                <span className="text-slate-300">High Severity - Immediate attention required</span>
-                            </li>
-                            <li className="flex items-center space-x-2">
-                                <div className="h-3 w-3 rounded-full bg-orange-500"></div>
-                                <span className="text-slate-300">Medium Severity - Review recommended</span>
-                            </li>
-                            <li className="flex items-center space-x-2">
-                                <div className="h-3 w-3 rounded-full bg-yellow-500"></div>
-                                <span className="text-slate-300">Warning - Minor issues detected</span>
-                            </li>
-                            <li className="flex items-center space-x-2">
-                                <div className="h-3 w-3 rounded-full bg-blue-500"></div>
-                                <span className="text-slate-300">Info - Normal activity</span>
-                            </li>
-                        </ul>
-                    </Card>
-                )}
+                        <div className="flex items-center justify-between mb-4">
+                            <div>
+                                <h3 className="text-xl font-semibold text-white">Live proctoring grid</h3>
+                                <p className="text-sm text-slate-400">Showing {pageSize} students per page (5 columns × 3 rows).</p>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <Button variant="outline" onClick={() => setPage(p => Math.max(0, p - 1))}>Prev</Button>
+                                <Button variant="outline" onClick={() => setPage(p => p + 1)}>Next</Button>
+                            </div>
+                        </div>
 
-                {user.role === 'student' && (
-                    <Card className="p-6 bg-slate-900 border-slate-800">
-                        <h3 className="text-lg font-semibold text-white mb-2">About Proctoring</h3>
-                        <p className="text-sm text-slate-400">
-                            During exams, the system monitors various behaviors to ensure academic integrity. Events shown here include:
-                        </p>
-                        <ul className="mt-3 space-y-1 text-sm text-slate-400">
-                            <li>• Face detection and verification</li>
-                            <li>• Head pose and gaze direction</li>
-                            <li>• Multiple faces detected</li>
-                            <li>• Audio anomalies and talking</li>
-                            <li>• Tab switching and window focus</li>
-                            <li>• Environmental changes</li>
-                        </ul>
-                        <p className="mt-3 text-xs text-slate-500">
-                            All events are recorded and reviewed by your instructor. Ensure you follow exam guidelines to avoid issues.
-                        </p>
+                        <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
+                            {summary.slice(page * pageSize, page * pageSize + pageSize).map((s) => {
+                                const ev = latestByUser[s.userId] || s.lastEvent;
+                                const sev = String(ev?.severity || 'info');
+                                const decision = decisionByUser[s.userId]?.status || 'active';
+                                const decisionBadge = decision === 'paused' ? 'warning' : decision === 'terminated' ? 'danger' : 'info';
+                                return (
+                                    <div key={s.userId} className="rounded-xl border border-slate-800 bg-slate-950/30 overflow-hidden">
+                                        <div className="p-3 border-b border-slate-800 flex items-center justify-between">
+                                            <div className="min-w-0">
+                                                <div className="text-sm font-semibold text-white truncate">{s.name || s.userId}</div>
+                                                <div className="text-[11px] text-slate-400 truncate">{s.userId}</div>
+                                            </div>
+                                            <div className="flex flex-col items-end gap-1">
+                                                <Badge variant={decisionBadge as any}>{decision}</Badge>
+                                                <Badge variant={sev === 'high' ? 'danger' : sev === 'medium' ? 'warning' : 'info'}>{sev}</Badge>
+                                            </div>
+                                        </div>
+
+                                        <div className="bg-slate-900">
+                                            <div className="aspect-video">
+                                                {ev?.details?.snapshot ? (
+                                                    <img src={ev.details.snapshot} alt="Student camera" className="h-full w-full object-cover" />
+                                                ) : (
+                                                    <div className="h-full w-full flex items-center justify-center text-slate-500 text-xs">Camera preview not available</div>
+                                                )}
+                                            </div>
+                                            <div className="p-2 border-t border-slate-800">
+                                                <div className="text-[10px] text-slate-400 mb-1">Screen</div>
+                                                {ev?.details?.screen ? (
+                                                    <img src={ev.details.screen} alt="Student screen" className="h-16 w-full object-cover rounded border border-slate-700" />
+                                                ) : (
+                                                    <div className="h-16 w-full rounded border border-slate-700 bg-slate-800/40 flex items-center justify-center text-[10px] text-slate-500">
+                                                        Screen preview not available
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+
+                                        <div className="p-3">
+                                            <div className={cn('rounded-lg border p-2', getSeverityColor(sev))}>
+                                                <div className="text-xs font-semibold text-white truncate">{(ev?.eventType || 'No events').replace(/_/g, ' ')}</div>
+                                                <div className="mt-1 text-[11px] text-slate-300 line-clamp-2">
+                                                    {ev?.details?.message || ev?.message || '—'}
+                                                </div>
+                                            </div>
+
+                                            <div className="mt-3 grid grid-cols-3 gap-2">
+                                                <Button variant="outline" size="sm" onClick={async () => {
+                                                    try {
+                                                        await fetch(`${API_URL}/exams/${examId}/students/${s.userId}/proctor-status`, {
+                                                            method: 'POST',
+                                                            headers: { 'Content-Type': 'application/json', 'X-User-Id': user._id },
+                                                            body: JSON.stringify({ status: 'paused', reason: 'Paused by invigilator.' })
+                                                        });
+                                                    } catch {}
+                                                }}>Pause</Button>
+                                                <Button size="sm" onClick={async () => {
+                                                    try {
+                                                        await fetch(`${API_URL}/exams/${examId}/students/${s.userId}/proctor-status`, {
+                                                            method: 'POST',
+                                                            headers: { 'Content-Type': 'application/json', 'X-User-Id': user._id },
+                                                            body: JSON.stringify({ status: 'active', reason: 'Allowed to continue.' })
+                                                        });
+                                                    } catch {}
+                                                }}>Allow</Button>
+                                                <Button variant="destructive" size="sm" onClick={async () => {
+                                                    try {
+                                                        await fetch(`${API_URL}/exams/${examId}/students/${s.userId}/proctor-status`, {
+                                                            method: 'POST',
+                                                            headers: { 'Content-Type': 'application/json', 'X-User-Id': user._id },
+                                                            body: JSON.stringify({ status: 'terminated', reason: 'Terminated by invigilator.' })
+                                                        });
+                                                    } catch {}
+                                                }}>Stop</Button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+
+                            {examId && summary.length === 0 && (
+                                <div className="md:col-span-5 text-center py-12 text-slate-400">
+                                    <Users className="h-10 w-10 mx-auto mb-3 text-slate-600" />
+                                    <p>No students/events yet.</p>
+                                    <p className="text-xs text-slate-500 mt-1">This grid populates when proctoring events start arriving for the exam.</p>
+                                </div>
+                            )}
+                        </div>
                     </Card>
-                )}
+                </div>
+            )}
             </div>
         </motion.div>
     );

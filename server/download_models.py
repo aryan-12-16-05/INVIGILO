@@ -73,37 +73,14 @@ def preload_all_models():
     """
     # --- Create Directories ---
     os.makedirs("shape_predictor_model", exist_ok=True)
-    os.makedirs("object_detection_model/weights", exist_ok=True)
-    os.makedirs("object_detection_model/config", exist_ok=True)
-    os.makedirs("object_detection_model/objectLabels", exist_ok=True)
 
     # --- Dlib Model ---
     dlib_success = download_dlib_model()
     if not dlib_success:
-        return # Stop if dlib model fails
+        print("\nDlib model failed to download. Please check the errors above.")
+        return
 
-    # --- YOLO Models ---
-    print("\nDownloading YOLOv3-tiny models...")
-    
-    # 1. Weights file
-    weights_url = "https://pjreddie.com/media/files/yolov3-tiny.weights"
-    weights_path = "object_detection_model/weights/yolov3-tiny.weights"
-    weights_success = download_file(weights_url, weights_path, "YOLOv3-tiny weights")
-    
-    # 2. Config file
-    cfg_url = "https://raw.githubusercontent.com/pjreddie/darknet/master/cfg/yolov3-tiny.cfg"
-    cfg_path = "object_detection_model/config/yolov3-tiny.cfg"
-    cfg_success = download_file(cfg_url, cfg_path, "YOLOv3-tiny config")
-
-    # 3. Coco Names file
-    names_url = "https://raw.githubusercontent.com/pjreddie/darknet/master/data/coco.names"
-    names_path = "object_detection_model/objectLabels/coco.names"
-    names_success = download_file(names_url, names_path, "COCO class names")
-
-    if dlib_success and weights_success and cfg_success and names_success:
-        print("\nAll models have been successfully downloaded and are ready.")
-    else:
-        print("\nSome models failed to download. Please check the errors above.")
+    print("\nAll models have been successfully downloaded and are ready.")
 
 if __name__ == "__main__":
     preload_all_models()

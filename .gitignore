@@ -1,0 +1,64 @@
+# =============================
+# Secrets / local config
+# =============================
+server/.env
+.env
+.env.*
+!.env.example
+
+# =============================
+# Python
+# =============================
+venv/
+.venv/
+ENV/
+env/
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# =============================
+# Node / Vite
+# =============================
+**/node_modules/
+client/dist/
+client/dist-ssr/
+**/*.local
+
+# =============================
+# Logs
+# =============================
+*.log
+
+# =============================
+# OS / editor
+# =============================
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/
+
+# =============================
+# Runtime uploads / generated evidence
+# =============================
+server/evidence/
+
+# =============================
+# Large ML model artifacts (keep configs, ignore weights)
+# =============================
+server/object_detection_model/weights/
+server/shape_predictor_model/*.dat
+**/*.weights
+**/*.onnx
+**/*.tflite
+**/*.pb
+**/*.pth
+**/*.pt
+**/*.bin
+
+# Vite timestamp artifacts that sometimes appear
+client/vite.config.ts.timestamp-*.mjs

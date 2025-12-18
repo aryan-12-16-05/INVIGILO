@@ -1,0 +1,13 @@
+# Optional heavy dependencies for full local proctoring / face recognition
+# Install these only if you need ML features on a machine with enough RAM/CPU.
+#
+# pip install -r requirements.txt -r requirements-ml.txt
+
+dlib
+face_recognition
+opencv-python
+scipy
+imutils
+pyaudio
+insightface
+onnxruntime
