@@ -163,9 +163,8 @@ CORS(app, resources={
 socketio = SocketIO(
     app,
     cors_allowed_origins=ALLOWED_ORIGINS,
-    # Let Flask-SocketIO auto-select the best async mode based on installed deps.
-    # On Render we start via gunicorn -k eventlet, so this will pick eventlet.
-    async_mode=None,
+    # Use gevent for async mode (compatible with modern Python + PyMongo on Render)
+    async_mode='gevent',
     logger=True,
     engineio_logger=False,
     ping_timeout=60,
