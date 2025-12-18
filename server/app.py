@@ -135,10 +135,25 @@ limiter = Limiter(
 _allowed_origins_env = os.getenv("INVIGILO_ALLOWED_ORIGINS", "*")
 ALLOWED_ORIGINS = "*" if _allowed_origins_env.strip() == "*" else [o.strip() for o in _allowed_origins_env.split(",") if o.strip()]
 
+# Allow CORS for API routes and a few legacy non-/api routes used by older clients.
+# Note: Prefer /api/* in new code.
 CORS(app, resources={
     r"/api/*": {
         "origins": ALLOWED_ORIGINS,
         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization", "X-User-Id"],
+        "max_age": 3600
+    },
+    # Legacy endpoints (kept for backwards-compat)
+    r"/register": {
+        "origins": ALLOWED_ORIGINS,
+        "methods": ["POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization", "X-User-Id"],
+        "max_age": 3600
+    },
+    r"/login": {
+        "origins": ALLOWED_ORIGINS,
+        "methods": ["POST", "OPTIONS"],
         "allow_headers": ["Content-Type", "Authorization", "X-User-Id"],
         "max_age": 3600
     }
@@ -148,7 +163,9 @@ CORS(app, resources={
 socketio = SocketIO(
     app,
     cors_allowed_origins=ALLOWED_ORIGINS,
-    async_mode='threading',
+    # Let Flask-SocketIO auto-select the best async mode based on installed deps.
+    # On Render we start via gunicorn -k eventlet, so this will pick eventlet.
+    async_mode=None,
     logger=True,
     engineio_logger=False,
     ping_timeout=60,
@@ -156,6 +173,16 @@ socketio = SocketIO(
 )
 
 APP_START = datetime.datetime.utcnow()
+
+
+@app.route('/', methods=['GET', 'HEAD'])
+def root_ok():
+    """Root endpoint for platform checks.
+
+    Render (and some upstream proxies) probe `/` with HEAD/GET. Our API lives under
+    `/api/*`, but returning 200 here avoids noisy 404 logs.
+    """
+    return "OK", 200
 
 
 @app.route('/api/health', methods=['GET'])
@@ -417,20 +444,40 @@ Note: This is a best-effort cache for live sessions; it resets on server restart
 
 # --- Database ---
 MONGO_URI = os.getenv("MONGO_URI")
-if not MONGO_URI:
-    raise Exception("MONGO_URI not found in .env file")
+client = None
+db = None
+users_collection = None
+exams_collection = None
+proctor_events_collection = None
+audit_logs_collection = None  # For admin action logging
 
-client = MongoClient(MONGO_URI)
-db = client['invigilo_db']
-users_collection = db['users']
-exams_collection = db['exams']
-proctor_events_collection = db['proctor_events']
-audit_logs_collection = db['audit_logs']  # For admin action logging
+if not MONGO_URI:
+    # In production (Render) MONGO_URI must be set. For local dev, allow the app
+    # to boot so non-DB endpoints (health, etc.) can still respond.
+    print('[DB] WARNING: MONGO_URI is not set. DB-backed endpoints will fail until it is provided.')
+else:
+    client = MongoClient(MONGO_URI)
+    db = client['invigilo_db']
+    users_collection = db['users']
+    exams_collection = db['exams']
+    proctor_events_collection = db['proctor_events']
+    audit_logs_collection = db['audit_logs']  # For admin action logging
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-settings_collection = db['settings']
+settings_collection = db['settings'] if db is not None else None
+
+# Helper to enforce DB availability inside endpoints.
+def require_db():
+    if db is None:
+        return False, (jsonify({
+            'error': 'db_not_configured',
+            'message': 'Database not configured. Set MONGO_URI.'
+        }), 500)
+    return True, None
 
 # Ensure important DB indexes for performance
 try:
+    if proctor_events_collection is None or exams_collection is None or users_collection is None:
+        raise RuntimeError('db_not_configured')
     proctor_events_collection.create_index([('examId', 1), ('timestamp', -1)])
     proctor_events_collection.create_index([('examId', 1), ('userId', 1), ('timestamp', -1)])
     exams_collection.create_index('completedBy')
