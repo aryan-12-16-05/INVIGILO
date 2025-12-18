@@ -163,7 +163,7 @@ CORS(app, resources={
 socketio = SocketIO(
     app,
     cors_allowed_origins=ALLOWED_ORIGINS,
-    # Use gevent for async mode (compatible with modern Python + PyMongo on Render)
+    # Use gevent for async mode (compatible with modern Python + PyMongo)
     async_mode='gevent',
     logger=True,
     engineio_logger=False,
