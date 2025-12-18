@@ -512,7 +512,12 @@ def decode_base64_image(data_url):
         header, encoded = data_url.split(',', 1)
         img_bytes = base64.b64decode(encoded)
         image = Image.open(io.BytesIO(img_bytes))
-        return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+        # Convert to a BGR numpy array.
+        # Prefer OpenCV when available; otherwise use numpy channel flip.
+        rgb = np.array(image.convert('RGB'))
+        if CV2_AVAILABLE and cv2 is not None:
+            return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        return rgb[:, :, ::-1]
     except Exception as e:
         print(f"Error decoding base64: {e}")
         return None
@@ -524,6 +529,11 @@ def decode_base64_image(data_url):
 #@limiter.limit("5 per hour")
 def register_user():
     print('[REGISTER] Received registration request')
+    db_ok, db_err = require_db()
+    if not db_ok:
+        print('[REGISTER] ERROR: DB not configured (MONGO_URI missing)')
+        return db_err
+
     data = request.get_json()
     print(f'[REGISTER] User: {data.get("fullName")}, Email: {data.get("email")}, Role: {data.get("role")}')
     
@@ -559,7 +569,7 @@ def register_user():
         print(f'[REGISTER] ERROR: User already exists: {data.get("email")}')
         return jsonify({"error": "User already exists"}), 409
 
-    # --- Decode and process face image ---
+    # --- Decode and process face image (optional when heavy ML is disabled) ---
     # Collect one or more images for multi-sample enrollment
     images: list = []
     if data.get('imageDataUrls') and isinstance(data.get('imageDataUrls'), list):
@@ -569,45 +579,43 @@ def register_user():
             if img is not None:
                 images.append(img)
     elif data.get('imageDataUrl'):
-        print(f'[REGISTER] Processing 1 face image, length: {len(data["imageDataUrl"])}')
+        try:
+            print(f'[REGISTER] Processing 1 face image, length: {len(data["imageDataUrl"])}')
+        except Exception:
+            print('[REGISTER] Processing 1 face image')
         img = decode_base64_image(data['imageDataUrl'])
         if img is not None:
             images.append(img)
-    
+
     if not images:
-        print('[REGISTER] ERROR: Failed to decode any face images')
-        return jsonify({"error": "Invalid image data"}), 400
-    
-    print(f'[REGISTER] Successfully decoded {len(images)} face image(s)')
+        if ENABLE_HEAVY_ML:
+            print('[REGISTER] ERROR: Failed to decode any face images (required when INVIGILO_ENABLE_HEAVY_ML=1)')
+            return jsonify({"error": "Invalid image data"}), 400
+        print('[REGISTER] No valid face image provided; continuing without face enrollment (INVIGILO_ENABLE_HEAVY_ML=0)')
 
     try:
-        # Use InsightFace engine for embedding generation
+        # Use InsightFace engine for embedding generation (optional for free-tier deployments)
         face_vectors = []
-        print(f'[REGISTER] Generating face embeddings using InsightFace engine')
-        
-        _ensure_engine_loaded()
-        if not ENGINE_AVAILABLE or engine is None:
-            print('[REGISTER] ERROR: InsightFace engine not available')
-            return jsonify({"error": "Face recognition engine not available. Please ensure InsightFace is properly installed."}), 500
-        
-        for i, img in enumerate(images):
-            try:
-                print(f'[REGISTER] Processing image {i+1}/{len(images)} with InsightFace...')
-                emb = engine.embed(img)
-                if emb is not None:
-                    # Engine returns normalized embedding; store as list
-                    face_vectors.append(emb.tolist())
-                    print(f'[REGISTER] Successfully generated embedding {i+1}, dimension: {len(emb)}')
-                else:
-                    print(f'[REGISTER] InsightFace returned None for image {i+1} - no face detected')
-            except Exception as e:
-                print(f"[REGISTER] InsightFace embedding failed for image {i+1}: {e}")
-        
-        if not face_vectors:
-            print('[REGISTER] ERROR: No face embeddings could be generated')
-            return jsonify({"error": "No face detected in uploaded images. Please ensure your face is clearly visible."}), 400
-        
-        print(f'[REGISTER] Generated {len(face_vectors)} embeddings from {len(images)} images')
+        if ENABLE_HEAVY_ML and images:
+            print('[REGISTER] Generating face embeddings using InsightFace engine')
+            _ensure_engine_loaded()
+            if not ENGINE_AVAILABLE or engine is None:
+                print('[REGISTER] Face engine not available; continuing without face enrollment')
+            else:
+                for i, img in enumerate(images):
+                    try:
+                        print(f'[REGISTER] Processing image {i+1}/{len(images)} with InsightFace...')
+                        emb = engine.embed(img)
+                        if emb is not None:
+                            face_vectors.append(emb.tolist())
+                            print(f'[REGISTER] Successfully generated embedding {i+1}, dimension: {len(emb)}')
+                        else:
+                            print(f'[REGISTER] InsightFace returned None for image {i+1} - no face detected')
+                    except Exception as e:
+                        print(f"[REGISTER] InsightFace embedding failed for image {i+1}: {e}")
+
+                if not face_vectors:
+                    print('[REGISTER] No embeddings generated; continuing without face enrollment')
 
         hashed_pw = bcrypt.hashpw(data['password'].encode('utf-8'), bcrypt.gensalt())
 
@@ -646,7 +654,12 @@ def register_user():
         except Exception as e:
             print(f'[REGISTER] Failed to cache embedding: {e}')
         
-        return jsonify({"message": "User registered successfully with face embedding!"}), 201
+        if face_vectors:
+            return jsonify({"message": "User registered successfully with face embedding!"}), 201
+        return jsonify({
+            "message": "User registered successfully (face enrollment unavailable).",
+            "faceEnrollment": "skipped"
+        }), 201
 
     except ValueError as e:
         print(f'[REGISTER] ValueError: {e}')
