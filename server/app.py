@@ -790,115 +790,40 @@ def analyze_frame():
         except Exception as e:
             return jsonify({"error": "Invalid user ID format"}), 400
         
-        # 4. Decode base64 image to OpenCV format
+        # 4. Get user's stored embeddings for face verification
+        stored_embeddings = user.get('faceEmbeddings', []) or []
+        if not stored_embeddings and user.get('faceEmbedding'):
+            stored_embeddings = [user.get('faceEmbedding')]
+        
+        # 5. Convert image to base64 for ML service
         try:
-            frame = decode_base64_image(image_data_url)
-            if frame is None:
-                return jsonify({"error": "Invalid image data - could not decode"}), 400
+            # Remove data URL prefix if present
+            if ',' in image_data_url:
+                image_base64 = image_data_url.split(',', 1)[1]
+            else:
+                image_base64 = image_data_url
         except Exception as e:
-            app.logger.error(f"Image decode error: {e}")
+            app.logger.error(f"Image processing error: {e}")
             return jsonify({"error": "Invalid image data format"}), 400
         
-        # 5. Initialize violations list
-        violations = []
+        # 6. Call ML service for comprehensive frame analysis
+        ml_payload = {
+            'image': image_base64,
+            'stored_embeddings': stored_embeddings,
+            'face_threshold': get_face_threshold(0.56)
+        }
         
-        # 6. Run face detection
-        try:
-            face_count, faces = detectFace(frame)
-        except Exception as e:
-            app.logger.error(f"Face detection error: {e}")
-            face_count, faces = 0, []
+        ml_result = call_ml_service('/analyze-frame', ml_payload, timeout=30)
         
-        # 7. Check face count violations
-        if face_count == 0:
-            violations.append({
-                "type": "no_face",
-                "severity": "critical",
-                "score": 95,
-                "message": "No face detected in frame"
-            })
-        elif face_count > 1:
-            violations.append({
-                "type": "multiple_faces",
-                "severity": "critical",
-                "score": 90,
-                "message": f"{face_count} faces detected"
-            })
+        if not ml_result or 'violations' not in ml_result:
+            app.logger.error(f"ML service returned invalid response: {ml_result}")
+            return jsonify({"error": "ML service failed to analyze frame"}), 500
         
-        # 8. If exactly 1 face, run behavioral analysis
-        if face_count == 1:
-            # 8a. Face identity verification
-            try:
-                if ENGINE_AVAILABLE and engine is not None:
-                    # Get stored user embeddings
-                    stored_embeddings = user.get('faceEmbeddings', []) or []
-                    if not stored_embeddings and user.get('faceEmbedding'):
-                        stored_embeddings = [user.get('faceEmbedding')]
-                    
-                    if stored_embeddings:
-                        # Convert to numpy arrays
-                        stored_list = [np.array(e, dtype=np.float32) for e in stored_embeddings]
-                        stored_list = [e / np.linalg.norm(e) if np.linalg.norm(e) > 0 else e for e in stored_list]
-                        
-                        # Verify face identity
-                        variants = [frame]  # Use original frame for verification
-                        is_verified, max_sim, sims = engine.verify_any(stored_list, image_bgr=frame, variants=variants)
-                        
-                        THRESHOLD = get_face_threshold(0.56)
-                        if max_sim < THRESHOLD:
-                            violations.append({
-                                "type": "face_mismatch",
-                                "severity": "critical",
-                                "score": 100,
-                                "message": f"Face identity mismatch (similarity: {max_sim:.2f})"
-                            })
-            except Exception as e:
-                app.logger.error(f"Face verification error: {e}")
-            
-            # 8b. Gaze detection (eyes off screen)
-            try:
-                gaze_direction = gazeDetection(faces, frame)
-                if gaze_direction in ['Left', 'Right']:
-                    violations.append({
-                        "type": "eyes_off_screen",
-                        "severity": "medium",
-                        "score": 15,
-                        "message": f"Eyes looking {gaze_direction.lower()}"
-                    })
-            except Exception as e:
-                app.logger.debug(f"Gaze detection error: {e}")
-            
-            # 8c. Mouth tracking (speaking/suspicious)
-            try:
-                mouth_status = mouthTrack(faces, frame)
-                if "Open" in mouth_status:
-                    violations.append({
-                        "type": "mouth_open",
-                        "severity": "low",
-                        "score": 20,
-                        "message": "Mouth open detected"
-                    })
-            except Exception as e:
-                app.logger.debug(f"Mouth tracking error: {e}")
-            
-            # 8d. Head pose detection (not looking forward)
-            try:
-                head_pose = head_pose_detection(faces, frame)
-                if head_pose not in ["Forward", "N/A"]:
-                    violations.append({
-                        "type": "suspicious_head_pose",
-                        "severity": "medium",
-                        "score": 20,
-                        "message": f"Head pose: {head_pose}"
-                    })
-            except Exception as e:
-                app.logger.debug(f"Head pose detection error: {e}")
+        violations = ml_result['violations']
+        face_count = ml_result.get('face_count', 0)
+        total_score = ml_result.get('score', 0)
         
-        # 9. Calculate total violation score (capped at 100)
-        total_score = sum(v.get('score', 0) for v in violations)
-        total_score = min(total_score, 100)
-        
-        # 10. Store violations in database
+        # 7. Store violations in database
         timestamp = datetime.datetime.utcnow()
         for violation in violations:
             try:
@@ -919,7 +844,7 @@ def analyze_frame():
             except Exception as e:
                 app.logger.error(f"Failed to store violation: {e}")
         
-        # 11. Return analysis results
+        # 8. Return analysis results
         return jsonify({
             "violations": violations,
             "score": total_score,
@@ -976,87 +901,67 @@ def verify_face():
     
     print(f'[FACE-VERIFY] User found: {user.get("name")}, has embeddings: {bool(user.get("faceEmbedding") or user.get("faceEmbeddings"))}')
 
-    image = decode_base64_image(image_data_url)
-    if image is None:
-        print('[FACE-VERIFY] ERROR: Failed to decode image')
-        return jsonify({"error": "Invalid image data"}), 400
-    
-    print(f'[FACE-VERIFY] Image decoded successfully, shape: {image.shape}')
     try:
-        # helper: create simple variants to account for lighting/contrast differences
-        def make_variants(img):
-            variants = []
-            try:
-                base = cv2.resize(img, (160, 160))
-            except Exception:
-                base = img
-            variants.append(base)
-            try:
-                # brightness up
-                hsv = cv2.cvtColor(base, cv2.COLOR_BGR2HSV)
-                hsv = hsv.astype('float32')
-                hsv[...,2] = np.clip(hsv[...,2] * 1.25, 0, 255)
-                bright = cv2.cvtColor(hsv.astype('uint8'), cv2.COLOR_HSV2BGR)
-                variants.append(bright)
-            except Exception:
-                pass
-            try:
-                # CLAHE on L channel (LAB)
-                lab = cv2.cvtColor(base, cv2.COLOR_BGR2LAB)
-                l, a, b = cv2.split(lab)
-                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-                cl = clahe.apply(l)
-                limg = cv2.merge((cl,a,b))
-                clahe_img = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
-                variants.append(clahe_img)
-            except Exception:
-                pass
-            try:
-                # mild blur to reduce noise
-                blur = cv2.GaussianBlur(base, (3,3), 0)
-                variants.append(blur)
-            except Exception:
-                pass
-            try:
-                # gamma correction
-                gamma = 1.2
-                table = np.array([((i / 255.0) ** (1.0/gamma)) * 255 for i in np.arange(0, 256)]).astype('uint8')
-                gamma_img = cv2.LUT(base, table)
-                variants.append(gamma_img)
-            except Exception:
-                pass
-            return variants
-
-        variants = make_variants(image)
-
-        # Support multiple stored embeddings
-        stored_list = []
+        # Convert image to base64 for ML service
+        if ',' in image_data_url:
+            image_base64 = image_data_url.split(',', 1)[1]
+        else:
+            image_base64 = image_data_url
+        
+        # Get stored embeddings
+        stored_embeddings = []
         if user.get('faceEmbeddings') and isinstance(user.get('faceEmbeddings'), list):
-            try:
-                stored_list = [np.array(e, dtype=np.float32) for e in user['faceEmbeddings'] if isinstance(e, (list, tuple))]
-                # L2-normalize each stored embedding for consistent cosine similarity (in case old data isn't normalized)
-                stored_list = [e / np.linalg.norm(e) if np.linalg.norm(e) > 0 else e for e in stored_list]
-            except Exception:
-                stored_list = []
-        if not stored_list and user.get('faceEmbedding'):
-            emb = np.array(user['faceEmbedding'], dtype=np.float32)
-            norm = np.linalg.norm(emb)
-            if norm > 0:
-                emb = emb / norm
-            stored_list = [emb]
-
-        if ENGINE_AVAILABLE and engine is not None and stored_list:
-            # Use engine only for fast embeddings; apply our DB-configured threshold for final decision
-            _ok, max_sim, sims = engine.verify_any(stored_list, image_bgr=image, variants=variants)
-            THRESHOLD = get_face_threshold(0.56)
-            app.logger.info('Face verify (engine) for %s: similarities=%s, max=%s thr=%s', identifier, sims, max_sim, THRESHOLD)
-            if max_sim >= THRESHOLD:
-                return jsonify({"message": "Face verified successfully", "verified": True, "similarity": float(max_sim), "similarities": sims}), 200
-            else:
-                return jsonify({"message": "Face verification failed", "verified": False, "similarity": float(max_sim), "similarities": sims}), 401
-
-        # If InsightFace engine not available, return error
-        return jsonify({"error": "Face verification unavailable. InsightFace engine not loaded."}), 500
+            stored_embeddings = [e for e in user['faceEmbeddings'] if isinstance(e, (list, tuple))]
+        if not stored_embeddings and user.get('faceEmbedding'):
+            stored_embeddings = [user.get('faceEmbedding')]
+        
+        if not stored_embeddings:
+            print('[FACE-VERIFY] ERROR: No stored embeddings found')
+            return jsonify({"error": "No face data stored for user"}), 404
+        
+        # First, verify the face and get embedding from ML service
+        verify_payload = {
+            'image': image_base64
+        }
+        verify_result = call_ml_service('/verify-face', verify_payload, timeout=10)
+        
+        if not verify_result or 'embedding' not in verify_result:
+            print('[FACE-VERIFY] ERROR: ML service failed to generate embedding')
+            return jsonify({"error": "Failed to process face image"}), 400
+        
+        new_embedding = verify_result['embedding']
+        
+        # Now match against stored embeddings
+        match_payload = {
+            'embedding1': new_embedding,
+            'stored_embeddings': stored_embeddings
+        }
+        match_result = call_ml_service('/match-face', match_payload, timeout=10)
+        
+        if not match_result or 'similarity' not in match_result:
+            print('[FACE-VERIFY] ERROR: ML service failed to match faces')
+            return jsonify({"error": "Failed to verify face"}), 500
+        
+        max_sim = match_result['similarity']
+        sims = match_result.get('similarities', [max_sim])
+        THRESHOLD = get_face_threshold(0.56)
+        
+        print(f'[FACE-VERIFY] Face verify for {identifier}: similarities={sims}, max={max_sim} thr={THRESHOLD}')
+        
+        if max_sim >= THRESHOLD:
+            return jsonify({
+                "message": "Face verified successfully",
+                "verified": True,
+                "similarity": float(max_sim),
+                "similarities": sims
+            }), 200
+        else:
+            return jsonify({
+                "message": "Face verification failed",
+                "verified": False,
+                "similarity": float(max_sim),
+                "similarities": sims
+            }), 401
 
     except ValueError:
         return jsonify({"error": "No face detected"}), 400
