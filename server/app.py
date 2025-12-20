@@ -74,75 +74,11 @@ def call_ml_service(endpoint: str, payload: dict, timeout: int = ML_SERVICE_TIME
         return False, {"error": str(e)}
 
 
-# Legacy: Keep local ML for backward compatibility (will be removed later)
-ENABLE_HEAVY_ML = _bool_env("INVIGILO_ENABLE_HEAVY_ML", "0")
-
-# Load the fast face engine (InsightFace) lazily to avoid large memory use at import time.
-ENGINE_AVAILABLE = False
-engine = None
-_engine_init_attempted = False
-
-
-def get_face_engine():
-    """Lazy getter for the face engine.
-
-    Returns:
-        FaceEngine | None
-    """
-    global engine, ENGINE_AVAILABLE, _engine_init_attempted
-    if not ENABLE_HEAVY_ML:
-        return None
-
-
-# Backwards-compat: some routes may reference the global `engine` or
-# `ENGINE_AVAILABLE`. Keep them in sync via the lazy getter.
-def _ensure_engine_loaded():
-    global engine, ENGINE_AVAILABLE
-    e = get_face_engine()
-    engine = e
-    ENGINE_AVAILABLE = e is not None
-    return e
-    if _engine_init_attempted:
-        return engine
-    _engine_init_attempted = True
-    try:
-        print('[ENGINE] Attempting to import face_engine...')
-        from face_engine import get_engine
-        print('[ENGINE] face_engine imported successfully, calling get_engine()...')
-        engine = get_engine()
-        ENGINE_AVAILABLE = engine is not None
-        print(f'[ENGINE] ENGINE_AVAILABLE = {ENGINE_AVAILABLE}')
-        return engine
-    except Exception as e:
-        print(f"[ENGINE] Face engine unavailable: {e}")
-        import traceback
-        traceback.print_exc()
-        engine = None
-        ENGINE_AVAILABLE = False
-        return None
-
-# --- Your existing imports for proctoring ---
-try:
-    from proctoring_module import (
-        detectFace, isBlinking, mouthTrack, 
-        gazeDetection, head_pose_detection, process_audio_chunk
-    )
-except Exception as e:
-    print(f"proctoring_module import failed or not available: {e}")
-    # Provide lightweight stubs so the server can run in dev without full native deps
-    def detectFace(frame):
-        # naive stub: assume 1 face detected with minimal face structure
-        return 1, [{'bbox': [0,0,10,10]}]
-    def isBlinking(faces, frame):
-        return 'normal'
-    def mouthTrack(faces, frame):
-        return 'closed'
-    def gazeDetection(faces, frame):
-        return 'Center'
-    def head_pose_detection(faces, frame):
-        return 'Forward'
-    def process_audio_chunk(audio_bytes):
-        return 'clean'
+# ============================================================================
+# NO LOCAL ML - All ML processing delegated to ml-service
+# ============================================================================
+# This backend is ML-free for lightweight deployment on Render.
+# All face recognition, proctoring analysis happens via HTTP calls to ML service.
 
 # --- Setup ---
 load_dotenv()
@@ -990,7 +926,15 @@ def proctor_activity():
     if frame is None:
         return jsonify({"error": "Invalid image data"}), 400
     
-    # Check if frame is blank/black (nearly black or very low brightness)
+    # Convert frame to base64 for ML service
+    try:
+        _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        frame_base64 = base64.b64encode(buffer).decode('utf-8')
+    except Exception as e:
+        print(f"[PROCTOR] Error encoding frame: {e}")
+        return jsonify({"error": "Failed to encode frame"}), 500
+    
+    # Check frame brightness for camera blocking detection
     try:
         mean_brightness = np.mean(frame)
         
@@ -1026,9 +970,6 @@ def proctor_activity():
                     })
                     
                     if not recent:
-                        # Encode the blank frame as evidence (shows black screen)
-                        _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                        frame_base64 = base64.b64encode(buffer).decode('utf-8')
                         frame_evidence = f"data:image/jpeg;base64,{frame_base64}"
                         
                         proctor_events_collection.insert_one({
@@ -1058,136 +999,96 @@ def proctor_activity():
                     "headPose": "Camera Blocked",
                     "message": "Camera appears to be blocked or covered"
                 }), 200
-        
-        # ADDITIONAL CHECK: Suspiciously dark environment (possible hand/cloth covering camera partially)
-        elif mean_brightness < 25 and exam_active:  # Very dark but not completely black
-            print(f"[PROCTOR] ⚠️ Suspiciously dark frame during exam (brightness: {mean_brightness:.2f})")
-            
-            # Check if face can be detected in this dark frame
-            temp_face_count, _ = detectFace(frame)
-            
-            if temp_face_count == 0:
-                # No face detected in dark frame - likely covered
-                try:
-                    now = datetime.datetime.utcnow()
-                    recent = proctor_events_collection.find_one({
-                        'examId': str(exam_id),
-                        'userId': str(user_id),
-                        'eventType': 'camera_obscured',
-                        'timestamp': {'$gt': now - datetime.timedelta(seconds=5)}
-                    })
-                    
-                    if not recent:
-                        _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                        frame_base64 = base64.b64encode(buffer).decode('utf-8')
-                        frame_evidence = f"data:image/jpeg;base64,{frame_base64}"
-                        
-                        proctor_events_collection.insert_one({
-                            'examId': str(exam_id),
-                            'userId': str(user_id),
-                            'eventType': 'camera_obscured',
-                            'details': {
-                                'brightness': float(mean_brightness),
-                                'message': 'Camera partially obscured or very dark environment'
-                            },
-                            'severity': 'high',
-                            'timestamp': now,
-                            'frameEvidence': frame_evidence
-                        })
-                        print(f"[PROCTOR-EVENT] camera_obscured (high) for user {user_id} in exam {exam_id}")
-                except Exception as e:
-                    print(f"[PROCTOR] Error recording camera_obscured event: {e}")
                 
     except Exception as e:
         print(f"[PROCTOR] Error checking frame brightness: {e}")
 
-    # Face count for basic checks
-    face_count, faces = detectFace(frame)
+    # Call ML service for full proctoring analysis
+    try:
+        ml_payload = {
+            'image': frame_base64,
+            'check_blink': True,
+            'check_gaze': True,
+            'check_mouth': True,
+            'check_head_pose': True
+        }
+        
+        ml_result = call_ml_service('/analyze-frame', ml_payload, timeout=30)
+        
+        if not ml_result:
+            print("[PROCTOR] ML service unavailable")
+            return jsonify({
+                "faceCount": 0,
+                "identityVerified": False,
+                "similarity": None,
+                "blinkStatus": "Unknown",
+                "gazeDirection": "Unknown",
+                "mouthStatus": "Unknown",
+                "headPose": "Unknown",
+                "message": "ML service unavailable"
+            }), 200
+        
+        # Extract ML results
+        face_count = ml_result.get('face_count', 0)
+        blink_status = ml_result.get('blink_status', 'Unknown')
+        gaze_direction = ml_result.get('gaze_direction', 'Unknown')
+        mouth_status = ml_result.get('mouth_status', 'Unknown')
+        head_pose = ml_result.get('head_pose', 'Unknown')
+        
+    except Exception as e:
+        print(f"[PROCTOR] Error calling ML service: {e}")
+        return jsonify({"error": "ML service error"}), 500
 
-    # Identity verification (best-effort, no hard failure)
+    # Identity verification using ML service
     identity_verified = False
     similarity_score = None
     try:
         user = users_collection.find_one({'_id': ObjectId(user_id)})
         if user and (user.get('faceEmbeddings') or user.get('faceEmbedding')):
-            stored_embedding = np.array(user['faceEmbedding'], dtype=np.float32)
-
-            # Prepare tolerant variants
-            def _make_variants_local(img):
-                vs = []
-                try:
-                    b = cv2.resize(img, (160, 160))
-                except Exception:
-                    b = img
-                vs.append(b)
-                try:
-                    hsv = cv2.cvtColor(b, cv2.COLOR_BGR2HSV).astype('float32')
-                    hsv[...,2] = np.clip(hsv[...,2] * 1.25, 0, 255)
-                    bright = cv2.cvtColor(hsv.astype('uint8'), cv2.COLOR_HSV2BGR)
-                    vs.append(bright)
-                except Exception:
-                    pass
-                try:
-                    lab = cv2.cvtColor(b, cv2.COLOR_BGR2LAB)
-                    l, a, ba = cv2.split(lab)
-                    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-                    cl = clahe.apply(l)
-                    limg = cv2.merge((cl,a,ba))
-                    clahe_img = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
-                    vs.append(clahe_img)
-                except Exception:
-                    pass
-                try:
-                    blur = cv2.GaussianBlur(b, (3,3), 0)
-                    vs.append(blur)
-                except Exception:
-                    pass
-                try:
-                    gamma = 1.2
-                    table = np.array([((i / 255.0) ** (1.0/gamma)) * 255 for i in np.arange(0, 256)]).astype('uint8')
-                    gamma_img = cv2.LUT(b, table)
-                    vs.append(gamma_img)
-                except Exception:
-                    pass
-                return vs
-
-            # Build stored_list from faceEmbeddings (preferred) or faceEmbedding
-            stored_list = []
+            
+            # Get stored embeddings
+            stored_embeddings = []
             if user.get('faceEmbeddings') and isinstance(user.get('faceEmbeddings'), list):
-                try:
-                    stored_list = [np.array(e, dtype=np.float32) for e in user['faceEmbeddings'] if isinstance(e, (list, tuple))]
-                    # L2-normalize each for consistent cosine similarity
-                    stored_list = [e / np.linalg.norm(e) if np.linalg.norm(e) > 0 else e for e in stored_list]
-                except Exception:
-                    stored_list = []
-            if not stored_list and user.get('faceEmbedding'):
-                emb = np.array(user['faceEmbedding'], dtype=np.float32)
-                norm = np.linalg.norm(emb)
-                if norm > 0:
-                    emb = emb / norm
-                stored_list = [emb]
-
-            variants = _make_variants_local(frame)
-            if ENGINE_AVAILABLE and engine is not None and stored_list:
-                _ok, max_sim, sims = engine.verify_any(stored_list, image_bgr=frame, variants=variants)
-                similarity_score = float(max_sim)
-                THRESH_P = get_face_threshold(0.56)
-                identity_verified = similarity_score >= THRESH_P
-                app.logger.info('Proctor identity (engine) for %s similarities=%s max=%s thr=%s', user_id, sims, similarity_score, THRESH_P)
+                stored_embeddings = [e for e in user['faceEmbeddings'] if isinstance(e, (list, tuple))]
+            elif user.get('faceEmbedding'):
+                stored_embeddings = [user['faceEmbedding']]
+            
+            if stored_embeddings:
+                # Generate embedding from current frame via ML service
+                verify_payload = {'image': frame_base64}
+                verify_result = call_ml_service('/verify-face', verify_payload, timeout=10)
+                
+                if verify_result and 'embedding' in verify_result:
+                    # Match against stored embeddings
+                    match_payload = {
+                        'embedding1': verify_result['embedding'],
+                        'stored_embeddings': stored_embeddings
+                    }
+                    match_result = call_ml_service('/match-face', match_payload, timeout=10)
+                    
+                    if match_result and 'similarity' in match_result:
+                        similarity_score = float(match_result['similarity'])
+                        THRESH_P = get_face_threshold(0.56)
+                        identity_verified = similarity_score >= THRESH_P
+                        app.logger.info(f'Proctor identity for {user_id}: similarity={similarity_score} threshold={THRESH_P}')
+                    else:
+                        app.logger.warning('ML service face matching failed')
+                else:
+                    app.logger.warning('ML service face verification failed')
             else:
-                app.logger.warning('Proctor identity verification skipped - InsightFace engine not available')
+                app.logger.warning(f'No stored embeddings for user {user_id}')
     except Exception as e:
-        print(f"Error during live identity verification: {e}")
+        print(f"Error during identity verification: {e}")
 
-    # Behavioral checks (unchanged)
+    # Build response
     results = {
         "faceCount": face_count,
         "identityVerified": identity_verified,
         "similarity": similarity_score,
-        "blinkStatus": isBlinking(faces, frame),
-        "gazeDirection": gazeDetection(faces, frame),
-        "mouthStatus": mouthTrack(faces, frame),
-        "headPose": head_pose_detection(faces, frame)
+        "blinkStatus": blink_status,
+        "gazeDirection": gaze_direction,
+        "mouthStatus": mouth_status,
+        "headPose": head_pose
     }
     # Compute avg brightness to approximate environment changes
     try:
@@ -1340,7 +1241,8 @@ def reset_proctor_state():
 
 @app.route('/api/proctor/audio', methods=['POST'])
 def proctor_audio():
-    """Process audio chunk and emit event only if human voice is detected."""
+    """Process audio chunk and emit event only if human voice is detected.
+    Note: Audio processing not yet implemented - returns Unknown status."""
     data = request.get_json()
     audio_b64 = data.get('audioData')
     exam_id = data.get('examId')
@@ -1349,8 +1251,8 @@ def proctor_audio():
     if not audio_b64:
         return jsonify({"error": "Audio data is required"}), 400
     
-    audio_bytes = base64.b64decode(audio_b64)
-    result = process_audio_chunk(audio_bytes)
+    # TODO: Implement audio processing via ML service or separate audio service
+    result = "Unknown"  # Placeholder until audio processing is implemented
     
     # Record proctoring event only if voice is detected
     if result == "Voice detected" and exam_id and user_id:
@@ -3385,24 +3287,28 @@ def add_face_samples(user_id):
             return jsonify({'error': f'Max samples reached ({max_samples})'}), 400
 
         new_vecs = []
-        # Embed each
+        # Embed each using ML service
         for u in urls:
             img = decode_base64_image(u)
             if img is None:
                 continue
-            emb = None
-            if ENGINE_AVAILABLE and engine is not None:
-                try:
-                    e = engine.embed(img)
-                    if e is not None:
-                        emb = e.tolist()
-                except Exception:
-                    emb = None
             
-            if emb is None:
-                app.logger.warning('InsightFace failed to generate embedding for image')
-            else:
-                new_vecs.append(emb)
+            # Convert to base64 for ML service
+            try:
+                _, buffer = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                img_base64 = base64.b64encode(buffer).decode('utf-8')
+                
+                # Call ML service to generate embedding
+                verify_payload = {'image': img_base64}
+                verify_result = call_ml_service('/verify-face', verify_payload, timeout=10)
+                
+                if verify_result and 'embedding' in verify_result:
+                    emb = verify_result['embedding']
+                    new_vecs.append(emb)
+                else:
+                    app.logger.warning('ML service failed to generate embedding for image')
+            except Exception as e:
+                app.logger.warning(f'Error processing face sample: {e}')
             
             if len(current) + len(new_vecs) >= max_samples:
                 break
@@ -3875,7 +3781,7 @@ if __name__ == '__main__':
     if not root_logger.handlers:
         root_logger.addHandler(handler)
 
-    print(f"Starting Invigilo server on 0.0.0.0:{port} (DEV_MODE={DEV_MODE}, InsightFace Engine={ENGINE_AVAILABLE})")
+    print(f"Starting Invigilo server on 0.0.0.0:{port} (DEV_MODE={DEV_MODE}, ML_SERVICE_URL={os.getenv('ML_SERVICE_URL', 'Not set')})")
 
     # Install a global exception hook to log uncaught exceptions to file so the terminal doesn't silently close
     import sys, traceback
