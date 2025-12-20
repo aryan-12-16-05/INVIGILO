@@ -1,0 +1,12 @@
+Flask==3.0.0
+Flask-Cors==4.0.0
+numpy
+Pillow
+dlib
+face-recognition
+opencv-python
+scipy
+imutils
+insightface
+onnxruntime
+gunicorn

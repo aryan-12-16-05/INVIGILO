@@ -32,9 +32,49 @@ def _bool_env(name: str, default: str = "0") -> bool:
     return str(v).strip().lower() in {"1", "true", "yes", "on"}
 
 
-# Heavy ML can be disabled for free-tier deployments.
-# When disabled, endpoints should still work but may return "unavailable" for
-# face-recognition specific actions.
+# ============================================================================
+# ML SERVICE CLIENT (Hugging Face Spaces)
+# ============================================================================
+# Backend delegates heavy ML to separate service on Hugging Face Spaces
+ML_SERVICE_URL = os.getenv("ML_SERVICE_URL", "")
+ML_SERVICE_TIMEOUT = 30  # seconds
+
+def call_ml_service(endpoint: str, payload: dict, timeout: int = ML_SERVICE_TIMEOUT):
+    """
+    Call ML service endpoint via HTTP.
+    
+    Args:
+        endpoint: e.g., "/verify-face", "/analyze-frame"
+        payload: JSON request body
+        timeout: request timeout in seconds
+    
+    Returns:
+        (success: bool, data: dict)
+    """
+    if not ML_SERVICE_URL:
+        print(f"[ML-CLIENT] ERROR: ML_SERVICE_URL not configured")
+        return False, {"error": "ML service not configured"}
+    
+    url = ML_SERVICE_URL.rstrip('/') + endpoint
+    try:
+        print(f"[ML-CLIENT] Calling {url}")
+        response = requests.post(url, json=payload, timeout=timeout)
+        
+        if response.status_code == 200:
+            return True, response.json()
+        else:
+            print(f"[ML-CLIENT] ERROR: {response.status_code} - {response.text}")
+            return False, {"error": f"ML service error: {response.status_code}"}
+    
+    except requests.Timeout:
+        print(f"[ML-CLIENT] ERROR: Request timeout after {timeout}s")
+        return False, {"error": "ML service timeout"}
+    except Exception as e:
+        print(f"[ML-CLIENT] ERROR: {e}")
+        return False, {"error": str(e)}
+
+
+# Legacy: Keep local ML for backward compatibility (will be removed later)
 ENABLE_HEAVY_ML = _bool_env("INVIGILO_ENABLE_HEAVY_ML", "0")
 
 # Load the fast face engine (InsightFace) lazily to avoid large memory use at import time.
@@ -568,8 +608,7 @@ def register_user():
         print(f'[REGISTER] ERROR: User already exists: {data.get("email")}')
         return jsonify({"error": "User already exists"}), 409
 
-    # --- Decode and process face image (optional when heavy ML is disabled) ---
-    # Collect one or more images for multi-sample enrollment
+    # --- Decode and process face image (REQUIRED for registration) ---
     images: list = []
     if data.get('imageDataUrls') and isinstance(data.get('imageDataUrls'), list):
         print(f'[REGISTER] Processing {len(data["imageDataUrls"])} face images')
@@ -578,43 +617,63 @@ def register_user():
             if img is not None:
                 images.append(img)
     elif data.get('imageDataUrl'):
-        try:
-            print(f'[REGISTER] Processing 1 face image, length: {len(data["imageDataUrl"])}')
-        except Exception:
-            print('[REGISTER] Processing 1 face image')
+        print(f'[REGISTER] Processing 1 face image')
         img = decode_base64_image(data['imageDataUrl'])
         if img is not None:
             images.append(img)
 
     if not images:
-        if ENABLE_HEAVY_ML:
-            print('[REGISTER] ERROR: Failed to decode any face images (required when INVIGILO_ENABLE_HEAVY_ML=1)')
-            return jsonify({"error": "Invalid image data"}), 400
-        print('[REGISTER] No valid face image provided; continuing without face enrollment (INVIGILO_ENABLE_HEAVY_ML=0)')
+        print('[REGISTER] ERROR: No valid face images provided')
+        return jsonify({"error": "Face image required for registration"}), 400
+    
+    print(f'[REGISTER] Successfully decoded {len(images)} face image(s)')
 
     try:
-        # Use InsightFace engine for embedding generation (optional for free-tier deployments)
+        # Generate face embeddings using ML Service (Hugging Face Spaces)
         face_vectors = []
-        if ENABLE_HEAVY_ML and images:
-            print('[REGISTER] Generating face embeddings using InsightFace engine')
-            _ensure_engine_loaded()
-            if not ENGINE_AVAILABLE or engine is None:
-                print('[REGISTER] Face engine not available; continuing without face enrollment')
+        
+        print('[REGISTER] Calling ML service for face verification')
+        for i, img in enumerate(images):
+            print(f'[REGISTER] Processing image {i+1}/{len(images)}')
+            
+            # Convert image to base64 for transmission
+            _, buffer = cv2.imencode('.jpg', img) if CV2_AVAILABLE else (None, None)
+            if buffer is None:
+                # Fallback if CV2 not available
+                pil_img = Image.fromarray(img[:, :, ::-1])  # BGR to RGB
+                img_buffer = io.BytesIO()
+                pil_img.save(img_buffer, format='JPEG')
+                img_bytes = img_buffer.getvalue()
             else:
-                for i, img in enumerate(images):
-                    try:
-                        print(f'[REGISTER] Processing image {i+1}/{len(images)} with InsightFace...')
-                        emb = engine.embed(img)
-                        if emb is not None:
-                            face_vectors.append(emb.tolist())
-                            print(f'[REGISTER] Successfully generated embedding {i+1}, dimension: {len(emb)}')
-                        else:
-                            print(f'[REGISTER] InsightFace returned None for image {i+1} - no face detected')
-                    except Exception as e:
-                        print(f"[REGISTER] InsightFace embedding failed for image {i+1}: {e}")
-
-                if not face_vectors:
-                    print('[REGISTER] No embeddings generated; continuing without face enrollment')
+                img_bytes = buffer.tobytes()
+            
+            img_b64 = base64.b64encode(img_bytes).decode('utf-8')
+            image_data_url = f"data:image/jpeg;base64,{img_b64}"
+            
+            # Call ML service
+            success, result = call_ml_service('/verify-face', {
+                'imageDataUrl': image_data_url
+            })
+            
+            if success and result.get('face_detected'):
+                embedding = result.get('embedding')
+                if embedding:
+                    face_vectors.append(embedding)
+                    print(f'[REGISTER] Successfully generated embedding {i+1}, dimension: {len(embedding)}')
+                else:
+                    print(f'[REGISTER] No embedding returned for image {i+1}')
+            else:
+                error_msg = result.get('error', 'Unknown error')
+                print(f'[REGISTER] ML service error for image {i+1}: {error_msg}')
+        
+        if not face_vectors:
+            print('[REGISTER] ERROR: No face embeddings could be generated')
+            return jsonify({
+                "error": "No face detected in uploaded images",
+                "message": "Please ensure your face is clearly visible and try again"
+            }), 400
+        
+        print(f'[REGISTER] Generated {len(face_vectors)} embeddings from {len(images)} images')
 
         hashed_pw = bcrypt.hashpw(data['password'].encode('utf-8'), bcrypt.gensalt())
 
@@ -643,21 +702,11 @@ def register_user():
         new_id = str(result.inserted_id)
         new_user['_id'] = new_id
         
-        print(f'[REGISTER] User registered successfully: {new_id}, faceVerified: {new_user["faceVerified"]}')
+        print(f'[REGISTER] User registered successfully: {new_id}, faceVerified: True')
         
-        # Cache embedding in engine for faster verification
-        try:
-            if ENGINE_AVAILABLE and engine is not None and new_user.get('faceEmbedding'):
-                engine.user_cache[new_id] = np.array(new_user['faceEmbedding'], dtype=np.float32)
-                print(f'[REGISTER] Cached embedding for user {new_id}')
-        except Exception as e:
-            print(f'[REGISTER] Failed to cache embedding: {e}')
-        
-        if face_vectors:
-            return jsonify({"message": "User registered successfully with face embedding!"}), 201
         return jsonify({
-            "message": "User registered successfully (face enrollment unavailable).",
-            "faceEnrollment": "skipped"
+            "message": "User registered successfully with face verification!",
+            "userId": new_id
         }), 201
 
     except ValueError as e:
