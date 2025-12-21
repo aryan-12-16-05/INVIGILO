@@ -5,6 +5,8 @@ WORKDIR /app
 # Install system dependencies including build tools for insightface compilation
 RUN apt-get update && apt-get install -y \
     build-essential \
+    cmake \
+    pkg-config \
     libopencv-dev \
     libopenblas-dev \
     libglib2.0-0 \
@@ -12,13 +14,23 @@ RUN apt-get update && apt-get install -y \
     libxext6 \
     libxrender-dev \
     libgomp1 \
+    libgl1-mesa-glx \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python packages WITHOUT dlib/face-recognition
-# Using insightface for face recognition instead
+# Install Python packages in stages to handle dependencies better
+# First install numpy to avoid build issues
+RUN pip install --no-cache-dir numpy
+
+# Install other core packages
 RUN pip install --no-cache-dir Flask==3.0.0 Flask-Cors==4.0.0 \
-    numpy Pillow opencv-python scipy imutils \
-    insightface onnxruntime gunicorn gradio==4.44.0
+    Pillow opencv-python-headless scipy imutils \
+    onnxruntime gunicorn
+
+# Install insightface separately (needs build tools)
+RUN pip install --no-cache-dir insightface
+
+# Install gradio last
+RUN pip install --no-cache-dir gradio==4.44.0
 
 # Copy application code
 COPY . .
