@@ -504,7 +504,7 @@ def decode_base64_image(data_url):
 @app.route('/api/register', methods=['POST'])
 #@limiter.limit("5 per hour")
 def register_user():
-    try:
+    def _impl():
         print('[REGISTER] Received registration request')
         db_ok, db_err = require_db()
         if not db_ok:
@@ -518,143 +518,146 @@ def register_user():
                 "message": "Request body must be JSON (Content-Type: application/json)."
             }), 400
         print(f'[REGISTER] User: {data.get("fullName")}, Email: {data.get("email")}, Role: {data.get("role")}')
-    
-    # imageDataUrl (single) OR imageDataUrls (list) is required for face enrollment
-    required = ['fullName', 'email', 'phoneNumber', 'roleId', 'password', 'role', 'institution', 'department']
-    if not all(field in data for field in required):
-        missing = [f for f in required if f not in data]
-        print(f'[REGISTER] ERROR: Missing required fields: {missing}')
-        return jsonify({"error": "Missing required fields"}), 400
-    
-    # Validate password strength
-    is_valid, error_message = validate_password(data.get('password', ''))
-    if not is_valid:
-        print(f'[REGISTER] ERROR: Password validation failed: {error_message}')
-        return jsonify({
-            "error": "Invalid password",
-            "message": error_message,
-            "requirements": [
-                "At least 8 characters long",
-                "At least one uppercase letter (A-Z)",
-                "At least one lowercase letter (a-z)",
-                "At least one digit (0-9)",
-                "At least one special character (!@#$%^&*-_=+)"
-            ]
-        }), 400
 
-    existing = {"$or": [{"email": data['email']}, {"phoneNumber": data['phoneNumber']}]}
-    if data['role'] == 'student':
-        existing["$or"].append({"studentId": data['roleId']})
-    else:
-        existing["$or"].append({"lecturerId": data['roleId']})
-    if users_collection.find_one(existing):
-        print(f'[REGISTER] ERROR: User already exists: {data.get("email")}')
-        return jsonify({"error": "User already exists"}), 409
+        # imageDataUrl (single) OR imageDataUrls (list) is required for face enrollment
+        required = ['fullName', 'email', 'phoneNumber', 'roleId', 'password', 'role', 'institution', 'department']
+        if not all(field in data for field in required):
+            missing = [f for f in required if f not in data]
+            print(f'[REGISTER] ERROR: Missing required fields: {missing}')
+            return jsonify({"error": "Missing required fields"}), 400
 
-    # --- Decode and process face image (REQUIRED for registration) ---
-    images: list = []
-    if data.get('imageDataUrls') and isinstance(data.get('imageDataUrls'), list):
-        print(f'[REGISTER] Processing {len(data["imageDataUrls"])} face images')
-        for d in data['imageDataUrls']:
-            img = decode_base64_image(d)
+        # Validate password strength
+        is_valid, error_message = validate_password(data.get('password', ''))
+        if not is_valid:
+            print(f'[REGISTER] ERROR: Password validation failed: {error_message}')
+            return jsonify({
+                "error": "Invalid password",
+                "message": error_message,
+                "requirements": [
+                    "At least 8 characters long",
+                    "At least one uppercase letter (A-Z)",
+                    "At least one lowercase letter (a-z)",
+                    "At least one digit (0-9)",
+                    "At least one special character (!@#$%^&*-_=+)"
+                ]
+            }), 400
+
+        existing = {"$or": [{"email": data['email']}, {"phoneNumber": data['phoneNumber']}]}
+        if data['role'] == 'student':
+            existing["$or"].append({"studentId": data['roleId']})
+        else:
+            existing["$or"].append({"lecturerId": data['roleId']})
+        if users_collection.find_one(existing):
+            print(f'[REGISTER] ERROR: User already exists: {data.get("email")}')
+            return jsonify({"error": "User already exists"}), 409
+
+        # --- Decode and process face image (REQUIRED for registration) ---
+        images: list = []
+        if data.get('imageDataUrls') and isinstance(data.get('imageDataUrls'), list):
+            print(f'[REGISTER] Processing {len(data["imageDataUrls"])} face images')
+            for d in data['imageDataUrls']:
+                img = decode_base64_image(d)
+                if img is not None:
+                    images.append(img)
+        elif data.get('imageDataUrl'):
+            print(f'[REGISTER] Processing 1 face image')
+            img = decode_base64_image(data['imageDataUrl'])
             if img is not None:
                 images.append(img)
-    elif data.get('imageDataUrl'):
-        print(f'[REGISTER] Processing 1 face image')
-        img = decode_base64_image(data['imageDataUrl'])
-        if img is not None:
-            images.append(img)
 
-    if not images:
-        print('[REGISTER] ERROR: No valid face images provided')
-        return jsonify({"error": "Face image required for registration"}), 400
-    
-    print(f'[REGISTER] Successfully decoded {len(images)} face image(s)')
+        if not images:
+            print('[REGISTER] ERROR: No valid face images provided')
+            return jsonify({"error": "Face image required for registration"}), 400
+
+        print(f'[REGISTER] Successfully decoded {len(images)} face image(s)')
+
+        try:
+            # Generate face embeddings using ML Service (Hugging Face Spaces)
+            face_vectors = []
+
+            print('[REGISTER] Calling ML service for face verification')
+            for i, img in enumerate(images):
+                print(f'[REGISTER] Processing image {i+1}/{len(images)}')
+
+                # Convert image to base64 for transmission
+                _, buffer = cv2.imencode('.jpg', img) if CV2_AVAILABLE else (None, None)
+                if buffer is None:
+                    # Fallback if CV2 not available
+                    pil_img = Image.fromarray(img[:, :, ::-1])  # BGR to RGB
+                    img_buffer = io.BytesIO()
+                    pil_img.save(img_buffer, format='JPEG')
+                    img_bytes = img_buffer.getvalue()
+                else:
+                    img_bytes = buffer.tobytes()
+
+                img_b64 = base64.b64encode(img_bytes).decode('utf-8')
+                image_data_url = f"data:image/jpeg;base64,{img_b64}"
+
+                # Call ML service
+                success, result = call_ml_service('/verify-face', {
+                    'imageDataUrl': image_data_url
+                })
+
+                if success and result.get('face_detected'):
+                    embedding = result.get('embedding')
+                    if embedding:
+                        face_vectors.append(embedding)
+                        print(f'[REGISTER] Successfully generated embedding {i+1}, dimension: {len(embedding)}')
+                    else:
+                        print(f'[REGISTER] No embedding returned for image {i+1}')
+                else:
+                    error_msg = result.get('error', 'Unknown error')
+                    print(f'[REGISTER] ML service error for image {i+1}: {error_msg}')
+
+            if not face_vectors:
+                print('[REGISTER] ERROR: No face embeddings could be generated')
+                return jsonify({
+                    "error": "No face detected in uploaded images",
+                    "message": "Please ensure your face is clearly visible and try again"
+                }), 400
+
+            print(f'[REGISTER] Generated {len(face_vectors)} embeddings from {len(images)} images')
+
+            hashed_pw = bcrypt.hashpw(data['password'].encode('utf-8'), bcrypt.gensalt())
+
+            new_user = {
+                "name": data['fullName'],
+                "email": data['email'],
+                "phoneNumber": data['phoneNumber'],
+                "role": data['role'],
+                "password": hashed_pw,
+                "institution": data['institution'],
+                "department": data['department'],
+                # Backcompat: keep the first embedding in faceEmbedding; store all in faceEmbeddings
+                "faceEmbedding": (face_vectors[0] if face_vectors else None),
+                "faceEmbeddings": face_vectors,
+                "faceVerified": bool(face_vectors),
+                "isActive": True,
+                "createdAt": datetime.datetime.utcnow()
+            }
+            if data['role'] == 'student':
+                new_user['studentId'] = data['roleId']
+                new_user['year'] = data.get('year')
+            else:
+                new_user['lecturerId'] = data['roleId']
+
+            result = users_collection.insert_one(new_user)
+            new_id = str(result.inserted_id)
+            new_user['_id'] = new_id
+
+            print(f'[REGISTER] User registered successfully: {new_id}, faceVerified: True')
+
+            return jsonify({
+                "message": "User registered successfully with face verification!",
+                "userId": new_id
+            }), 201
+
+        except ValueError as e:
+            print(f'[REGISTER] ValueError: {e}')
+            return jsonify({"error": "No or multiple faces detected"}), 400
 
     try:
-        # Generate face embeddings using ML Service (Hugging Face Spaces)
-        face_vectors = []
-        
-        print('[REGISTER] Calling ML service for face verification')
-        for i, img in enumerate(images):
-            print(f'[REGISTER] Processing image {i+1}/{len(images)}')
-            
-            # Convert image to base64 for transmission
-            _, buffer = cv2.imencode('.jpg', img) if CV2_AVAILABLE else (None, None)
-            if buffer is None:
-                # Fallback if CV2 not available
-                pil_img = Image.fromarray(img[:, :, ::-1])  # BGR to RGB
-                img_buffer = io.BytesIO()
-                pil_img.save(img_buffer, format='JPEG')
-                img_bytes = img_buffer.getvalue()
-            else:
-                img_bytes = buffer.tobytes()
-            
-            img_b64 = base64.b64encode(img_bytes).decode('utf-8')
-            image_data_url = f"data:image/jpeg;base64,{img_b64}"
-            
-            # Call ML service
-            success, result = call_ml_service('/verify-face', {
-                'imageDataUrl': image_data_url
-            })
-            
-            if success and result.get('face_detected'):
-                embedding = result.get('embedding')
-                if embedding:
-                    face_vectors.append(embedding)
-                    print(f'[REGISTER] Successfully generated embedding {i+1}, dimension: {len(embedding)}')
-                else:
-                    print(f'[REGISTER] No embedding returned for image {i+1}')
-            else:
-                error_msg = result.get('error', 'Unknown error')
-                print(f'[REGISTER] ML service error for image {i+1}: {error_msg}')
-        
-        if not face_vectors:
-            print('[REGISTER] ERROR: No face embeddings could be generated')
-            return jsonify({
-                "error": "No face detected in uploaded images",
-                "message": "Please ensure your face is clearly visible and try again"
-            }), 400
-        
-        print(f'[REGISTER] Generated {len(face_vectors)} embeddings from {len(images)} images')
-
-        hashed_pw = bcrypt.hashpw(data['password'].encode('utf-8'), bcrypt.gensalt())
-
-        new_user = {
-            "name": data['fullName'],
-            "email": data['email'],
-            "phoneNumber": data['phoneNumber'],
-            "role": data['role'],
-            "password": hashed_pw,
-            "institution": data['institution'],
-            "department": data['department'],
-            # Backcompat: keep the first embedding in faceEmbedding; store all in faceEmbeddings
-            "faceEmbedding": (face_vectors[0] if face_vectors else None),
-            "faceEmbeddings": face_vectors,
-            "faceVerified": bool(face_vectors),
-            "isActive": True,
-            "createdAt": datetime.datetime.utcnow()
-        }
-        if data['role'] == 'student':
-            new_user['studentId'] = data['roleId']
-            new_user['year'] = data.get('year')
-        else:
-            new_user['lecturerId'] = data['roleId']
-
-        result = users_collection.insert_one(new_user)
-        new_id = str(result.inserted_id)
-        new_user['_id'] = new_id
-        
-        print(f'[REGISTER] User registered successfully: {new_id}, faceVerified: True')
-        
-        return jsonify({
-            "message": "User registered successfully with face verification!",
-            "userId": new_id
-        }), 201
-
-    except ValueError as e:
-        print(f'[REGISTER] ValueError: {e}')
-        return jsonify({"error": "No or multiple faces detected"}), 400
+        return _impl()
     except Exception as e:
         print(f"[REGISTER] Unhandled registration error: {e}")
         import traceback
