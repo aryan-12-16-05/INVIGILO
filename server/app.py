@@ -815,21 +815,19 @@ def analyze_frame():
             app.logger.error(f"Image processing error: {e}")
             return jsonify({"error": "Invalid image data format"}), 400
         
-        # 6. Call ML service for comprehensive frame analysis
+        # 6. Call ML service for comprehensive frame analysis (HF expects imageDataUrl)
         ml_payload = {
-            'image': image_base64,
-            'stored_embeddings': stored_embeddings,
-            'face_threshold': get_face_threshold(0.56)
+            'imageDataUrl': image_data_url
         }
-        
-        ml_result = call_ml_service('/analyze-frame', ml_payload, timeout=30)
-        
-        if not ml_result or 'violations' not in ml_result:
+
+        ok_ml, ml_result = call_ml_service('/analyze-frame', ml_payload, timeout=30)
+
+        if not ok_ml or not isinstance(ml_result, dict) or 'violations' not in ml_result:
             app.logger.error(f"ML service returned invalid response: {ml_result}")
-            return jsonify({"error": "ML service failed to analyze frame"}), 500
+            return jsonify({"error": "ML service failed to analyze frame", "detail": (ml_result or {}).get('error') if isinstance(ml_result, dict) else str(ml_result)}), 502
         
         violations = ml_result['violations']
-        face_count = ml_result.get('face_count', 0)
+        face_count = ml_result.get('faceCount', ml_result.get('face_count', 0))
         total_score = ml_result.get('score', 0)
         
         # 7. Store violations in database
@@ -883,7 +881,7 @@ def get_face_threshold(default_val=0.58):
 #@limiter.limit("20 per hour")
 def verify_face():
     print('[FACE-VERIFY] Received face verification request')
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     identifier = data.get('identifier')
     role = data.get('role')
     image_data_url = data.get('imageDataUrl')
@@ -911,11 +909,10 @@ def verify_face():
     print(f'[FACE-VERIFY] User found: {user.get("name")}, has embeddings: {bool(user.get("faceEmbedding") or user.get("faceEmbeddings"))}')
 
     try:
-        # Convert image to base64 for ML service
-        if ',' in image_data_url:
-            image_base64 = image_data_url.split(',', 1)[1]
-        else:
-            image_base64 = image_data_url
+        # Normalize to data URL (HF ML service expects imageDataUrl)
+        normalized_image_data_url = image_data_url
+        if isinstance(normalized_image_data_url, str) and not normalized_image_data_url.startswith('data:'):
+            normalized_image_data_url = f"data:image/jpeg;base64,{normalized_image_data_url}"
         
         # Get stored embeddings
         stored_embeddings = []
@@ -928,31 +925,44 @@ def verify_face():
             print('[FACE-VERIFY] ERROR: No stored embeddings found')
             return jsonify({"error": "No face data stored for user"}), 404
         
-        # First, verify the face and get embedding from ML service
-        verify_payload = {
-            'image': image_base64
-        }
-        verify_result = call_ml_service('/verify-face', verify_payload, timeout=10)
-        
-        if not verify_result or 'embedding' not in verify_result:
-            print('[FACE-VERIFY] ERROR: ML service failed to generate embedding')
+        # 1) Generate embedding from current image
+        ok_verify, verify_result = call_ml_service('/verify-face', {
+            'imageDataUrl': normalized_image_data_url
+        }, timeout=15)
+
+        if not ok_verify:
+            detail = (verify_result or {}).get('error') if isinstance(verify_result, dict) else str(verify_result)
+            print(f'[FACE-VERIFY] ERROR: ML verify-face failed: {detail}')
+            return jsonify({
+                "error": "Failed to process face image",
+                "detail": detail
+            }), 400
+
+        if not isinstance(verify_result, dict) or 'embedding' not in verify_result:
+            print(f'[FACE-VERIFY] ERROR: ML verify-face returned unexpected payload: {verify_result}')
             return jsonify({"error": "Failed to process face image"}), 400
-        
+
         new_embedding = verify_result['embedding']
-        
-        # Now match against stored embeddings
-        match_payload = {
-            'embedding1': new_embedding,
-            'stored_embeddings': stored_embeddings
-        }
-        match_result = call_ml_service('/match-face', match_payload, timeout=10)
-        
-        if not match_result or 'similarity' not in match_result:
-            print('[FACE-VERIFY] ERROR: ML service failed to match faces')
-            return jsonify({"error": "Failed to verify face"}), 500
-        
-        max_sim = match_result['similarity']
-        sims = match_result.get('similarities', [max_sim])
+
+        # 2) Match against each stored embedding (HF /match-face expects embedding2)
+        similarities = []
+        for stored in stored_embeddings:
+            ok_match, match_result = call_ml_service('/match-face', {
+                'embedding1': new_embedding,
+                'embedding2': stored
+            }, timeout=10)
+            if not ok_match or not isinstance(match_result, dict) or 'similarity' not in match_result:
+                detail = (match_result or {}).get('error') if isinstance(match_result, dict) else str(match_result)
+                print(f'[FACE-VERIFY] WARNING: ML match-face failed for one sample: {detail}')
+                continue
+            similarities.append(float(match_result['similarity']))
+
+        if not similarities:
+            print('[FACE-VERIFY] ERROR: No similarities computed (match-face failed)')
+            return jsonify({"error": "Failed to verify face"}), 502
+
+        max_sim = max(similarities)
+        sims = similarities
         THRESHOLD = get_face_threshold(0.56)
         
         print(f'[FACE-VERIFY] Face verify for {identifier}: similarities={sims}, max={max_sim} thr={THRESHOLD}')
@@ -1128,19 +1138,23 @@ def proctor_activity():
             
             if stored_embeddings:
                 # Generate embedding from current frame via ML service
-                verify_payload = {'image': frame_base64}
-                verify_result = call_ml_service('/verify-face', verify_payload, timeout=10)
-                
-                if verify_result and 'embedding' in verify_result:
+                # HF expects imageDataUrl. frame_base64 is base64; wrap as data URL.
+                verify_payload = {'imageDataUrl': f"data:image/jpeg;base64,{frame_base64}"}
+                ok_verify, verify_result = call_ml_service('/verify-face', verify_payload, timeout=15)
+
+                if ok_verify and isinstance(verify_result, dict) and 'embedding' in verify_result:
                     # Match against stored embeddings
-                    match_payload = {
-                        'embedding1': verify_result['embedding'],
-                        'stored_embeddings': stored_embeddings
-                    }
-                    match_result = call_ml_service('/match-face', match_payload, timeout=10)
-                    
-                    if match_result and 'similarity' in match_result:
-                        similarity_score = float(match_result['similarity'])
+                    sims = []
+                    for stored in stored_embeddings:
+                        ok_match, match_result = call_ml_service('/match-face', {
+                            'embedding1': verify_result['embedding'],
+                            'embedding2': stored
+                        }, timeout=10)
+                        if ok_match and isinstance(match_result, dict) and 'similarity' in match_result:
+                            sims.append(float(match_result['similarity']))
+
+                    if sims:
+                        similarity_score = max(sims)
                         THRESH_P = get_face_threshold(0.56)
                         identity_verified = similarity_score >= THRESH_P
                         app.logger.info(f'Proctor identity for {user_id}: similarity={similarity_score} threshold={THRESH_P}')
@@ -3372,10 +3386,10 @@ def add_face_samples(user_id):
                 img_base64 = base64.b64encode(buffer).decode('utf-8')
                 
                 # Call ML service to generate embedding
-                verify_payload = {'image': img_base64}
-                verify_result = call_ml_service('/verify-face', verify_payload, timeout=10)
-                
-                if verify_result and 'embedding' in verify_result:
+                verify_payload = {'imageDataUrl': f"data:image/jpeg;base64,{img_base64}"}
+                ok_verify, verify_result = call_ml_service('/verify-face', verify_payload, timeout=15)
+
+                if ok_verify and isinstance(verify_result, dict) and 'embedding' in verify_result:
                     emb = verify_result['embedding']
                     new_vecs.append(emb)
                 else:
