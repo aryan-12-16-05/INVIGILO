@@ -510,7 +510,12 @@ def register_user():
         print('[REGISTER] ERROR: DB not configured (MONGO_URI missing)')
         return db_err
 
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict) or not data:
+        return jsonify({
+            "error": "invalid_json",
+            "message": "Request body must be JSON (Content-Type: application/json)."
+        }), 400
     print(f'[REGISTER] User: {data.get("fullName")}, Email: {data.get("email")}, Role: {data.get("role")}')
     
     # imageDataUrl (single) OR imageDataUrls (list) is required for face enrollment
@@ -660,7 +665,12 @@ def register_user():
 @app.route('/api/login', methods=['POST'])
 #@limiter.limit("10 per hour")
 def login_user():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict) or not data:
+        return jsonify({
+            "error": "invalid_json",
+            "message": "Request body must be JSON (Content-Type: application/json)."
+        }), 400
     identifier, password, role = data.get('identifier'), data.get('password'), data.get('role')
     if not all([identifier, password, role]):
         return jsonify({"error": "Missing fields"}), 400
