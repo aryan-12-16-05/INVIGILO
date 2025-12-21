@@ -3,6 +3,7 @@ Flask-Cors
 flask-limiter==3.5.0
 flask-socketio
 gunicorn
+eventlet==0.36.1
 gevent
 gevent-websocket
 python-socketio

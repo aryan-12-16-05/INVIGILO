@@ -140,11 +140,13 @@ CORS(app, resources={
 })
 
 # ✅ Initialize WebSocket for Real-Time Proctor Updates
+# Let Flask-SocketIO auto-detect the best async mode based on installed deps
+# (eventlet/gevent/threading). You can override via SOCKETIO_ASYNC_MODE.
+_socketio_async_mode = os.getenv('SOCKETIO_ASYNC_MODE', '').strip() or None
 socketio = SocketIO(
     app,
     cors_allowed_origins=ALLOWED_ORIGINS,
-    # Use gevent for async mode (compatible with modern Python + PyMongo)
-    async_mode='gevent',
+    async_mode=_socketio_async_mode,
     logger=True,
     engineio_logger=False,
     ping_timeout=60,
