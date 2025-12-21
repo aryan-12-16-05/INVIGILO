@@ -876,6 +876,24 @@ def get_face_threshold(default_val=0.58):
     except Exception:
         return float(default_val)
 
+
+def _cosine_similarity(vec_a, vec_b):
+    """Cosine similarity between two embedding vectors.
+
+    Returns None if vectors are invalid.
+    """
+    try:
+        a = np.asarray(vec_a, dtype=np.float32).reshape(-1)
+        b = np.asarray(vec_b, dtype=np.float32).reshape(-1)
+        if a.size == 0 or b.size == 0 or a.shape != b.shape:
+            return None
+        denom = (np.linalg.norm(a) * np.linalg.norm(b))
+        if denom == 0:
+            return None
+        return float(np.dot(a, b) / denom)
+    except Exception:
+        return None
+
 # ✅ FACE VERIFICATION
 @app.route('/api/verify-face', methods=['POST'])
 #@limiter.limit("20 per hour")
@@ -944,22 +962,19 @@ def verify_face():
 
         new_embedding = verify_result['embedding']
 
-        # 2) Match against each stored embedding (HF /match-face expects embedding2)
+        # 2) Match locally (avoid HF /match-face dependency)
         similarities = []
         for stored in stored_embeddings:
-            ok_match, match_result = call_ml_service('/match-face', {
-                'embedding1': new_embedding,
-                'embedding2': stored
-            }, timeout=10)
-            if not ok_match or not isinstance(match_result, dict) or 'similarity' not in match_result:
-                detail = (match_result or {}).get('error') if isinstance(match_result, dict) else str(match_result)
-                print(f'[FACE-VERIFY] WARNING: ML match-face failed for one sample: {detail}')
-                continue
-            similarities.append(float(match_result['similarity']))
+            sim = _cosine_similarity(new_embedding, stored)
+            if sim is not None:
+                similarities.append(sim)
 
         if not similarities:
-            print('[FACE-VERIFY] ERROR: No similarities computed (match-face failed)')
-            return jsonify({"error": "Failed to verify face"}), 502
+            print('[FACE-VERIFY] ERROR: No similarities computed (invalid embeddings)')
+            return jsonify({
+                "error": "Failed to verify face",
+                "detail": "No valid stored embeddings to compare"
+            }), 400
 
         max_sim = max(similarities)
         sims = similarities
@@ -1138,20 +1153,15 @@ def proctor_activity():
             
             if stored_embeddings:
                 # Generate embedding from current frame via ML service
-                # HF expects imageDataUrl. frame_base64 is base64; wrap as data URL.
                 verify_payload = {'imageDataUrl': f"data:image/jpeg;base64,{frame_base64}"}
                 ok_verify, verify_result = call_ml_service('/verify-face', verify_payload, timeout=15)
 
                 if ok_verify and isinstance(verify_result, dict) and 'embedding' in verify_result:
-                    # Match against stored embeddings
                     sims = []
                     for stored in stored_embeddings:
-                        ok_match, match_result = call_ml_service('/match-face', {
-                            'embedding1': verify_result['embedding'],
-                            'embedding2': stored
-                        }, timeout=10)
-                        if ok_match and isinstance(match_result, dict) and 'similarity' in match_result:
-                            sims.append(float(match_result['similarity']))
+                        sim = _cosine_similarity(verify_result['embedding'], stored)
+                        if sim is not None:
+                            sims.append(sim)
 
                     if sims:
                         similarity_score = max(sims)
@@ -1159,7 +1169,7 @@ def proctor_activity():
                         identity_verified = similarity_score >= THRESH_P
                         app.logger.info(f'Proctor identity for {user_id}: similarity={similarity_score} threshold={THRESH_P}')
                     else:
-                        app.logger.warning('ML service face matching failed')
+                        app.logger.warning('Local face matching failed (invalid embeddings)')
                 else:
                     app.logger.warning('ML service face verification failed')
             else:
