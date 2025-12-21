@@ -26,6 +26,7 @@ from PIL import Image
 import io
 import hmac
 import hashlib
+from werkzeug.exceptions import HTTPException
 
 def _bool_env(name: str, default: str = "0") -> bool:
     v = os.getenv(name, default)
@@ -83,6 +84,9 @@ def call_ml_service(endpoint: str, payload: dict, timeout: int = ML_SERVICE_TIME
 # --- Setup ---
 load_dotenv()
 app = Flask(__name__)
+
+# Build/version identifier (useful to confirm Render is running the latest code)
+APP_BUILD_ID = os.getenv("APP_BUILD_ID", "2025-12-21-render-debug")
 
 app.secret_key = os.getenv('FLASK_SECRET_KEY', os.getenv('SECRET_KEY', 'dev-secret-change-me'))
 
@@ -169,6 +173,45 @@ def health():
         "startedAt": APP_START.isoformat() + "Z",
         "time": datetime.datetime.utcnow().isoformat() + "Z",
     }), 200
+
+
+@app.route('/api/version', methods=['GET'])
+def version():
+    """Expose a small version payload for debugging deployments."""
+    return jsonify({
+        "service": "invigilo-server",
+        "buildId": APP_BUILD_ID,
+        "time": datetime.datetime.utcnow().isoformat() + "Z",
+        "mlServiceUrlConfigured": bool(os.getenv("ML_SERVICE_URL", "").strip()),
+        "mongoConfigured": bool(os.getenv("MONGO_URI", "").strip())
+    }), 200
+
+
+@app.errorhandler(Exception)
+def handle_unhandled_exception(e):
+    """Return JSON for API routes and log the full traceback.
+
+    This prevents generic HTML 500 pages from hiding the real error.
+    """
+    # If it's an HTTPException (e.g. 404), keep its status code.
+    status_code = 500
+    detail = str(e)
+    if isinstance(e, HTTPException):
+        status_code = e.code or 500
+        detail = e.description
+
+    app.logger.exception("Unhandled exception on %s %s", request.method, request.path)
+
+    if request.path.startswith('/api/') or request.path in {'/register', '/login'}:
+        return jsonify({
+            "error": "internal_server_error" if status_code >= 500 else "http_error",
+            "detail": detail,
+            "status": status_code,
+            "path": request.path
+        }), status_code
+
+    # Non-API routes: return a simple text response.
+    return "Internal Server Error", status_code
 
 # Rate limit error handler
 @app.errorhandler(429)
