@@ -8,4 +8,3 @@ imutils
 insightface
 onnxruntime
 gunicorn
-gradio==4.44.0

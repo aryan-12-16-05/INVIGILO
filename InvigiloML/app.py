@@ -72,6 +72,32 @@ def health():
     }), 200
 
 
+@app.route('/', methods=['GET'])
+def index():
+        """Simple homepage for Hugging Face Spaces."""
+        html = """<!doctype html>
+<html lang=\"en\">
+    <head>
+        <meta charset=\"utf-8\" />
+        <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+        <title>InvigiloML</title>
+    </head>
+    <body style=\"font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 24px;\">
+        <h1 style=\"margin: 0 0 8px;\">InvigiloML</h1>
+        <p style=\"margin: 0 0 16px;\">ML service for the Invigilo proctoring system.</p>
+        <h2 style=\"margin: 16px 0 8px; font-size: 16px;\">Available endpoints</h2>
+        <ul style=\"margin: 0 0 16px;\">
+            <li>GET /health</li>
+            <li>POST /verify-face</li>
+            <li>POST /match-face</li>
+            <li>POST /analyze-frame</li>
+        </ul>
+        <p style=\"margin: 0;\">Tip: open <a href=\"/health\">/health</a> to confirm the container is running.</p>
+    </body>
+</html>"""
+        return html, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
 @app.route('/verify-face', methods=['POST'])
 def verify_face():
     """
@@ -246,33 +272,7 @@ def analyze_frame():
         return jsonify({"error": str(e)}), 500
 
 
-# Gradio interface for HF Spaces
-import gradio as gr
-import threading
-
-def health_check():
-    """Simple health check interface"""
-    return "✅ ML Service is running!\n\nEndpoints available:\n- POST /verify-face\n- POST /match-face\n- POST /analyze-frame\n- GET /health"
-
-# Create Gradio interface
-demo = gr.Interface(
-    fn=health_check,
-    inputs=None,
-    outputs=gr.Textbox(label="Service Status"),
-    title="InvigiloML - Face Recognition & Proctoring Service",
-    description="ML service for Invigilo proctoring system. Use the API endpoints for face verification and proctoring analysis."
-)
-
-# Run Flask in background thread
-def run_flask():
+if __name__ == '__main__':
     port = int(os.environ.get('PORT', 7860))
     print(f'[ML-SERVICE] Starting Flask on port {port}')
     app.run(host='0.0.0.0', port=port, debug=False)
-
-if __name__ == '__main__':
-    # Start Flask in background
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    
-    # Launch Gradio (HF Spaces will use this)
-    demo.launch(server_name="0.0.0.0", server_port=7860)

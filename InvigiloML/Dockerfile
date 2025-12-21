@@ -30,9 +30,6 @@ RUN pip install --no-cache-dir Flask==3.0.0 Flask-Cors==4.0.0 \
 # Install insightface separately (needs build tools)
 RUN pip install --no-cache-dir insightface
 
-# Install gradio last
-RUN pip install --no-cache-dir gradio==4.44.0
-
 # Copy application code
 COPY . .
 
