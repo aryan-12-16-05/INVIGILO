@@ -1,0 +1,11 @@
+Flask==3.0.0
+Flask-Cors==4.0.0
+numpy
+Pillow
+opencv-python
+scipy
+imutils
+insightface
+onnxruntime
+gunicorn
+gradio==4.44.0
