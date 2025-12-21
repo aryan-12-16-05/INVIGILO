@@ -7,7 +7,7 @@ gevent
 gevent-websocket
 python-socketio
 python-engineio
-pymongo[srv]==3.12.3
+pymongo[srv]==4.10.1
 bcrypt
 python-dotenv
 requests
