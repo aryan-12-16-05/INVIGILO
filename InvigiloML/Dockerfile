@@ -2,8 +2,9 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Install system dependencies (lighter - no dlib compilation needed)
+# Install system dependencies including build tools for insightface compilation
 RUN apt-get update && apt-get install -y \
+    build-essential \
     libopencv-dev \
     libopenblas-dev \
     libglib2.0-0 \
