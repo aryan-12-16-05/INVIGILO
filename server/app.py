@@ -504,19 +504,20 @@ def decode_base64_image(data_url):
 @app.route('/api/register', methods=['POST'])
 #@limiter.limit("5 per hour")
 def register_user():
-    print('[REGISTER] Received registration request')
-    db_ok, db_err = require_db()
-    if not db_ok:
-        print('[REGISTER] ERROR: DB not configured (MONGO_URI missing)')
-        return db_err
+    try:
+        print('[REGISTER] Received registration request')
+        db_ok, db_err = require_db()
+        if not db_ok:
+            print('[REGISTER] ERROR: DB not configured (MONGO_URI missing)')
+            return db_err
 
-    data = request.get_json(silent=True) or {}
-    if not isinstance(data, dict) or not data:
-        return jsonify({
-            "error": "invalid_json",
-            "message": "Request body must be JSON (Content-Type: application/json)."
-        }), 400
-    print(f'[REGISTER] User: {data.get("fullName")}, Email: {data.get("email")}, Role: {data.get("role")}')
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict) or not data:
+            return jsonify({
+                "error": "invalid_json",
+                "message": "Request body must be JSON (Content-Type: application/json)."
+            }), 400
+        print(f'[REGISTER] User: {data.get("fullName")}, Email: {data.get("email")}, Role: {data.get("role")}')
     
     # imageDataUrl (single) OR imageDataUrls (list) is required for face enrollment
     required = ['fullName', 'email', 'phoneNumber', 'roleId', 'password', 'role', 'institution', 'department']
@@ -655,37 +656,49 @@ def register_user():
         print(f'[REGISTER] ValueError: {e}')
         return jsonify({"error": "No or multiple faces detected"}), 400
     except Exception as e:
-        print(f"[REGISTER] Registration error: {e}")
+        print(f"[REGISTER] Unhandled registration error: {e}")
         import traceback
         traceback.print_exc()
-        return jsonify({"error": "Internal server error"}), 500
+        return jsonify({
+            "error": "internal_server_error",
+            "detail": str(e)
+        }), 500
 
 # ✅ LOGIN
 @app.route('/login', methods=['POST', 'OPTIONS'])
 @app.route('/api/login', methods=['POST'])
 #@limiter.limit("10 per hour")
 def login_user():
-    data = request.get_json(silent=True) or {}
-    if not isinstance(data, dict) or not data:
+    try:
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict) or not data:
+            return jsonify({
+                "error": "invalid_json",
+                "message": "Request body must be JSON (Content-Type: application/json)."
+            }), 400
+        identifier, password, role = data.get('identifier'), data.get('password'), data.get('role')
+        if not all([identifier, password, role]):
+            return jsonify({"error": "Missing fields"}), 400
+
+        user = users_collection.find_one({
+            "role": role,
+            "$or": [{"email": identifier}, {"phoneNumber": identifier},
+                    {"studentId": identifier}, {"lecturerId": identifier}]
+        })
+
+        if user and bcrypt.checkpw(password.encode('utf-8'), user['password']):
+            user = serialize_doc(user)
+            user = sanitize_user_response(user)  # Remove all sensitive fields
+            return jsonify({"message": "Login successful", "user": user}), 200
+        return jsonify({"error": "Invalid credentials"}), 401
+    except Exception as e:
+        print(f"[LOGIN] Unhandled login error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({
-            "error": "invalid_json",
-            "message": "Request body must be JSON (Content-Type: application/json)."
-        }), 400
-    identifier, password, role = data.get('identifier'), data.get('password'), data.get('role')
-    if not all([identifier, password, role]):
-        return jsonify({"error": "Missing fields"}), 400
-
-    user = users_collection.find_one({
-        "role": role,
-        "$or": [{"email": identifier}, {"phoneNumber": identifier},
-                {"studentId": identifier}, {"lecturerId": identifier}]
-    })
-
-    if user and bcrypt.checkpw(password.encode('utf-8'), user['password']):
-        user = serialize_doc(user)
-        user = sanitize_user_response(user)  # Remove all sensitive fields
-        return jsonify({"message": "Login successful", "user": user}), 200
-    return jsonify({"error": "Invalid credentials"}), 401
+            "error": "internal_server_error",
+            "detail": str(e)
+        }), 500
 
 # ✅ ANALYZE FRAME - Server-Side Violation Detection (CRITICAL)
 @app.route('/api/analyze-frame', methods=['POST'])
