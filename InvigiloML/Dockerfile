@@ -3,6 +3,7 @@
 WORKDIR /app
 
 # Install system dependencies including build tools for insightface compilation
+# Build timestamp: 2025-12-21
 RUN apt-get update && apt-get install -y \
     build-essential \
     cmake \
