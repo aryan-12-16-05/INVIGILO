@@ -500,6 +500,7 @@ def decode_base64_image(data_url):
 # --- ROUTES ---
 
 # ✅ REGISTER USER + FACE ENROLLMENT
+@app.route('/register', methods=['POST', 'OPTIONS'])
 @app.route('/api/register', methods=['POST'])
 #@limiter.limit("5 per hour")
 def register_user():
@@ -655,6 +656,7 @@ def register_user():
         return jsonify({"error": "Internal server error"}), 500
 
 # ✅ LOGIN
+@app.route('/login', methods=['POST', 'OPTIONS'])
 @app.route('/api/login', methods=['POST'])
 #@limiter.limit("10 per hour")
 def login_user():

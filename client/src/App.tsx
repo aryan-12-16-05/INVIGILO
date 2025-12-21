@@ -28,7 +28,14 @@ const cn = (...classes: (string | undefined | null | false)[]) => classes.filter
 
 // --- API URL ---
 // In production set VITE_API_URL to your deployed backend (e.g. https://<service>.onrender.com/api)
-const API_URL = (import.meta as any).env?.VITE_API_URL || 'http://127.0.0.1:5000/api';
+const RAW_API_URL = (import.meta as any).env?.VITE_API_URL || 'http://127.0.0.1:5000/api';
+const API_URL = (() => {
+    // Normalize common misconfigurations:
+    // - trailing slash: https://host/ -> https://host
+    // - missing /api: https://host -> https://host/api
+    const trimmed = String(RAW_API_URL).trim().replace(/\/+$/, '');
+    return trimmed.endsWith('/api') ? trimmed : `${trimmed}/api`;
+})();
 
 // --- MOCK INSTITUTION DATA ---
 const INSTITUTIONS: { [key: string]: string[] } = {
