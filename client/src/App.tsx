@@ -5,7 +5,7 @@ import {
     User, LogIn, ShieldCheck, Cpu, BrainCircuit,
     Timer, PlusCircle, Monitor, AlertTriangle, CheckCircle, XCircle,
     School, GraduationCap, ChevronLeft, Eye, EyeOff,
-    Lock, Users, Wifi, Mic, Video, Globe, Trash2, Unlock
+    Lock, Users, Wifi, Mic, Video, Globe, Trash2, Unlock, Edit, Save
 } from 'lucide-react';
 
 import { io, type Socket } from 'socket.io-client';
@@ -244,7 +244,7 @@ const INSTITUTIONS: { [key: string]: string[] } = {
 
 
 // --- TYPE DEFINITIONS ---
-type AppState = 'loading' | 'landing' | 'auth' | 'student-dashboard' | 'lecturer-dashboard' | 'exam' | 'result' | 'results-analysis' | 'live-proctoring' | 'help' | 'my-exams';
+type AppState = 'loading' | 'landing' | 'auth' | 'student-dashboard' | 'lecturer-dashboard' | 'exam' | 'result' | 'results-analysis' | 'live-proctoring' | 'help' | 'my-exams' | 'profile';
 type UserRole = 'student' | 'lecturer';
 type ExamStatus = 'Scheduled' | 'Available' | 'Locked' | 'Completed' | 'Live';
 type QuestionType = 'multiple-choice' | 'true-false' | 'short-answer' | 'essay';
@@ -523,6 +523,7 @@ export default function App() {
                 case 'lecturer-dashboard': return currentUser && <LecturerDashboard key="lecturer-dashboard" user={currentUser} exams={exams} onLogout={handleLogout} onBack={() => navigateTo('landing')} onExamChange={fetchExams} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} />;
             case 'live-proctoring': return currentUser && <LiveProctoring key="live-proctoring" user={currentUser} onBack={() => navigateTo(currentUser?.role === 'student' ? 'student-dashboard' : 'lecturer-dashboard')} />;
             case 'help': return <HelpPage key="help" onBack={() => navigateTo(currentUser?.role === 'student' ? 'student-dashboard' : 'lecturer-dashboard')} />;
+            case 'profile': return currentUser && <ProfilePage key="profile" user={currentUser} onLogout={handleLogout} onBack={() => navigateTo(currentUser?.role === 'student' ? 'student-dashboard' : 'lecturer-dashboard')} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} />;
             case 'exam': return currentUser && currentExam && <ExamScreen key="exam" exam={currentExam} user={currentUser} onExit={handleExamSubmit} showToast={showToast} />;
             case 'result': return lastResult && <ResultScreen key="result" result={lastResult} onDone={() => navigateTo('student-dashboard')} />;
             default: return <LandingPage key="default-landing" onNavigate={navigateTo} />;
@@ -1540,39 +1541,14 @@ const getVideoStatus = () => {
 
 
 const DashboardLayout = ({ children, user, onLogout, onBack, onAction, onUpdateUser, showToast }: { children: React.ReactNode, user: UserProfile, onLogout?: () => void, onBack: () => void, onAction?: (action: string) => void, onUpdateUser?: (u: UserProfile) => void, showToast?: (msg:string, type:'success'|'error') => void }) => {
-    const [profileOpen, setProfileOpen] = useState(false);
-    const [profileForm, setProfileForm] = useState<any>(null);
     const [faceDialogOpen, setFaceDialogOpen] = useState(false);
     const videoRef = useRef<HTMLVideoElement>(null);
     const [faceSamples, setFaceSamples] = useState<string[]>([]);
 
-    useEffect(() => {
-        setProfileForm(user ? { name: user.name, phoneNumber: user.phoneNumber, institution: user.institution, department: user.department, year: user.year, studentId: user.studentId, lecturerId: user.lecturerId } : null);
-    }, [user]);
-
     const handleAction = (action: string) => {
-        if (action === 'profile') {
-            setProfileOpen(true);
-            return;
-        }
         if (onAction) onAction(action);
     };
 
-    const saveProfile = async () => {
-        if (!profileForm) return;
-        try {
-            const res = await fetch(`${API_URL}/users/${user._id}`, {
-                method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(profileForm)
-            });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.error || 'Failed to update profile');
-            if (onUpdateUser && data.user) onUpdateUser(data.user as UserProfile);
-            setProfileOpen(false);
-            showToast?.('Profile updated', 'success');
-        } catch (err: any) {
-            showToast?.(err.message || 'Failed to update profile', 'error');
-        }
-    };
     return (
         <>
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="flex min-h-screen">
@@ -1588,69 +1564,6 @@ const DashboardLayout = ({ children, user, onLogout, onBack, onAction, onUpdateU
                 {children}
             </main>
         </motion.div>
-
-        <Dialog open={profileOpen} onOpenChange={setProfileOpen} className="max-w-6xl w-full">
-            <h2 className="text-2xl font-bold mb-6">Edit Profile</h2>
-            {profileForm && (
-                <div className="space-y-6">
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                        <div>
-                            <Label className="text-base">Name</Label>
-                            <Input className="mt-2" value={profileForm.name} onChange={(e: any) => setProfileForm((p: any) => ({ ...p, name: e.target.value }))} />
-                        </div>
-                        <div>
-                            <Label className="text-base">Phone</Label>
-                            <Input className="mt-2" value={profileForm.phoneNumber} onChange={(e: any) => setProfileForm((p: any) => ({ ...p, phoneNumber: e.target.value }))} />
-                        </div>
-                    </div>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                        <div>
-                            <Label className="text-base">Institution</Label>
-                            <Select
-                                className="mt-2"
-                                value={profileForm.institution || ''}
-                                onChange={(e: any) => setProfileForm((p: any) => ({ ...p, institution: e.target.value, department: '' }))}
-                            >
-                                <option value="">Select Institution</option>
-                                {Object.keys(INSTITUTIONS).map(inst => (
-                                    <option key={inst} value={inst}>{inst}</option>
-                                ))}
-                            </Select>
-                        </div>
-                        <div>
-                            <Label className="text-base">Department</Label>
-                            <Select
-                                className="mt-2"
-                                value={profileForm.department || ''}
-                                onChange={(e: any) => setProfileForm((p: any) => ({ ...p, department: e.target.value }))}
-                                disabled={!profileForm.institution}
-                            >
-                                <option value="">Select Department</option>
-                                {profileForm.institution && INSTITUTIONS[profileForm.institution]?.map((dept) => (
-                                    <option key={dept} value={dept}>{dept}</option>
-                                ))}
-                            </Select>
-                        </div>
-                    </div>
-                    {user.role === 'student' && (
-                        <div>
-                            <Label className="text-base">Year</Label>
-                            <Select className="mt-2" value={profileForm.year || ''} onChange={(e: any) => setProfileForm((p: any) => ({ ...p, year: e.target.value }))}>
-                                <option value="">Select Year</option>
-                                <option value="1">1</option>
-                                <option value="2">2</option>
-                                <option value="3">3</option>
-                                <option value="4">4</option>
-                            </Select>
-                        </div>
-                    )}
-                    <div className="flex justify-end space-x-3 pt-6 border-t border-slate-700 mt-6">
-                        <Button variant="outline" onClick={() => setProfileOpen(false)} className="px-6">Cancel</Button>
-                        <Button onClick={saveProfile} className="px-6">Save Changes</Button>
-                    </div>
-                </div>
-            )}
-        </Dialog>
 
         <Dialog open={faceDialogOpen} onOpenChange={setFaceDialogOpen} className="max-w-lg">
             <h2 className="text-xl font-bold mb-2">Face Samples</h2>
@@ -1697,6 +1610,188 @@ const DashboardLayout = ({ children, user, onLogout, onBack, onAction, onUpdateU
 };
 
 // --- Results Analysis Page ---
+const ProfilePage = ({ user, onLogout, onBack, showToast, onUpdateUser, navigateTo }: { user: UserProfile; onLogout: () => void; onBack: () => void; showToast: (message:string, type:'success'|'error') => void; onUpdateUser: (u: UserProfile) => void; navigateTo: (state: AppState) => void }) => {
+    const [profileForm, setProfileForm] = useState<any>({
+        name: user.name,
+        phoneNumber: user.phoneNumber,
+        institution: user.institution,
+        department: user.department,
+        year: user.year,
+        studentId: user.studentId,
+        lecturerId: user.lecturerId
+    });
+    const [isEditing, setIsEditing] = useState(false);
+
+    const saveProfile = async () => {
+        try {
+            const res = await fetch(`${API_URL}/users/${user._id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(profileForm)
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Failed to update profile');
+            if (onUpdateUser && data.user) onUpdateUser(data.user as UserProfile);
+            setIsEditing(false);
+            showToast('Profile updated successfully', 'success');
+        } catch (err: any) {
+            showToast(err.message || 'Failed to update profile', 'error');
+        }
+    };
+
+    return (
+        <DashboardLayout user={user} onLogout={onLogout} onBack={onBack} showToast={showToast} onUpdateUser={onUpdateUser} onAction={(a) => {
+            if (a === 'dashboard') { navigateTo(user.role === 'student' ? 'student-dashboard' : 'lecturer-dashboard'); return; }
+            if (a === 'my-exams') { navigateTo('my-exams'); return; }
+            if (a === 'results') { navigateTo('results-analysis'); return; }
+            if (a === 'help') { navigateTo('help'); return; }
+        }}>
+            <div className="max-w-5xl mx-auto space-y-6">
+                <div className="flex items-center justify-between">
+                    <h1 className="text-3xl font-bold text-white">Profile Settings</h1>
+                    {!isEditing && (
+                        <Button onClick={() => setIsEditing(true)}>
+                            <Edit className="h-4 w-4 mr-2" /> Edit Profile
+                        </Button>
+                    )}
+                </div>
+
+                <Card className="p-8 bg-slate-900 border-slate-800">
+                    <div className="space-y-8">
+                        {/* Account Information */}
+                        <div>
+                            <h2 className="text-xl font-semibold text-white mb-6 flex items-center">
+                                <User className="h-5 w-5 mr-2" />
+                                Account Information
+                            </h2>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div>
+                                    <Label className="text-base text-slate-300">Email</Label>
+                                    <Input className="mt-2 bg-slate-800/50" value={user.email} disabled />
+                                    <p className="text-xs text-slate-500 mt-1">Email cannot be changed</p>
+                                </div>
+                                <div>
+                                    <Label className="text-base text-slate-300">Role</Label>
+                                    <Input className="mt-2 bg-slate-800/50 capitalize" value={user.role} disabled />
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Personal Information */}
+                        <div className="border-t border-slate-800 pt-8">
+                            <h2 className="text-xl font-semibold text-white mb-6">Personal Information</h2>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div>
+                                    <Label className="text-base text-slate-300">Full Name</Label>
+                                    <Input
+                                        className="mt-2"
+                                        value={profileForm.name}
+                                        onChange={(e: any) => setProfileForm((p: any) => ({ ...p, name: e.target.value }))}
+                                        disabled={!isEditing}
+                                    />
+                                </div>
+                                <div>
+                                    <Label className="text-base text-slate-300">Phone Number</Label>
+                                    <Input
+                                        className="mt-2"
+                                        value={profileForm.phoneNumber}
+                                        onChange={(e: any) => setProfileForm((p: any) => ({ ...p, phoneNumber: e.target.value }))}
+                                        disabled={!isEditing}
+                                    />
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Institution Details */}
+                        <div className="border-t border-slate-800 pt-8">
+                            <h2 className="text-xl font-semibold text-white mb-6">Institution Details</h2>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div>
+                                    <Label className="text-base text-slate-300">Institution</Label>
+                                    <Select
+                                        className="mt-2"
+                                        value={profileForm.institution || ''}
+                                        onChange={(e: any) => setProfileForm((p: any) => ({ ...p, institution: e.target.value, department: '' }))}
+                                        disabled={!isEditing}
+                                    >
+                                        <option value="">Select Institution</option>
+                                        {Object.keys(INSTITUTIONS).map(inst => (
+                                            <option key={inst} value={inst}>{inst}</option>
+                                        ))}
+                                    </Select>
+                                </div>
+                                <div>
+                                    <Label className="text-base text-slate-300">Department</Label>
+                                    <Select
+                                        className="mt-2"
+                                        value={profileForm.department || ''}
+                                        onChange={(e: any) => setProfileForm((p: any) => ({ ...p, department: e.target.value }))}
+                                        disabled={!isEditing || !profileForm.institution}
+                                    >
+                                        <option value="">Select Department</option>
+                                        {profileForm.institution && INSTITUTIONS[profileForm.institution]?.map((dept) => (
+                                            <option key={dept} value={dept}>{dept}</option>
+                                        ))}
+                                    </Select>
+                                </div>
+                                {user.role === 'student' && (
+                                    <div>
+                                        <Label className="text-base text-slate-300">Year</Label>
+                                        <Select
+                                            className="mt-2"
+                                            value={profileForm.year || ''}
+                                            onChange={(e: any) => setProfileForm((p: any) => ({ ...p, year: e.target.value }))}
+                                            disabled={!isEditing}
+                                        >
+                                            <option value="">Select Year</option>
+                                            <option value="1">1</option>
+                                            <option value="2">2</option>
+                                            <option value="3">3</option>
+                                            <option value="4">4</option>
+                                        </Select>
+                                    </div>
+                                )}
+                                <div>
+                                    <Label className="text-base text-slate-300">{user.role === 'student' ? 'Student ID' : 'Lecturer ID'}</Label>
+                                    <Input
+                                        className="mt-2 bg-slate-800/50"
+                                        value={user.role === 'student' ? user.studentId : user.lecturerId}
+                                        disabled
+                                    />
+                                    <p className="text-xs text-slate-500 mt-1">ID cannot be changed</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Action Buttons */}
+                        {isEditing && (
+                            <div className="flex justify-end space-x-3 pt-6 border-t border-slate-800">
+                                <Button variant="outline" onClick={() => {
+                                    setProfileForm({
+                                        name: user.name,
+                                        phoneNumber: user.phoneNumber,
+                                        institution: user.institution,
+                                        department: user.department,
+                                        year: user.year,
+                                        studentId: user.studentId,
+                                        lecturerId: user.lecturerId
+                                    });
+                                    setIsEditing(false);
+                                }} className="px-6">
+                                    Cancel
+                                </Button>
+                                <Button onClick={saveProfile} className="px-6">
+                                    <Save className="h-4 w-4 mr-2" /> Save Changes
+                                </Button>
+                            </div>
+                        )}
+                    </div>
+                </Card>
+            </div>
+        </DashboardLayout>
+    );
+};
+
 const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, onUpdateUser, navigateTo }: { user: UserProfile; exams: Exam[]; onLogout: () => void; onBack: () => void; showToast: (message:string, type:'success'|'error') => void; onUpdateUser: (u: UserProfile) => void; navigateTo: (state: AppState) => void }) => {
     const [selectedExam, setSelectedExam] = useState<Exam | null>(null);
     const [resultAttempt, setResultAttempt] = useState<any>(null);
@@ -2166,7 +2261,7 @@ const StudentDashboard = ({ user, exams, onLogout, onStartExam, onBack, showToas
         if (a === 'my-exams') { navigateTo('my-exams'); return; }
         if (a === 'results') { navigateTo('results-analysis'); return; }
         if (a === 'help') { navigateTo('help'); return; }
-        if (a === 'profile') { /* handled in DashboardLayout */ return; }
+        if (a === 'profile') { navigateTo('profile'); return; }
     }}>
             <Card className="p-4 mb-8 bg-slate-900 border-slate-800">
                 <div className="flex justify-between items-center">
@@ -2433,7 +2528,7 @@ const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showTo
         if (a === 'create-exam') { setCreateExamOpen(true); return; }
         if (a === 'live-proctoring') { navigateTo('live-proctoring'); return; }
         if (a === 'help') { navigateTo('help'); return; }
-        if (a === 'profile') { /* DashboardLayout handles */ return; }
+        if (a === 'profile') { navigateTo('profile'); return; }
     }}>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
                 <StatCard title="Total Students" value={adminStats.totalStudents} icon={<Users className="h-6 w-6 text-indigo-300"/>} colorClass="border-indigo-500/50" />
