@@ -17,7 +17,11 @@ export default function Sidebar({ user, onAction, onLogout }: { user: any; onAct
   // Live alerts for lecturers
   const [alerts, setAlerts] = useState<any[]>([]);
   const lastTsRef = useRef<string | null>(null);
-  const API_URL = 'http://127.0.0.1:5000/api';
+  const RAW_API_URL = (import.meta as any).env?.VITE_API_URL || 'http://127.0.0.1:5000/api';
+  const API_URL = (() => {
+    const trimmed = String(RAW_API_URL).trim().replace(/\/+$/, '');
+    return trimmed.endsWith('/api') ? trimmed : `${trimmed}/api`;
+  })();
   useEffect(() => {
     if (user?.role !== 'lecturer') return;
     let timer: any;

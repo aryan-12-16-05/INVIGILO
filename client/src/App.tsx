@@ -4760,7 +4760,9 @@ const LiveProctoring = ({ user, onBack }: { user: UserProfile; onBack: () => voi
                 socketRef.current.disconnect();
                 socketRef.current = null;
             }
-            const s = io('http://127.0.0.1:5000/proctor', {
+            // Extract base URL from API_URL (remove /api suffix)
+            const baseUrl = API_URL.replace(/\/api$/, '');
+            const s = io(`${baseUrl}/proctor`, {
                 transports: ['websocket'],
             });
             socketRef.current = s;

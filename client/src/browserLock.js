@@ -17,10 +17,11 @@
  */
 
 class BrowserLock {
-  constructor(examId, userId, serverUrl = 'http://localhost:5000') {
+  constructor(examId, userId, serverUrl = window.location.origin) {
     this.examId = examId;
     this.userId = userId;
-    this.serverUrl = serverUrl;
+    // Remove /api suffix if present to get base URL
+    this.serverUrl = serverUrl.replace(/\/api$/, '');
     this.isEnabled = false;
     this.listeners = [];
     this.warningCount = 0;
