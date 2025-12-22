@@ -609,7 +609,7 @@ const LandingPage = ({ onNavigate }: { onNavigate: (state: AppState, role: UserR
                 >
                     Next-generation AI proctoring for secure, fair, and intelligent online examinations.
                 </motion.p>
-                <div className="grid md:grid-cols-2 gap-8 max-w-4xl mx-auto">
+                <div className="grid md:grid-cols-3 gap-6 max-w-6xl mx-auto">
                     <AnimatedCard delay={0.4}>
                         <div className="flex flex-col items-center text-center">
                             <div className="p-4 bg-indigo-500/10 rounded-full mb-4">
@@ -631,6 +631,18 @@ const LandingPage = ({ onNavigate }: { onNavigate: (state: AppState, role: UserR
                             <p className="text-slate-400 mb-6">Create exams, generate questions with AI, monitor students, and analyze results.</p>
                             <Button className="w-full bg-purple-600 hover:bg-purple-500 shadow-purple-500/30" onClick={() => onNavigate('auth', 'lecturer')}>
                                 Enter as Lecturer <User className="ml-2 h-4 w-4" />
+                            </Button>
+                        </div>
+                    </AnimatedCard>
+                    <AnimatedCard delay={0.8}>
+                        <div className="flex flex-col items-center text-center">
+                            <div className="p-4 bg-sky-500/10 rounded-full mb-4">
+                                <ShieldCheck className="h-12 w-12 text-sky-300" />
+                            </div>
+                            <h3 className="text-2xl font-bold mb-2">Admin Panel</h3>
+                            <p className="text-slate-400 mb-6">Manage system settings, view statistics, and oversee all platform activities.</p>
+                            <Button className="w-full bg-sky-600 hover:bg-sky-500 shadow-sky-500/30" onClick={() => onNavigate('auth', 'admin')}>
+                                Enter as Admin <ShieldCheck className="ml-2 h-4 w-4" />
                             </Button>
                         </div>
                     </AnimatedCard>
