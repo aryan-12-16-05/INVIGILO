@@ -245,7 +245,7 @@ const INSTITUTIONS: { [key: string]: string[] } = {
 
 // --- TYPE DEFINITIONS ---
 type AppState = 'loading' | 'landing' | 'auth' | 'student-dashboard' | 'lecturer-dashboard' | 'exam' | 'result' | 'results-analysis' | 'live-proctoring' | 'help' | 'my-exams' | 'profile';
-type UserRole = 'student' | 'lecturer';
+type UserRole = 'student' | 'lecturer' | 'admin';
 type ExamStatus = 'Scheduled' | 'Available' | 'Locked' | 'Completed' | 'Live';
 type QuestionType = 'multiple-choice' | 'true-false' | 'short-answer' | 'essay';
 
