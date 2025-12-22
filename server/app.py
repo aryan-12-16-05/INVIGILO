@@ -2050,22 +2050,22 @@ def get_exams():
             completed_by = exam.get('completedBy', []) or []
             exam_safe['completedByUser'] = str(user_id) in [str(x) for x in completed_by]
 
-            # compute canStart for this user: only if not completed and within scheduled window or status Available
+            # compute canStart for this user: only if not completed and within scheduled window or status Available/Live
             def within_window(ex):
                 try:
                     date = datetime.datetime.fromisoformat(ex.get('scheduledDate')) if ex.get('scheduledDate') else None
                     if not date:
-                        return ex.get('status') == 'Available'
+                        return ex.get('status') in ['Available', 'Live']
                     sh, sm = (ex.get('startTime') or '00:00').split(':')
                     eh, em = (ex.get('endTime') or '23:59').split(':')
                     start = datetime.datetime(date.year, date.month, date.day, int(sh or 0), int(sm or 0))
                     end = datetime.datetime(date.year, date.month, date.day, int(eh or 23), int(em or 59))
-                    now = datetime.datetime.utcnow()
+                    now = datetime.datetime.now()  # Use local time instead of UTC
                     return now >= start and now <= end
                 except Exception:
                     return False
 
-            exam_safe['canStartForUser'] = (exam_safe.get('status') == 'Available' or within_window(exam)) and not exam_safe['completedByUser']
+            exam_safe['canStartForUser'] = (exam_safe.get('status') in ['Available', 'Live'] or within_window(exam)) and not exam_safe['completedByUser']
 
         all_exams.append(exam_safe)
 
