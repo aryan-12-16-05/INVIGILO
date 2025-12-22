@@ -5,7 +5,7 @@ import {
     User, LogIn, ShieldCheck, Cpu, BrainCircuit,
     Timer, PlusCircle, Monitor, AlertTriangle, CheckCircle, XCircle,
     School, GraduationCap, ChevronLeft, Eye, EyeOff,
-    Lock, Users, Wifi, Mic, Video, Globe, Trash2, Unlock, Edit, Save
+    Lock, Users, Wifi, Mic, Video, Globe, Trash2, Unlock, Edit, Save, Play
 } from 'lucide-react';
 
 // Import new proctoring components
@@ -2562,6 +2562,21 @@ const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showTo
         }
     };
 
+    const handleChangeStatus = async (exam: Exam, newStatus: string) => {
+        try {
+            const res = await fetch(`${API_URL}/exams/${exam._id}/status`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ status: newStatus })
+            });
+            if (!res.ok) throw new Error('Failed to update exam status');
+            showToast(`Exam status changed to ${newStatus}`, 'success');
+            onExamChange();
+        } catch (error: any) {
+            showToast(error.message, 'error');
+        }
+    };
+
 
     const StatCard = ({ title, value, icon, colorClass }: { title: string, value: string | number, icon: React.ReactNode, colorClass: string }) => (
         <Card className={cn("p-4 flex items-center space-x-4", colorClass)}>
@@ -2653,7 +2668,22 @@ const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showTo
                         </div>
                         <div>
                             <p className="text-xs text-slate-400">Status</p>
-                            <Badge variant={exam.status === 'Live' ? 'live' : 'info'}>{exam.status}</Badge>
+                            <select
+                                value={exam.status}
+                                onChange={(e) => handleChangeStatus(exam, e.target.value)}
+                                className={cn(
+                                    'px-3 py-1 rounded-full text-xs font-semibold border-0 focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer',
+                                    exam.status === 'Live' && 'bg-green-900/30 text-green-300',
+                                    exam.status === 'Available' && 'bg-blue-900/30 text-blue-300',
+                                    exam.status === 'Scheduled' && 'bg-slate-700 text-slate-300',
+                                    exam.status === 'Locked' && 'bg-red-900/30 text-red-300'
+                                )}
+                            >
+                                <option value="Scheduled">Scheduled</option>
+                                <option value="Available">Available</option>
+                                <option value="Live">Live</option>
+                                <option value="Locked">Locked</option>
+                            </select>
                         </div>
                             <div className="flex justify-end items-center space-x-1">
                             <Button variant="ghost" size="sm" onClick={() => { setExamToEdit(exam); setCreateExamOpen(true); }} title="Edit Exam">
