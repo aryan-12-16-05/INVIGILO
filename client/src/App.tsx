@@ -2554,9 +2554,13 @@ const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showTo
         </Card>
     );
 
-    // Fetch admin stats for lecturer dashboard
+    // Fetch admin stats for lecturer dashboard (only if admin role)
     useEffect(() => {
         const fetchStats = async () => {
+            // Skip if not admin to avoid 403 errors
+            if (user.role !== 'admin') {
+                return;
+            }
             try {
                 const res = await fetch(`${API_URL}/admin/stats`, { headers: { 'Content-Type': 'application/json', 'X-User-Id': user._id } });
                 const data = await res.json();
@@ -2568,7 +2572,7 @@ const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showTo
             }
         };
         fetchStats();
-    }, [user._id]);
+    }, [user._id, user.role]);
 
     const fetchReport = async (examId: string, examTitle?: string) => {
         try {
