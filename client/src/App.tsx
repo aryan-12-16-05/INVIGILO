@@ -12,6 +12,7 @@ import {
 import LecturerProctoringMonitor from './components/LecturerProctoringMonitor';
 import LecturerExamReport from './components/LecturerExamReport';
 import LecturerLiveExamsList from './components/LecturerLiveExamsList';
+import LiveMonitoringDashboard from './components/LiveMonitoringDashboard';
 
 import { io, type Socket } from 'socket.io-client';
 
@@ -249,7 +250,7 @@ const INSTITUTIONS: { [key: string]: string[] } = {
 
 
 // --- TYPE DEFINITIONS ---
-type AppState = 'loading' | 'landing' | 'auth' | 'student-dashboard' | 'lecturer-dashboard' | 'exam' | 'result' | 'results-analysis' | 'live-proctoring' | 'help' | 'my-exams' | 'profile' | 'lecturer-proctor' | 'lecturer-report' | 'lecturer-live-exams';
+type AppState = 'loading' | 'landing' | 'auth' | 'student-dashboard' | 'lecturer-dashboard' | 'exam' | 'result' | 'results-analysis' | 'live-proctoring' | 'help' | 'my-exams' | 'profile' | 'lecturer-proctor' | 'lecturer-report' | 'lecturer-live-exams' | 'lecturer-live-monitor';
 type UserRole = 'student' | 'lecturer' | 'admin';
 type ExamStatus = 'Scheduled' | 'Available' | 'Locked' | 'Completed' | 'Live';
 type QuestionType = 'multiple-choice' | 'true-false' | 'short-answer' | 'essay';
@@ -441,6 +442,7 @@ export default function App() {
     const [currentExam, setCurrentExam] = useState<Exam | null>(null);
     const [lastResult, setLastResult] = useState<ExamResult | null>(null);
     const [selectedExamIdForProctoring, setSelectedExamIdForProctoring] = useState<string>('');
+    const [selectedExamTitle, setSelectedExamTitle] = useState<string>('');
 
     useEffect(() => {
         const timer = setTimeout(() => setAppState('landing'), 1500);
@@ -535,7 +537,8 @@ export default function App() {
             case 'my-exams': return currentUser && <MyExamsPage key="my-exams" user={currentUser} exams={exams} onLogout={handleLogout} onStartExam={handleStartExam} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} />;
             case 'results-analysis': return currentUser && <ResultsAnalysisPage key="results-analysis" user={currentUser} exams={exams} onLogout={handleLogout} onBack={() => navigateTo('student-dashboard')} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} />;
                 case 'lecturer-dashboard': return currentUser && <LecturerDashboard key="lecturer-dashboard" user={currentUser} exams={exams} onLogout={handleLogout} onBack={() => navigateTo('landing')} onExamChange={fetchExams} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} setSelectedExamIdForProctoring={setSelectedExamIdForProctoring} />;
-            case 'lecturer-live-exams': return currentUser && <LecturerLiveExamsList key="lecturer-live-exams" lecturerId={currentUser._id} onBack={() => navigateTo('lecturer-dashboard')} onSelectExam={(examId) => { setSelectedExamIdForProctoring(examId); navigateTo('lecturer-proctor'); }} />;
+            case 'lecturer-live-exams': return currentUser && <LecturerLiveExamsList key="lecturer-live-exams" lecturerId={currentUser._id} onBack={() => navigateTo('lecturer-dashboard')} onSelectExam={(examId, examTitle) => { setSelectedExamIdForProctoring(examId); setSelectedExamTitle(examTitle); navigateTo('lecturer-live-monitor'); }} />;
+            case 'lecturer-live-monitor': return currentUser && selectedExamIdForProctoring && <LiveMonitoringDashboard key="lecturer-live-monitor" examId={selectedExamIdForProctoring} examTitle={selectedExamTitle} onBack={() => navigateTo('lecturer-live-exams')} />;
             case 'lecturer-proctor': return currentUser && selectedExamIdForProctoring && <LecturerProctoringMonitor key="lecturer-proctor" examId={selectedExamIdForProctoring} onBack={() => navigateTo('lecturer-live-exams')} showToast={showToast} />;
             case 'lecturer-report': return currentUser && selectedExamIdForProctoring && <LecturerExamReport key="lecturer-report" examId={selectedExamIdForProctoring} onBack={() => navigateTo('lecturer-dashboard')} showToast={showToast} />;
             case 'live-proctoring': return currentUser && <LiveProctoring key="live-proctoring" user={currentUser} onBack={() => navigateTo(currentUser?.role === 'student' ? 'student-dashboard' : 'lecturer-dashboard')} />;

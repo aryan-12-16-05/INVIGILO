@@ -31,7 +31,7 @@ export default function LecturerLiveExamsList({
 }: {
     lecturerId: string;
     onBack: () => void;
-    onSelectExam: (examId: string) => void;
+    onSelectExam: (examId: string, examTitle: string) => void;
 }) {
     const [liveExams, setLiveExams] = useState<Exam[]>([]);
     const [isLoading, setIsLoading] = useState(true);
@@ -116,7 +116,7 @@ export default function LecturerLiveExamsList({
                             initial={{ opacity: 0, y: 20 }}
                             animate={{ opacity: 1, y: 0 }}
                             className="bg-slate-900 border border-slate-800 rounded-lg p-6 hover:border-indigo-500 transition-all cursor-pointer"
-                            onClick={() => onSelectExam(exam._id)}
+                            onClick={() => onSelectExam(exam._id, exam.title)}
                         >
                             <div className="mb-4">
                                 <div className="flex items-start justify-between mb-2">
@@ -149,7 +149,7 @@ export default function LecturerLiveExamsList({
                             <button
                                 onClick={(e) => {
                                     e.stopPropagation();
-                                    onSelectExam(exam._id);
+                                    onSelectExam(exam._id, exam.title);
                                 }}
                                 className="w-full px-4 py-2 bg-indigo-600 hover:bg-indigo-700 rounded-lg font-medium transition-colors flex items-center justify-center gap-2"
                             >
