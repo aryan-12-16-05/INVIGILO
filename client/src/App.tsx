@@ -1589,10 +1589,10 @@ const DashboardLayout = ({ children, user, onLogout, onBack, onAction, onUpdateU
             </main>
         </motion.div>
 
-        <Dialog open={profileOpen} onOpenChange={setProfileOpen} className="max-w-md">
-            <h2 className="text-xl font-bold mb-2">Edit Profile</h2>
+        <Dialog open={profileOpen} onOpenChange={setProfileOpen} className="max-w-4xl">
+            <h2 className="text-xl font-bold mb-4">Edit Profile</h2>
             {profileForm && (
-                <div className="space-y-3">
+                <div className="space-y-4">
                     <div>
                         <Label>Name</Label>
                         <Input value={profileForm.name} onChange={(e: any) => setProfileForm((p: any) => ({ ...p, name: e.target.value }))} />
@@ -1629,13 +1629,18 @@ const DashboardLayout = ({ children, user, onLogout, onBack, onAction, onUpdateU
                     {user.role === 'student' && (
                         <div>
                             <Label>Year</Label>
-                            <Input value={profileForm.year} onChange={(e: any) => setProfileForm((p: any) => ({ ...p, year: e.target.value }))} />
+                            <Select value={profileForm.year || ''} onChange={(e: any) => setProfileForm((p: any) => ({ ...p, year: e.target.value }))}>
+                                <option value="">Select Year</option>
+                                <option value="1">1</option>
+                                <option value="2">2</option>
+                                <option value="3">3</option>
+                                <option value="4">4</option>
+                            </Select>
                         </div>
                     )}
                     <div className="flex justify-end space-x-2 pt-2">
                         <Button variant="outline" onClick={() => setProfileOpen(false)}>Cancel</Button>
                         <Button onClick={saveProfile}>Save</Button>
-                        <Button variant="secondary" onClick={() => setFaceDialogOpen(true)}>Manage Face Samples</Button>
                     </div>
                 </div>
             )}
@@ -1908,7 +1913,7 @@ const MyExamsPage = ({ user, exams, onLogout, onStartExam, showToast, onUpdateUs
 
     const upcomingExams = userExams.filter(e => 
         ((e.status === 'Scheduled' || e.status === 'Available' || e.status === 'Live' || e.status === 'Locked') && !isExpired(e)) &&
-        !(e as any).completedByUser
+        !(e as any).completedByUser && !(e as any).attemptForUser
     );
     const finishedExams = userExams.filter(e => (e as any).attemptForUser || (e as any).completedByUser);
 
@@ -1991,7 +1996,7 @@ const MyExamsPage = ({ user, exams, onLogout, onStartExam, showToast, onUpdateUs
                                         <div className="flex space-x-2">
                                             <Button variant="outline" onClick={() => openDetails(exam)}>Details</Button>
                                             {(() => {
-                                                const completed = (exam as any).completedByUser;
+                                                const completed = (exam as any).completedByUser || (exam as any).attemptForUser;
                                                 const serverCanStart = (exam as any).canStartForUser;
                                                 const canStart = serverCanStart !== undefined ? serverCanStart : (exam.status === 'Available' || exam.status === 'Live' || isWithinWindow(exam));
                                                 
@@ -2202,7 +2207,7 @@ const StudentDashboard = ({ user, exams, onLogout, onStartExam, onBack, showToas
                                     </div>
                                         {(() => {
                                         // Prefer server-provided flags when available
-                                        const completed = (exam as any).completedByUser;
+                                        const completed = (exam as any).completedByUser || (exam as any).attemptForUser;
                                         const serverCanStart = (exam as any).canStartForUser;
                                         if (completed) {
                                             return <Button disabled>Completed</Button>;
