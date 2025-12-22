@@ -452,11 +452,19 @@ export default function App() {
             const res = await fetch(url);
             if (!res.ok) throw new Error('Failed to fetch exams');
             const data = await res.json();
+            console.log('[EXAMS] Fetched exams:', data.exams.length, 'exams');
+            if (currentUser) {
+                const withAttempts = data.exams.filter((e: any) => e.attemptForUser);
+                console.log('[EXAMS] Exams with attemptForUser:', withAttempts.length);
+                withAttempts.forEach((e: any) => {
+                    console.log(`[EXAM] ${e.title}: attemptForUser.score=${e.attemptForUser?.score}, completedByUser=${e.completedByUser}`);
+                });
+            }
             setExams(data.exams);
         } catch (error: any) {
             showToast(error.message, 'error');
         }
-    }, [showToast]);
+    }, [currentUser, showToast]);
 
     useEffect(() => {
         if (currentUser) {
@@ -1803,7 +1811,10 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, onUpdat
     );
 
     const completedExams = userExams.filter(e => (e as any).attemptForUser || (e as any).completedByUser);
-    const averageScore = completedExams.length > 0 ? Math.round(completedExams.reduce((acc, e) => acc + ((e as any).attemptForUser?.score || 0), 0) / completedExams.length) : 0;
+    const averageScore = completedExams.length > 0 ? Math.round(completedExams.reduce((acc, e) => {
+        const attempt = (e as any).attemptForUser;
+        return acc + (attempt?.score || 0);
+    }, 0) / completedExams.length) : 0;
 
     const loadExamResults = async (exam: Exam) => {
         try {
@@ -2044,6 +2055,8 @@ const MyExamsPage = ({ user, exams, onLogout, onStartExam, showToast, onUpdateUs
         <DashboardLayout user={user} onLogout={onLogout} onBack={() => navigateTo('student-dashboard')} showToast={showToast} onUpdateUser={onUpdateUser} onAction={(a) => {
             if (a === 'dashboard') { navigateTo('student-dashboard'); return; }
             if (a === 'my-exams') { /* already here */ return; }
+            if (a === 'results') { navigateTo('results-analysis'); return; }
+            if (a === 'profile') { navigateTo('profile'); return; }
             if (a === 'live-proctoring') { navigateTo('live-proctoring'); return; }
             if (a === 'help') { navigateTo('help'); return; }
         }}>
@@ -2235,7 +2248,10 @@ const StudentDashboard = ({ user, exams, onLogout, onStartExam, onBack, showToas
     const liveExams = userExams.filter(e => !(e as any).attemptForUser && ((e.status === 'Live') || (e.status === 'Available' && isWithinWindow(e))));
     const upcomingExams = userExams.filter(e => !(e as any).attemptForUser && (e.status === 'Scheduled' || e.status === 'Available' || e.status === 'Locked') && !isExpired(e));
     const completedExams = userExams.filter(e => (e as any).attemptForUser); // treat exams with attempts as completed for this user
-    const averageScore = completedExams.length > 0 ? Math.round(completedExams.reduce((acc, e) => acc + (e.attempt?.score || 0), 0) / completedExams.length) : 0;
+    const averageScore = completedExams.length > 0 ? Math.round(completedExams.reduce((acc, e) => {
+        const attempt = (e as any).attemptForUser;
+        return acc + (attempt?.score || 0);
+    }, 0) / completedExams.length) : 0;
 
     const openResults = async (exam: any) => {
         try {
