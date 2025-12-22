@@ -8,6 +8,10 @@ import {
     Lock, Users, Wifi, Mic, Video, Globe, Trash2, Unlock, Edit, Save
 } from 'lucide-react';
 
+// Import new proctoring components
+import LecturerProctoringMonitor from './components/LecturerProctoringMonitor';
+import LecturerExamReport from './components/LecturerExamReport';
+
 import { io, type Socket } from 'socket.io-client';
 
 // Auth portal illustrations
@@ -244,7 +248,7 @@ const INSTITUTIONS: { [key: string]: string[] } = {
 
 
 // --- TYPE DEFINITIONS ---
-type AppState = 'loading' | 'landing' | 'auth' | 'student-dashboard' | 'lecturer-dashboard' | 'exam' | 'result' | 'results-analysis' | 'live-proctoring' | 'help' | 'my-exams' | 'profile';
+type AppState = 'loading' | 'landing' | 'auth' | 'student-dashboard' | 'lecturer-dashboard' | 'exam' | 'result' | 'results-analysis' | 'live-proctoring' | 'help' | 'my-exams' | 'profile' | 'lecturer-proctor' | 'lecturer-report';
 type UserRole = 'student' | 'lecturer' | 'admin';
 type ExamStatus = 'Scheduled' | 'Available' | 'Locked' | 'Completed' | 'Live';
 type QuestionType = 'multiple-choice' | 'true-false' | 'short-answer' | 'essay';
@@ -435,6 +439,7 @@ export default function App() {
     const [exams, setExams] = useState<Exam[]>([]);
     const [currentExam, setCurrentExam] = useState<Exam | null>(null);
     const [lastResult, setLastResult] = useState<ExamResult | null>(null);
+    const [selectedExamIdForProctoring, setSelectedExamIdForProctoring] = useState<string>('');
 
     useEffect(() => {
         const timer = setTimeout(() => setAppState('landing'), 1500);
@@ -528,7 +533,9 @@ export default function App() {
             case 'student-dashboard': return currentUser && <StudentDashboard key="student-dashboard" user={currentUser} exams={exams} onLogout={handleLogout} onStartExam={handleStartExam} onBack={() => navigateTo('landing')} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} />;
             case 'my-exams': return currentUser && <MyExamsPage key="my-exams" user={currentUser} exams={exams} onLogout={handleLogout} onStartExam={handleStartExam} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} />;
             case 'results-analysis': return currentUser && <ResultsAnalysisPage key="results-analysis" user={currentUser} exams={exams} onLogout={handleLogout} onBack={() => navigateTo('student-dashboard')} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} />;
-                case 'lecturer-dashboard': return currentUser && <LecturerDashboard key="lecturer-dashboard" user={currentUser} exams={exams} onLogout={handleLogout} onBack={() => navigateTo('landing')} onExamChange={fetchExams} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} />;
+                case 'lecturer-dashboard': return currentUser && <LecturerDashboard key="lecturer-dashboard" user={currentUser} exams={exams} onLogout={handleLogout} onBack={() => navigateTo('landing')} onExamChange={fetchExams} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} setSelectedExamIdForProctoring={setSelectedExamIdForProctoring} />;
+            case 'lecturer-proctor': return currentUser && selectedExamIdForProctoring && <LecturerProctoringMonitor key="lecturer-proctor" examId={selectedExamIdForProctoring} onBack={() => navigateTo('lecturer-dashboard')} showToast={showToast} />;
+            case 'lecturer-report': return currentUser && selectedExamIdForProctoring && <LecturerExamReport key="lecturer-report" examId={selectedExamIdForProctoring} onBack={() => navigateTo('lecturer-dashboard')} showToast={showToast} />;
             case 'live-proctoring': return currentUser && <LiveProctoring key="live-proctoring" user={currentUser} onBack={() => navigateTo(currentUser?.role === 'student' ? 'student-dashboard' : 'lecturer-dashboard')} />;
             case 'help': return <HelpPage key="help" onBack={() => navigateTo(currentUser?.role === 'student' ? 'student-dashboard' : 'lecturer-dashboard')} />;
             case 'profile': return currentUser && <ProfilePage key="profile" user={currentUser} onLogout={handleLogout} onBack={() => navigateTo(currentUser?.role === 'student' ? 'student-dashboard' : 'lecturer-dashboard')} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} />;
@@ -2505,7 +2512,7 @@ const StudentDashboard = ({ user, exams, onLogout, onStartExam, onBack, showToas
         </DashboardLayout>
     );
 };
-const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showToast, onUpdateUser, navigateTo }: { user: UserProfile; exams: Exam[]; onLogout: () => void; onBack: () => void; onExamChange: () => void; showToast: (message: string, type: 'success' | 'error') => void; onUpdateUser: (u: UserProfile) => void; navigateTo: (state: AppState) => void }) => {
+const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showToast, onUpdateUser, navigateTo, setSelectedExamIdForProctoring }: { user: UserProfile; exams: Exam[]; onLogout: () => void; onBack: () => void; onExamChange: () => void; showToast: (message: string, type: 'success' | 'error') => void; onUpdateUser: (u: UserProfile) => void; navigateTo: (state: AppState) => void; setSelectedExamIdForProctoring: (id: string) => void }) => {
     const lecturerExams = exams.filter((exam) => exam.lecturerId === user._id);
     const [createExamOpen, setCreateExamOpen] = useState(false);
     const [examToDelete, setExamToDelete] = useState<Exam | null>(null);
@@ -2652,10 +2659,10 @@ const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showTo
                             <Button variant="ghost" size="sm" onClick={() => { setExamToEdit(exam); setCreateExamOpen(true); }} title="Edit Exam">
                                 Edit
                             </Button>
-                            <Button variant="ghost" size="sm" onClick={() => { setProctorExamId(exam._id); setProctorOpen(true); }} title="Proctor Exam">
+                            <Button variant="ghost" size="sm" onClick={() => { setSelectedExamIdForProctoring(exam._id); navigateTo('lecturer-proctor'); }} title="Proctor Exam">
                                 Proctor
                             </Button>
-                            <Button variant="ghost" size="sm" onClick={() => fetchReport(exam._id, exam.title)} title="View Report">
+                            <Button variant="ghost" size="sm" onClick={() => { setSelectedExamIdForProctoring(exam._id); navigateTo('lecturer-report'); }} title="View Report">
                                 View Report
                             </Button>
                             <Button variant="ghost" size="sm" onClick={() => handleToggleLock(exam)} title={exam.status === 'Locked' ? 'Unlock Exam' : 'Lock Exam'}>
