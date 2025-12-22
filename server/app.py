@@ -3004,43 +3004,57 @@ def ai_generate_questions():
         return jsonify({"error": "Missing parameters for AI question generation"}), 400
 
     # Build detailed prompt for better AI generation
+    print(f"[AI_GEN] Generating {num_questions} {question_type} questions about '{topic}' at {difficulty} difficulty")
+    
     if question_type == 'multiple-choice':
-        prompt = f"""Generate {num_questions} {difficulty} difficulty multiple-choice questions about {topic}.
+        prompt = f"""You are an expert exam question writer. Generate {num_questions} {difficulty} difficulty multiple-choice questions specifically about "{topic}".
 
-For each question:
-1. Write a clear, specific question (not generic like 'question 1 about topic')
-2. Provide exactly 4 distinct, plausible answer options
-3. Mark one option as the correct answer (use index 0-3)
-4. Assign appropriate marks (1-3 based on difficulty)
+CRITICAL REQUIREMENTS:
+- Each question MUST be a real, meaningful question about {topic}, NOT generic placeholders
+- BAD EXAMPLE (DO NOT DO THIS): "Medium question 2 about Data science?"
+- GOOD EXAMPLE: "Which algorithm is most suitable for classification tasks in supervised learning?"
+- Write 4 DISTINCT answer options that are plausible and specific to the question
+- BAD EXAMPLE (DO NOT DO THIS): "Option 1", "Option 2", "Option 3", "Option 4"
+- GOOD EXAMPLE: "Decision Trees", "K-Means Clustering", "Linear Regression", "Random Forest"
+- Set correctAnswer to the index (0-3) of the correct option
+- Assign marks: Easy=1, Medium=2, Hard=3
 
-Return ONLY valid JSON matching this schema. Do not include any explanatory text."""
+Generate questions that demonstrate real knowledge of {topic}."""
+    
     elif question_type == 'true-false':
-        prompt = f"""Generate {num_questions} {difficulty} difficulty true/false questions about {topic}.
+        prompt = f"""You are an expert exam question writer. Generate {num_questions} {difficulty} difficulty true/false questions specifically about "{topic}".
 
-For each question:
-1. Write a clear, factual statement (not generic)
-2. Set correctAnswer to either true or false
-3. Assign 1 mark per question
+CRITICAL REQUIREMENTS:
+- Write clear, factual statements about {topic}, NOT generic placeholders
+- Each statement should test real knowledge of {topic}
+- Set correctAnswer to boolean true or false
+- Assign 1 mark per question
 
-Return ONLY valid JSON matching this schema. Do not include any explanatory text."""
+Generate questions that demonstrate real knowledge of {topic}."""
+    
     elif question_type == 'short-answer':
-        prompt = f"""Generate {num_questions} {difficulty} difficulty short-answer questions about {topic}.
+        prompt = f"""You are an expert exam question writer. Generate {num_questions} {difficulty} difficulty short-answer questions specifically about "{topic}".
 
-For each question:
-1. Write a clear question requiring a brief answer (not generic)
-2. Provide the expected correct answer as a string
-3. Assign 2-3 marks based on difficulty
+CRITICAL REQUIREMENTS:
+- Write clear questions requiring brief answers (1-2 sentences)
+- Questions must test real knowledge of {topic}, NOT be generic
+- Provide the expected correct answer
+- Assign marks: Easy=2, Medium=3, Hard=4
 
-Return ONLY valid JSON matching this schema. Do not include any explanatory text."""
-    else:
-        prompt = f"""Generate {num_questions} {difficulty} difficulty essay questions about {topic}.
+Generate questions that demonstrate real knowledge of {topic}."""
+    
+    else:  # essay
+        prompt = f"""You are an expert exam question writer. Generate {num_questions} {difficulty} difficulty essay questions specifically about "{topic}".
 
-For each question:
-1. Write a clear, thought-provoking question (not generic)
-2. Provide key points that should be in a good answer
-3. Assign 5-10 marks based on difficulty
+CRITICAL REQUIREMENTS:
+- Write thought-provoking questions requiring detailed answers
+- Questions must test deep understanding of {topic}, NOT be generic
+- Provide key points expected in a good answer
+- Assign marks: Easy=5, Medium=7, Hard=10
 
-Return ONLY valid JSON matching this schema. Do not include any explanatory text."""
+Generate questions that demonstrate real knowledge of {topic}."""
+    
+    print(f"[AI_GEN] Prompt length: {len(prompt)} characters")
     
     schema = {
         "type": "object",
@@ -3154,7 +3168,7 @@ Return ONLY valid JSON matching this schema. Do not include any explanatory text
                     url = f"https://generativelanguage.googleapis.com/{ver}/{name}:generateText?key={GEMINI_API_KEY}"
                     body = {'prompt': {'text': prompt + "\n\nReturn only JSON that matches the requested schema."}, 'maxOutputTokens': 800}
                     r = requests.post(url, json=body)
-                    print(f"Trying {name} {method} -> {r.status_code}")
+                    print(f"[AI_GEN] Trying {name} {method} -> {r.status_code}")
                     r.raise_for_status()
                     j = r.json()
                     text_content = None
@@ -3162,20 +3176,22 @@ Return ONLY valid JSON matching this schema. Do not include any explanatory text
                         text_content = j['candidates'][0].get('output') or j['candidates'][0].get('content') or r.text
                     else:
                         text_content = r.text
+                    print(f"[AI_GEN] SUCCESS with {name} via {method}, response length: {len(text_content) if text_content else 0}")
                     return text_content
                 else:
                     url = f"https://generativelanguage.googleapis.com/{ver}/{name}:generateContent?key={GEMINI_API_KEY}"
                     r = requests.post(url, json=payload)
-                    print(f"Trying {name} {method} -> {r.status_code}")
+                    print(f"[AI_GEN] Trying {name} {method} -> {r.status_code}")
                     r.raise_for_status()
                     j = r.json()
                     try:
                         text_content = j['candidates'][0]['content']['parts'][0]['text']
                     except Exception:
                         text_content = r.text
+                    print(f"[AI_GEN] SUCCESS with {name} via {method}, response length: {len(text_content) if text_content else 0}")
                     return text_content
             except requests.exceptions.RequestException as e:
-                print(f"Model {name} via {method} failed: {e}")
+                print(f"[AI_GEN] Model {name} via {method} failed: {e}")
                 tried.append((name, method, str(e)))
                 continue
         return None
@@ -3206,7 +3222,9 @@ Return ONLY valid JSON matching this schema. Do not include any explanatory text
                         app._selected_model = None
 
         models = get_listmodels()
+        print(f"[AI_GEN] Found {len(models)} available Gemini models")
         candidates = select_candidate_models(models)
+        print(f"[AI_GEN] Selected {len(candidates)} candidate models to try")
         # Try candidates in order until one returns JSON we can parse
         for cand in candidates:
             if not cand.get('name'):
@@ -3216,6 +3234,7 @@ Return ONLY valid JSON matching this schema. Do not include any explanatory text
                 continue
             try:
                 questions_json = json.loads(text)
+                print(f"[AI_GEN] Successfully parsed JSON response from {cand.get('name')}")
                 # cache successful candidate for subsequent calls
                 try:
                     app._selected_model = {'name': cand.get('name'), 'methods': cand.get('methods', []), 'ts': int(datetime.datetime.utcnow().timestamp())}
@@ -3223,11 +3242,13 @@ Return ONLY valid JSON matching this schema. Do not include any explanatory text
                     pass
                 return jsonify(questions_json), 200
             except json.JSONDecodeError:
-                print(f"Model {cand.get('name')} returned non-JSON text; skipping. Preview: {text[:200]}")
+                print(f"[AI_GEN] Model {cand.get('name')} returned non-JSON text; skipping. Preview: {text[:200]}")
                 continue
 
         # If all remote attempts failed, fall back to the local generator
+        print("[AI_GEN] WARNING: All Gemini API attempts failed, using local fallback (this will generate placeholder text)")
         def local_generate_questions(topic, num_questions, qtype, difficulty):
+            print(f"[AI_GEN] Local fallback generating {num_questions} {qtype} questions")
             questions = []
             for i in range(int(num_questions)):
                 q_text = f"{difficulty} question {i+1} about {topic}?"
@@ -3260,7 +3281,7 @@ Return ONLY valid JSON matching this schema. Do not include any explanatory text
         return jsonify(placeholder), 200
 
     except requests.exceptions.RequestException as e:
-        print(f"ListModels / API request exception during selection: {e}")
+        print(f"[AI_GEN] ERROR: ListModels / API request exception during selection: {e}")
         # As a last-resort return local placeholder
         placeholder = {
             'questions': [{
