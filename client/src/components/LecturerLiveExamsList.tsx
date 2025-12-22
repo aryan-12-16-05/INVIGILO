@@ -19,6 +19,7 @@ interface Exam {
     endTime: string;
     duration: number;
     status: string;
+    lecturerId: string;
     questions: any[];
     attempts?: any[];
 }
