@@ -1803,6 +1803,7 @@ const ProfilePage = ({ user, onLogout, onBack, showToast, onUpdateUser, navigate
 const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, onUpdateUser, navigateTo }: { user: UserProfile; exams: Exam[]; onLogout: () => void; onBack: () => void; showToast: (message:string, type:'success'|'error') => void; onUpdateUser: (u: UserProfile) => void; navigateTo: (state: AppState) => void }) => {
     const [selectedExam, setSelectedExam] = useState<Exam | null>(null);
     const [resultAttempt, setResultAttempt] = useState<any>(null);
+    const [expandedQuestion, setExpandedQuestion] = useState<number | null>(null);
 
     const userExams = exams.filter(exam => 
         exam.institution.toLowerCase() === user.institution.toLowerCase() && 
@@ -1956,28 +1957,80 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, onUpdat
                         <h3 className="text-xl font-bold text-white mb-4">Question Breakdown</h3>
                         <div className="space-y-3">
                             {resultAttempt.perQuestion && resultAttempt.perQuestion.map((q: any, idx: number) => (
-                                <div key={idx} className={cn(
-                                    'p-4 rounded-lg border',
-                                    q.correct ? 'bg-green-900/20 border-green-600/50' : 'bg-red-900/20 border-red-600/50'
-                                )}>
-                                    <div className="flex items-start justify-between">
-                                        <div>
-                                            <p className="text-white font-medium">Question {idx + 1}</p>
-                                            {q.question && (
-                                                <p className="text-slate-300 text-sm mt-1 line-clamp-2">{q.question}</p>
-                                            )}
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                            {q.correct ? (
-                                                <CheckCircle className="h-5 w-5 text-green-400" />
-                                            ) : (
-                                                <XCircle className="h-5 w-5 text-red-400" />
-                                            )}
-                                            <span className={cn('text-sm font-semibold', q.correct ? 'text-green-300' : 'text-red-300')}>
-                                                {q.correct ? 'Correct' : 'Incorrect'}
-                                            </span>
+                                <div key={idx}>
+                                    <div 
+                                        onClick={() => setExpandedQuestion(expandedQuestion === idx ? null : idx)}
+                                        className={cn(
+                                            'p-4 rounded-lg border cursor-pointer transition-all hover:scale-[1.01]',
+                                            q.correct ? 'bg-green-900/20 border-green-600/50 hover:border-green-500' : 'bg-red-900/20 border-red-600/50 hover:border-red-500'
+                                        )}
+                                    >
+                                        <div className="flex items-start justify-between">
+                                            <div className="flex-1">
+                                                <p className="text-white font-medium">Question {idx + 1}</p>
+                                                {q.question && (
+                                                    <p className="text-slate-300 text-sm mt-1 line-clamp-2">{q.question}</p>
+                                                )}
+                                            </div>
+                                            <div className="flex items-center gap-2">
+                                                {q.correct ? (
+                                                    <CheckCircle className="h-5 w-5 text-green-400" />
+                                                ) : (
+                                                    <XCircle className="h-5 w-5 text-red-400" />
+                                                )}
+                                                <span className={cn('text-sm font-semibold', q.correct ? 'text-green-300' : 'text-red-300')}>
+                                                    {q.correct ? 'Correct' : 'Incorrect'}
+                                                </span>
+                                            </div>
                                         </div>
                                     </div>
+                                    {expandedQuestion === idx && (
+                                        <motion.div
+                                            initial={{ opacity: 0, height: 0 }}
+                                            animate={{ opacity: 1, height: 'auto' }}
+                                            exit={{ opacity: 0, height: 0 }}
+                                            className="mt-2 p-4 bg-slate-800 rounded-lg border border-slate-700 space-y-3"
+                                        >
+                                            <div>
+                                                <p className="text-sm font-semibold text-slate-300 mb-2">Question:</p>
+                                                <p className="text-white">{q.question}</p>
+                                            </div>
+                                            {q.options && q.options.length > 0 && (
+                                                <div>
+                                                    <p className="text-sm font-semibold text-slate-300 mb-2">Options:</p>
+                                                    <div className="space-y-2">
+                                                        {q.options.map((opt: string, optIdx: number) => (
+                                                            <div key={optIdx} className={cn(
+                                                                'p-2 rounded border',
+                                                                q.userAnswer === optIdx ? (q.correct ? 'border-green-500 bg-green-900/20' : 'border-red-500 bg-red-900/20') :
+                                                                q.correctAnswer === optIdx ? 'border-green-500 bg-green-900/10' : 'border-slate-700'
+                                                            )}>
+                                                                <div className="flex items-center justify-between">
+                                                                    <span className="text-slate-200">{String.fromCharCode(65 + optIdx)}. {opt}</span>
+                                                                    <div className="flex gap-2">
+                                                                        {q.userAnswer === optIdx && <span className="text-xs text-blue-400 font-medium">Your Answer</span>}
+                                                                        {q.correctAnswer === optIdx && <span className="text-xs text-green-400 font-medium">✓ Correct</span>}
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+                                            {!q.options && (
+                                                <div>
+                                                    <p className="text-sm font-semibold text-slate-300 mb-1">Your Answer:</p>
+                                                    <p className="text-white mb-3">{String(q.userAnswer || 'No answer')}</p>
+                                                    <p className="text-sm font-semibold text-slate-300 mb-1">Correct Answer:</p>
+                                                    <p className="text-green-400">{String(q.correctAnswer)}</p>
+                                                </div>
+                                            )}
+                                            <div className="flex items-center justify-between pt-3 border-t border-slate-700">
+                                                <span className="text-sm text-slate-400">Marks: <span className={q.correct ? 'text-green-400' : 'text-red-400'}>{q.correct ? q.marks : 0}</span> / {q.marks}</span>
+                                                <span className={cn('text-sm font-semibold', q.correct ? 'text-green-400' : 'text-red-400')}>{q.correct ? '✓ Correct' : '✗ Incorrect'}</span>
+                                            </div>
+                                        </motion.div>
+                                    )}
                                 </div>
                             ))}
                         </div>

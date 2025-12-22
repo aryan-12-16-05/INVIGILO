@@ -3003,7 +3003,44 @@ def ai_generate_questions():
     if not all([topic, difficulty, num_questions, question_type]):
         return jsonify({"error": "Missing parameters for AI question generation"}), 400
 
-    prompt = f"Generate {num_questions} {difficulty} level questions for an exam on the topic of '{topic}'. The question type should be '{question_type}'."
+    # Build detailed prompt for better AI generation
+    if question_type == 'multiple-choice':
+        prompt = f"""Generate {num_questions} {difficulty} difficulty multiple-choice questions about {topic}.
+
+For each question:
+1. Write a clear, specific question (not generic like 'question 1 about topic')
+2. Provide exactly 4 distinct, plausible answer options
+3. Mark one option as the correct answer (use index 0-3)
+4. Assign appropriate marks (1-3 based on difficulty)
+
+Return ONLY valid JSON matching this schema. Do not include any explanatory text."""
+    elif question_type == 'true-false':
+        prompt = f"""Generate {num_questions} {difficulty} difficulty true/false questions about {topic}.
+
+For each question:
+1. Write a clear, factual statement (not generic)
+2. Set correctAnswer to either true or false
+3. Assign 1 mark per question
+
+Return ONLY valid JSON matching this schema. Do not include any explanatory text."""
+    elif question_type == 'short-answer':
+        prompt = f"""Generate {num_questions} {difficulty} difficulty short-answer questions about {topic}.
+
+For each question:
+1. Write a clear question requiring a brief answer (not generic)
+2. Provide the expected correct answer as a string
+3. Assign 2-3 marks based on difficulty
+
+Return ONLY valid JSON matching this schema. Do not include any explanatory text."""
+    else:
+        prompt = f"""Generate {num_questions} {difficulty} difficulty essay questions about {topic}.
+
+For each question:
+1. Write a clear, thought-provoking question (not generic)
+2. Provide key points that should be in a good answer
+3. Assign 5-10 marks based on difficulty
+
+Return ONLY valid JSON matching this schema. Do not include any explanatory text."""
     
     schema = {
         "type": "object",
