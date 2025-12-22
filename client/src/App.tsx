@@ -2044,7 +2044,7 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, onUpdat
                                                                     </div>
                                                                 </div>
                                                             </div>
-                                                        )})
+                                                            );
                                                         })}
                                                     </div>
                                                 </div>
