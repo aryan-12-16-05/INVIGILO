@@ -1589,47 +1589,53 @@ const DashboardLayout = ({ children, user, onLogout, onBack, onAction, onUpdateU
             </main>
         </motion.div>
 
-        <Dialog open={profileOpen} onOpenChange={setProfileOpen} className="max-w-4xl">
-            <h2 className="text-xl font-bold mb-4">Edit Profile</h2>
+        <Dialog open={profileOpen} onOpenChange={setProfileOpen} className="max-w-6xl w-full">
+            <h2 className="text-2xl font-bold mb-6">Edit Profile</h2>
             {profileForm && (
-                <div className="space-y-4">
-                    <div>
-                        <Label>Name</Label>
-                        <Input value={profileForm.name} onChange={(e: any) => setProfileForm((p: any) => ({ ...p, name: e.target.value }))} />
+                <div className="space-y-6">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div>
+                            <Label className="text-base">Name</Label>
+                            <Input className="mt-2" value={profileForm.name} onChange={(e: any) => setProfileForm((p: any) => ({ ...p, name: e.target.value }))} />
+                        </div>
+                        <div>
+                            <Label className="text-base">Phone</Label>
+                            <Input className="mt-2" value={profileForm.phoneNumber} onChange={(e: any) => setProfileForm((p: any) => ({ ...p, phoneNumber: e.target.value }))} />
+                        </div>
                     </div>
-                    <div>
-                        <Label>Phone</Label>
-                        <Input value={profileForm.phoneNumber} onChange={(e: any) => setProfileForm((p: any) => ({ ...p, phoneNumber: e.target.value }))} />
-                    </div>
-                    <div>
-                        <Label>Institution</Label>
-                        <Select
-                            value={profileForm.institution || ''}
-                            onChange={(e: any) => setProfileForm((p: any) => ({ ...p, institution: e.target.value, department: '' }))}
-                        >
-                            <option value="">Select Institution</option>
-                            {Object.keys(INSTITUTIONS).map(inst => (
-                                <option key={inst} value={inst}>{inst}</option>
-                            ))}
-                        </Select>
-                    </div>
-                    <div>
-                        <Label>Department</Label>
-                        <Select
-                            value={profileForm.department || ''}
-                            onChange={(e: any) => setProfileForm((p: any) => ({ ...p, department: e.target.value }))}
-                            disabled={!profileForm.institution}
-                        >
-                            <option value="">Select Department</option>
-                            {profileForm.institution && INSTITUTIONS[profileForm.institution]?.map((dept) => (
-                                <option key={dept} value={dept}>{dept}</option>
-                            ))}
-                        </Select>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div>
+                            <Label className="text-base">Institution</Label>
+                            <Select
+                                className="mt-2"
+                                value={profileForm.institution || ''}
+                                onChange={(e: any) => setProfileForm((p: any) => ({ ...p, institution: e.target.value, department: '' }))}
+                            >
+                                <option value="">Select Institution</option>
+                                {Object.keys(INSTITUTIONS).map(inst => (
+                                    <option key={inst} value={inst}>{inst}</option>
+                                ))}
+                            </Select>
+                        </div>
+                        <div>
+                            <Label className="text-base">Department</Label>
+                            <Select
+                                className="mt-2"
+                                value={profileForm.department || ''}
+                                onChange={(e: any) => setProfileForm((p: any) => ({ ...p, department: e.target.value }))}
+                                disabled={!profileForm.institution}
+                            >
+                                <option value="">Select Department</option>
+                                {profileForm.institution && INSTITUTIONS[profileForm.institution]?.map((dept) => (
+                                    <option key={dept} value={dept}>{dept}</option>
+                                ))}
+                            </Select>
+                        </div>
                     </div>
                     {user.role === 'student' && (
                         <div>
-                            <Label>Year</Label>
-                            <Select value={profileForm.year || ''} onChange={(e: any) => setProfileForm((p: any) => ({ ...p, year: e.target.value }))}>
+                            <Label className="text-base">Year</Label>
+                            <Select className="mt-2" value={profileForm.year || ''} onChange={(e: any) => setProfileForm((p: any) => ({ ...p, year: e.target.value }))}>
                                 <option value="">Select Year</option>
                                 <option value="1">1</option>
                                 <option value="2">2</option>
@@ -1638,9 +1644,9 @@ const DashboardLayout = ({ children, user, onLogout, onBack, onAction, onUpdateU
                             </Select>
                         </div>
                     )}
-                    <div className="flex justify-end space-x-2 pt-2">
-                        <Button variant="outline" onClick={() => setProfileOpen(false)}>Cancel</Button>
-                        <Button onClick={saveProfile}>Save</Button>
+                    <div className="flex justify-end space-x-3 pt-6 border-t border-slate-700 mt-6">
+                        <Button variant="outline" onClick={() => setProfileOpen(false)} className="px-6">Cancel</Button>
+                        <Button onClick={saveProfile} className="px-6">Save Changes</Button>
                     </div>
                 </div>
             )}
@@ -2131,8 +2137,8 @@ const StudentDashboard = ({ user, exams, onLogout, onStartExam, onBack, showToas
         } catch { return false; }
     };
 
-    const liveExams = userExams.filter(e => (e.status === 'Live') || (e.status === 'Available' && isWithinWindow(e)));
-    const upcomingExams = userExams.filter(e => (e.status === 'Scheduled' || e.status === 'Available' || e.status === 'Locked') && !isExpired(e));
+    const liveExams = userExams.filter(e => !(e as any).attemptForUser && ((e.status === 'Live') || (e.status === 'Available' && isWithinWindow(e))));
+    const upcomingExams = userExams.filter(e => !(e as any).attemptForUser && (e.status === 'Scheduled' || e.status === 'Available' || e.status === 'Locked') && !isExpired(e));
     const completedExams = userExams.filter(e => (e as any).attemptForUser); // treat exams with attempts as completed for this user
     const averageScore = completedExams.length > 0 ? Math.round(completedExams.reduce((acc, e) => acc + (e.attempt?.score || 0), 0) / completedExams.length) : 0;
 
