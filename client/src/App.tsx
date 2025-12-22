@@ -11,6 +11,7 @@ import {
 // Import new proctoring components
 import LecturerProctoringMonitor from './components/LecturerProctoringMonitor';
 import LecturerExamReport from './components/LecturerExamReport';
+import LecturerLiveExamsList from './components/LecturerLiveExamsList';
 
 import { io, type Socket } from 'socket.io-client';
 
@@ -248,7 +249,7 @@ const INSTITUTIONS: { [key: string]: string[] } = {
 
 
 // --- TYPE DEFINITIONS ---
-type AppState = 'loading' | 'landing' | 'auth' | 'student-dashboard' | 'lecturer-dashboard' | 'exam' | 'result' | 'results-analysis' | 'live-proctoring' | 'help' | 'my-exams' | 'profile' | 'lecturer-proctor' | 'lecturer-report';
+type AppState = 'loading' | 'landing' | 'auth' | 'student-dashboard' | 'lecturer-dashboard' | 'exam' | 'result' | 'results-analysis' | 'live-proctoring' | 'help' | 'my-exams' | 'profile' | 'lecturer-proctor' | 'lecturer-report' | 'lecturer-live-exams';
 type UserRole = 'student' | 'lecturer' | 'admin';
 type ExamStatus = 'Scheduled' | 'Available' | 'Locked' | 'Completed' | 'Live';
 type QuestionType = 'multiple-choice' | 'true-false' | 'short-answer' | 'essay';
@@ -534,7 +535,8 @@ export default function App() {
             case 'my-exams': return currentUser && <MyExamsPage key="my-exams" user={currentUser} exams={exams} onLogout={handleLogout} onStartExam={handleStartExam} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} />;
             case 'results-analysis': return currentUser && <ResultsAnalysisPage key="results-analysis" user={currentUser} exams={exams} onLogout={handleLogout} onBack={() => navigateTo('student-dashboard')} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} />;
                 case 'lecturer-dashboard': return currentUser && <LecturerDashboard key="lecturer-dashboard" user={currentUser} exams={exams} onLogout={handleLogout} onBack={() => navigateTo('landing')} onExamChange={fetchExams} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} setSelectedExamIdForProctoring={setSelectedExamIdForProctoring} />;
-            case 'lecturer-proctor': return currentUser && selectedExamIdForProctoring && <LecturerProctoringMonitor key="lecturer-proctor" examId={selectedExamIdForProctoring} onBack={() => navigateTo('lecturer-dashboard')} showToast={showToast} />;
+            case 'lecturer-live-exams': return currentUser && <LecturerLiveExamsList key="lecturer-live-exams" lecturerId={currentUser._id} onBack={() => navigateTo('lecturer-dashboard')} onSelectExam={(examId) => { setSelectedExamIdForProctoring(examId); navigateTo('lecturer-proctor'); }} />;
+            case 'lecturer-proctor': return currentUser && selectedExamIdForProctoring && <LecturerProctoringMonitor key="lecturer-proctor" examId={selectedExamIdForProctoring} onBack={() => navigateTo('lecturer-live-exams')} showToast={showToast} />;
             case 'lecturer-report': return currentUser && selectedExamIdForProctoring && <LecturerExamReport key="lecturer-report" examId={selectedExamIdForProctoring} onBack={() => navigateTo('lecturer-dashboard')} showToast={showToast} />;
             case 'live-proctoring': return currentUser && <LiveProctoring key="live-proctoring" user={currentUser} onBack={() => navigateTo(currentUser?.role === 'student' ? 'student-dashboard' : 'lecturer-dashboard')} />;
             case 'help': return <HelpPage key="help" onBack={() => navigateTo(currentUser?.role === 'student' ? 'student-dashboard' : 'lecturer-dashboard')} />;
@@ -2025,30 +2027,34 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, onUpdat
                                                 <div>
                                                     <p className="text-sm font-semibold text-slate-300 mb-2">Options:</p>
                                                     <div className="space-y-2">
-                                                        {q.options.map((opt: string, optIdx: number) => (
+                                                        {q.options.map((opt: string, optIdx: number) => {
+                                                            const userAns = q.given !== undefined ? q.given : q.userAnswer;
+                                                            const correctAns = q.expected !== undefined ? q.expected : q.correctAnswer;
+                                                            return (
                                                             <div key={optIdx} className={cn(
                                                                 'p-2 rounded border',
-                                                                q.userAnswer === optIdx ? (q.correct ? 'border-green-500 bg-green-900/20' : 'border-red-500 bg-red-900/20') :
-                                                                q.correctAnswer === optIdx ? 'border-green-500 bg-green-900/10' : 'border-slate-700'
+                                                                userAns === optIdx ? (q.correct ? 'border-green-500 bg-green-900/20' : 'border-red-500 bg-red-900/20') :
+                                                                correctAns === optIdx ? 'border-green-500 bg-green-900/10' : 'border-slate-700'
                                                             )}>
                                                                 <div className="flex items-center justify-between">
                                                                     <span className="text-slate-200">{String.fromCharCode(65 + optIdx)}. {opt}</span>
                                                                     <div className="flex gap-2">
-                                                                        {q.userAnswer === optIdx && <span className="text-xs text-blue-400 font-medium">Your Answer</span>}
-                                                                        {q.correctAnswer === optIdx && <span className="text-xs text-green-400 font-medium">✓ Correct</span>}
+                                                                        {userAns === optIdx && <span className="text-xs text-blue-400 font-medium">Your Answer</span>}
+                                                                        {correctAns === optIdx && <span className="text-xs text-green-400 font-medium">✓ Correct</span>}
                                                                     </div>
                                                                 </div>
                                                             </div>
-                                                        ))}
+                                                        )})
+                                                        })}
                                                     </div>
                                                 </div>
                                             )}
                                             {!q.options && (
                                                 <div>
                                                     <p className="text-sm font-semibold text-slate-300 mb-1">Your Answer:</p>
-                                                    <p className="text-white mb-3">{String(q.userAnswer || 'No answer')}</p>
+                                                    <p className="text-white mb-3">{String(q.given || q.userAnswer || 'No answer')}</p>
                                                     <p className="text-sm font-semibold text-slate-300 mb-1">Correct Answer:</p>
-                                                    <p className="text-green-400">{String(q.correctAnswer)}</p>
+                                                    <p className="text-green-400">{String(q.expected || q.correctAnswer)}</p>
                                                 </div>
                                             )}
                                             <div className="flex items-center justify-between pt-3 border-t border-slate-700">
@@ -2272,11 +2278,11 @@ const MyExamsPage = ({ user, exams, onLogout, onStartExam, showToast, onUpdateUs
                                     <div className="flex items-start justify-between">
                                         <div className="flex-1">
                                             <p className="text-sm text-slate-300 mb-1">Q{i + 1}: {q.question}</p>
-                                            <p className="text-xs text-slate-400">Your Answer: <span className={q.isCorrect ? 'text-green-400' : 'text-red-400'}>{String(q.userAnswer || 'No answer')}</span></p>
-                                            {!q.isCorrect && <p className="text-xs text-slate-500">Correct Answer: {String(q.correctAnswer)}</p>}
+                                            <p className="text-xs text-slate-400">Your Answer: <span className={q.correct ? 'text-green-400' : 'text-red-400'}>{String(q.given || q.userAnswer || 'No answer')}</span></p>
+                                            {!q.correct && <p className="text-xs text-slate-500">Correct Answer: {String(q.expected || q.correctAnswer)}</p>}
                                         </div>
                                         <div className="ml-4">
-                                            {q.isCorrect ? <CheckCircle className="h-5 w-5 text-green-400" /> : <XCircle className="h-5 w-5 text-red-400" />}
+                                            {q.correct ? <CheckCircle className="h-5 w-5 text-green-400" /> : <XCircle className="h-5 w-5 text-red-400" />}
                                         </div>
                                     </div>
                                 </div>
@@ -2689,8 +2695,8 @@ const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showTo
                             <Button variant="ghost" size="sm" onClick={() => { setExamToEdit(exam); setCreateExamOpen(true); }} title="Edit Exam">
                                 Edit
                             </Button>
-                            <Button variant="ghost" size="sm" onClick={() => { setSelectedExamIdForProctoring(exam._id); navigateTo('lecturer-proctor'); }} title="Proctor Exam">
-                                Proctor
+                            <Button variant="ghost" size="sm" onClick={() => navigateTo('lecturer-live-exams')} title="Live Monitoring">
+                                Monitor
                             </Button>
                             <Button variant="ghost" size="sm" onClick={() => { setSelectedExamIdForProctoring(exam._id); navigateTo('lecturer-report'); }} title="View Report">
                                 View Report
