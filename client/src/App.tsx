@@ -1818,6 +1818,13 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, onUpdat
     }, 0) / completedExams.length) : 0;
 
     const loadExamResults = async (exam: Exam) => {
+        // Toggle: if clicking same exam, close it
+        if (selectedExam?._id === exam._id) {
+            setSelectedExam(null);
+            setResultAttempt(null);
+            setExpandedQuestion(null);
+            return;
+        }
         try {
             const res = await fetch(`${API_URL}/exams/${exam._id}/attempt?userId=${user._id}`);
             const data = await res.json();
@@ -1887,11 +1894,11 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, onUpdat
                                 const attempt = (exam as any).attemptForUser;
                                 const score = attempt?.score || 0;
                                 const correctCount = Array.isArray(attempt?.answers)
-                                    ? attempt.answers.filter((a: any) => a?.isCorrect).length
-                                    : (attempt?.correctCount ?? 0);
+                                    ? attempt.answers.filter((a: any) => a?.isCorrect === true).length
+                                    : 0;
                                 const totalQuestions = Array.isArray(attempt?.answers)
                                     ? attempt.answers.length
-                                    : (attempt?.totalQuestions ?? (exam as any)?.questions?.length ?? 0);
+                                    : (exam as any)?.questions?.length ?? 0;
                                 return (
                                     <div key={exam._id} 
                                         className="p-4 bg-slate-800 rounded-lg hover:bg-slate-700 transition-colors cursor-pointer border border-slate-700 hover:border-indigo-500"
