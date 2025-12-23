@@ -1,10 +1,11 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
     Camera, Eye, Activity, ScanFace, AlertTriangle, XCircle, CheckCircle,
     Radio, ChevronLeft, ChevronRight, TrendingUp, Settings, Download,
-    Filter, Bell, Plus, FileText, Users as UsersIcon, ArrowLeft, Play, Pause
+    Filter, Bell, Plus, FileText, Users as UsersIcon, ArrowLeft, Play, Pause, X, Monitor
 } from 'lucide-react';
+import { io, type Socket } from 'socket.io-client';
 
 const cn = (...classes: (string | undefined | null | false)[]) => classes.filter(Boolean).join(' ');
 
@@ -26,6 +27,8 @@ interface LiveStudent {
     timeRemaining: number;
     latestViolation?: string;
     violationTime?: string;
+    videoStreamUrl?: string;
+    screenStreamUrl?: string;
 }
 
 const Button = ({ children, variant = 'default', size = 'default', className = '', onClick, disabled }: any) => (
@@ -69,7 +72,9 @@ export default function LiveMonitoringDashboard({
     const [isMonitoring, setIsMonitoring] = useState(true);
     const [currentPage, setCurrentPage] = useState(0);
     const [currentViolationIndex, setCurrentViolationIndex] = useState(0);
-    const [stats, setStats] = useState({
+    const [selectedStudent, setSelectedStudent] = useState<LiveStudent | null>(null);
+    const socketRef = useRef<Socket | null>(null);    const videoFramesRef = useRef<Record<string, string>>({});
+    const screenFramesRef = useRef<Record<string, string>>({});    const [stats, setStats] = useState({
         activeExams: 1,
         studentsOnline: 0,
         activeViolations: 0
@@ -81,6 +86,41 @@ export default function LiveMonitoringDashboard({
         currentPage * studentsPerPage,
         (currentPage + 1) * studentsPerPage
     );
+
+    // Socket.io connection for real-time video/screen streams
+    useEffect(() => {
+        const baseUrl = API_URL.replace('/api', '');
+        const newSocket = io(`${baseUrl}/proctor`, {
+            query: { examId, role: 'lecturer' }
+        });
+
+        newSocket.on('connect', () => {
+            console.log('[DASHBOARD] Connected to proctoring server');
+        });
+
+        // Listen for video frames from students
+        newSocket.on('student-video-frame', (data: { userId: string; frame: string; timestamp: number }) => {
+            videoFramesRef.current[data.userId] = data.frame;
+            // Force re-render every 5 frames to update UI
+            if (Math.random() < 0.2) {
+                setStudents(prev => [...prev]);
+            }
+        });
+
+        // Listen for screen frames from students
+        newSocket.on('student-screen-frame', (data: { userId: string; frame: string; timestamp: number }) => {
+            screenFramesRef.current[data.userId] = data.frame;
+            if (Math.random() < 0.2) {
+                setStudents(prev => [...prev]);
+            }
+        });
+
+        socketRef.current = newSocket;
+
+        return () => {
+            newSocket.disconnect();
+        };
+    }, [examId]);
 
     // Get violations for review panel
     const violationReviews = students
@@ -276,8 +316,9 @@ export default function LiveMonitoringDashboard({
                                 animate={{ opacity: 1, scale: 1 }}
                                 transition={{ delay: idx * 0.05 }}
                                 whileHover={{ scale: 1.05, zIndex: 50 }}
+                                onDoubleClick={() => setSelectedStudent(student)}
                                 className={cn(
-                                    'bg-white/5 backdrop-blur-xl border-2 rounded-2xl p-3 transition-all duration-300',
+                                    'bg-white/5 backdrop-blur-xl border-2 rounded-2xl p-3 transition-all duration-300 cursor-pointer',
                                     getBorderColor(student.status)
                                 )}
                             >
@@ -325,8 +366,18 @@ export default function LiveMonitoringDashboard({
                                         <span className="text-xs font-mono text-white">{formatTime(student.timeRemaining)}</span>
                                     </div>
 
-                                    {/* Placeholder for actual video */}
-                                    <div className="absolute inset-0 bg-gradient-to-br from-slate-800 to-slate-900" />
+                                    {/* Video Stream or Placeholder */}
+                                    {videoFramesRef.current[student.userId] ? (
+                                        <img
+                                            src={videoFramesRef.current[student.userId]}
+                                            alt="Student video"
+                                            className="absolute inset-0 w-full h-full object-cover"
+                                        />
+                                    ) : (
+                                        <div className="absolute inset-0 bg-gradient-to-br from-slate-800 to-slate-900 flex items-center justify-center">
+                                            <Camera className="h-8 w-8 text-slate-600" />
+                                        </div>
+                                    )}
                                 </div>
 
                                 {/* Student Info */}
@@ -577,6 +628,225 @@ export default function LiveMonitoringDashboard({
                     </div>
                 </div>
             </div>
+
+            {/* Student Detail Modal */}
+            {selectedStudent && (
+                <motion.div
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    className="fixed inset-0 bg-black/80 backdrop-blur-md z-[100] flex items-center justify-center p-6"
+                    onClick={() => setSelectedStudent(null)}
+                >
+                    <motion.div
+                        initial={{ scale: 0.9, y: 20 }}
+                        animate={{ scale: 1, y: 0 }}
+                        exit={{ scale: 0.9, y: 20 }}
+                        onClick={(e) => e.stopPropagation()}
+                        className="bg-gradient-to-br from-slate-900 to-slate-800 border border-white/20 rounded-3xl p-6 w-full max-w-6xl max-h-[90vh] overflow-y-auto"
+                    >
+                        {/* Modal Header */}
+                        <div className="flex justify-between items-start mb-6">
+                            <div>
+                                <h2 className="text-2xl font-bold text-white mb-1">{selectedStudent.name}</h2>
+                                <p className="text-gray-400">{selectedStudent.studentId}</p>
+                            </div>
+
+                            <div className="flex items-center gap-3">
+                                {/* Status Badge */}
+                                <div className={cn(
+                                    'px-4 py-2 rounded-xl font-semibold text-sm border',
+                                    getSeverityBg(selectedStudent.status),
+                                    selectedStudent.status === 'critical' && 'animate-pulse'
+                                )}>
+                                    {selectedStudent.status.toUpperCase()}
+                                </div>
+
+                                {/* Close Button */}
+                                <button
+                                    onClick={() => setSelectedStudent(null)}
+                                    className="p-2 hover:bg-white/10 rounded-xl transition-colors"
+                                >
+                                    <X className="h-6 w-6 text-white" />
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Video Streams Grid */}
+                        <div className="grid grid-cols-2 gap-6 mb-6">
+                            {/* Camera Feed */}
+                            <div className="space-y-3">
+                                <div className="flex items-center gap-2">
+                                    <Camera className="h-5 w-5 text-indigo-400" />
+                                    <h3 className="text-lg font-semibold text-white">Camera Feed</h3>
+                                    <div className="flex items-center gap-1.5 bg-black/60 backdrop-blur-sm px-2 py-1 rounded-md">
+                                        <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+                                        <span className="text-xs font-semibold text-white">LIVE</span>
+                                    </div>
+                                </div>
+
+                                <div className="aspect-video bg-black rounded-2xl relative overflow-hidden border-2 border-white/10">
+                                    {/* Face Detection Box */}
+                                    {selectedStudent.faceDetected && (
+                                        <div className={cn(
+                                            'absolute inset-8 border-4 rounded-lg transition-colors z-10',
+                                            selectedStudent.status === 'normal' && 'border-green-500',
+                                            selectedStudent.status === 'warning' && 'border-yellow-500',
+                                            selectedStudent.status === 'suspicious' && 'border-orange-500',
+                                            selectedStudent.status === 'critical' && 'border-red-500'
+                                        )} />
+                                    )}
+
+                                    {/* No Face Warning */}
+                                    {!selectedStudent.faceDetected && (
+                                        <div className="absolute inset-0 bg-red-500/20 backdrop-blur-sm flex flex-col items-center justify-center z-10">
+                                            <XCircle className="h-16 w-16 text-red-400 mb-3" />
+                                            <span className="text-xl font-semibold text-red-400">No Face Detected</span>
+                                        </div>
+                                    )}
+
+                                    {/* Video Stream or Placeholder */}
+                                    {videoFramesRef.current[selectedStudent.userId] ? (
+                                        <img
+                                            src={videoFramesRef.current[selectedStudent.userId]}
+                                            alt="Student camera"
+                                            className="absolute inset-0 w-full h-full object-cover"
+                                        />
+                                    ) : (
+                                        <div className="absolute inset-0 bg-gradient-to-br from-slate-800 to-slate-900 flex items-center justify-center">
+                                            <Camera className="h-16 w-16 text-slate-600" />
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Camera Status Indicators */}
+                                <div className="grid grid-cols-3 gap-3">
+                                    <div className={cn(
+                                        'flex items-center gap-2 px-4 py-3 rounded-xl',
+                                        selectedStudent.faceDetected ? 'bg-green-500/20 border border-green-500/30' : 'bg-red-500/20 border border-red-500/30'
+                                    )}>
+                                        <ScanFace className="h-5 w-5" style={{ color: selectedStudent.faceDetected ? '#10b981' : '#ef4444' }} />
+                                        <div>
+                                            <p className="text-xs text-gray-400">Face</p>
+                                            <p className="text-sm font-semibold" style={{ color: selectedStudent.faceDetected ? '#10b981' : '#ef4444' }}>
+                                                {selectedStudent.faceDetected ? 'Detected' : 'Missing'}
+                                            </p>
+                                        </div>
+                                    </div>
+
+                                    <div className={cn(
+                                        'flex items-center gap-2 px-4 py-3 rounded-xl',
+                                        selectedStudent.gaze === 'forward' ? 'bg-green-500/20 border border-green-500/30' : 'bg-yellow-500/20 border border-yellow-500/30'
+                                    )}>
+                                        <Eye className="h-5 w-5" style={{ color: selectedStudent.gaze === 'forward' ? '#10b981' : '#eab308' }} />
+                                        <div>
+                                            <p className="text-xs text-gray-400">Gaze</p>
+                                            <p className="text-sm font-semibold capitalize" style={{ color: selectedStudent.gaze === 'forward' ? '#10b981' : '#eab308' }}>
+                                                {selectedStudent.gaze}
+                                            </p>
+                                        </div>
+                                    </div>
+
+                                    <div className={cn(
+                                        'flex items-center gap-2 px-4 py-3 rounded-xl',
+                                        selectedStudent.headPose === 'normal' ? 'bg-green-500/20 border border-green-500/30' : 'bg-orange-500/20 border border-orange-500/30'
+                                    )}>
+                                        <Activity className="h-5 w-5" style={{ color: selectedStudent.headPose === 'normal' ? '#10b981' : '#f97316' }} />
+                                        <div>
+                                            <p className="text-xs text-gray-400">Pose</p>
+                                            <p className="text-sm font-semibold capitalize" style={{ color: selectedStudent.headPose === 'normal' ? '#10b981' : '#f97316' }}>
+                                                {selectedStudent.headPose}
+                                            </p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Screen Share */}
+                            <div className="space-y-3">
+                                <div className="flex items-center gap-2">
+                                    <Monitor className="h-5 w-5 text-violet-400" />
+                                    <h3 className="text-lg font-semibold text-white">Screen Share</h3>
+                                    <div className="flex items-center gap-1.5 bg-black/60 backdrop-blur-sm px-2 py-1 rounded-md">
+                                        <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                                        <span className="text-xs font-semibold text-white">ACTIVE</span>
+                                    </div>
+                                </div>
+
+                                <div className="aspect-video bg-black rounded-2xl relative overflow-hidden border-2 border-white/10">
+                                    {/* Screen Stream or Placeholder */}
+                                    {screenFramesRef.current[selectedStudent.userId] ? (
+                                        <img
+                                            src={screenFramesRef.current[selectedStudent.userId]}
+                                            alt="Student screen"
+                                            className="absolute inset-0 w-full h-full object-contain"
+                                        />
+                                    ) : (
+                                        <div className="absolute inset-0 bg-gradient-to-br from-slate-800 to-slate-900 flex items-center justify-center">
+                                            <Monitor className="h-16 w-16 text-slate-600" />
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Screen Activity Info */}
+                                <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-xl p-4">
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <p className="text-xs text-gray-400 mb-1">Time Remaining</p>
+                                            <p className="text-2xl font-mono font-bold text-white">{formatTime(selectedStudent.timeRemaining)}</p>
+                                        </div>
+                                        <div>
+                                            <p className="text-xs text-gray-400 mb-1">Violations</p>
+                                            <p className="text-2xl font-mono font-bold text-red-400">{selectedStudent.violations}</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Violation History */}
+                        {selectedStudent.latestViolation && (
+                            <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4">
+                                <div className="flex items-start gap-3">
+                                    <AlertTriangle className="h-5 w-5 text-red-400 mt-0.5" />
+                                    <div className="flex-1">
+                                        <p className="font-semibold text-red-400 mb-1">Latest Violation</p>
+                                        <p className="text-sm text-gray-300">{selectedStudent.latestViolation}</p>
+                                        <p className="text-xs text-gray-500 mt-1">{selectedStudent.violationTime}</p>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Action Buttons */}
+                        <div className="flex gap-3 mt-6">
+                            <Button
+                                variant="destructive"
+                                className="flex-1 bg-red-600 hover:bg-red-700"
+                            >
+                                <AlertTriangle className="h-4 w-4" />
+                                Flag Student
+                            </Button>
+
+                            <Button
+                                variant="outline"
+                                className="flex-1"
+                            >
+                                <Download className="h-4 w-4" />
+                                Download Recording
+                            </Button>
+
+                            <Button
+                                variant="outline"
+                                className="flex-1"
+                            >
+                                <FileText className="h-4 w-4" />
+                                View Full Report
+                            </Button>
+                        </div>
+                    </motion.div>
+                </motion.div>
+            )}
         </div>
     );
 }

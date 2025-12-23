@@ -2855,6 +2855,9 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
     const proctoringAbortControllerRef = useRef<AbortController | null>(null); // To abort all pending requests
     const [proctoringStopped, setProctoringStopped] = useState(false);
     const [proctoringKey, setProctoringKey] = useState(0); // Used to restart proctoring
+    // Socket.io for live streaming to lecturer
+    const proctoringSocketRef = useRef<any>(null);
+    const videoStreamTimerRef = useRef<number | null>(null);
     // Note: switched to continuous MediaRecorder with timeslice; no need for manual chunks buffer.
     // const audioChunksRef = useRef<Blob[]>([]);
 
@@ -3189,6 +3192,22 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
             proctoringIntervalRef.current = null;
         }
         
+        // Stop Socket.io video streaming
+        console.log('[SUBMIT] Stopping Socket.io video streaming...');
+        if (videoStreamTimerRef.current) {
+            clearInterval(videoStreamTimerRef.current);
+            videoStreamTimerRef.current = null;
+        }
+        if (proctoringSocketRef.current) {
+            try {
+                proctoringSocketRef.current.disconnect();
+                console.log('[SUBMIT] Socket.io disconnected');
+            } catch (e) {
+                console.log('[SUBMIT] Error disconnecting socket:', e);
+            }
+            proctoringSocketRef.current = null;
+        }
+        
         console.log('[SUBMIT] Stopping media recorder...');
         if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
             try {
@@ -3502,6 +3521,118 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                         };
                     }
                 } catch {}
+
+                // Initialize Socket.io for live video streaming to lecturer
+                try {
+                    const baseUrl = API_URL.replace('/api', '');
+                    const { io } = await import('socket.io-client');
+                    const socket = io(`${baseUrl}/proctor`, {
+                        query: { 
+                            examId: exam._id, 
+                            userId: user._id,
+                            studentId: user.studentId || user.email,
+                            name: user.name,
+                            role: 'student' 
+                        }
+                    });
+
+                    socket.on('connect', () => {
+                        console.log('[STREAMING] Connected to proctoring server for live video streaming');
+                    });
+
+                    socket.on('disconnect', () => {
+                        console.log('[STREAMING] Disconnected from proctoring server');
+                    });
+
+                    proctoringSocketRef.current = socket;
+
+                    // Start streaming video frames to lecturer (every 2 seconds for low bandwidth)
+                    const streamVideo = () => {
+                        if (abortSignal.aborted || !videoRef.current) return;
+
+                        try {
+                            const canvas = document.createElement('canvas');
+                            const video = videoRef.current;
+                            
+                            // Only stream if video is playing and has dimensions
+                            if (video.readyState === video.HAVE_ENOUGH_DATA) {
+                                canvas.width = 320; // Lower resolution for streaming
+                                canvas.height = 240;
+                                const ctx = canvas.getContext('2d');
+                                
+                                if (ctx) {
+                                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                                    const imageData = canvas.toDataURL('image/jpeg', 0.6);
+                                    
+                                    // Emit video frame to lecturer via Socket.io
+                                    socket.emit('student-video-frame', {
+                                        examId: exam._id,
+                                        userId: user._id,
+                                        frame: imageData,
+                                        timestamp: Date.now()
+                                    });
+                                }
+                            }
+                        } catch (err) {
+                            console.error('[STREAMING] Error streaming video frame:', err);
+                        }
+                    };
+
+                    // Stream video every 2 seconds
+                    videoStreamTimerRef.current = window.setInterval(streamVideo, 2000);
+
+                    // Also start screen capture and streaming
+                    try {
+                        const screenStream = await (navigator.mediaDevices as any).getDisplayMedia({
+                            video: { mediaSource: 'screen' }
+                        });
+
+                        screenStreamRef.current = screenStream;
+
+                        // Stream screen frames
+                        const streamScreen = () => {
+                            if (abortSignal.aborted || !screenStreamRef.current) return;
+
+                            try {
+                                const canvas = document.createElement('canvas');
+                                const video = document.createElement('video');
+                                video.srcObject = screenStreamRef.current;
+                                video.play();
+
+                                video.onloadedmetadata = () => {
+                                    canvas.width = 480;
+                                    canvas.height = 360;
+                                    const ctx = canvas.getContext('2d');
+                                    
+                                    if (ctx) {
+                                        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                                        const imageData = canvas.toDataURL('image/jpeg', 0.7);
+                                        
+                                        socket.emit('student-screen-frame', {
+                                            examId: exam._id,
+                                            userId: user._id,
+                                            frame: imageData,
+                                            timestamp: Date.now()
+                                        });
+                                    }
+                                };
+                            } catch (err) {
+                                console.error('[STREAMING] Error streaming screen frame:', err);
+                            }
+                        };
+
+                        // Stream screen every 3 seconds
+                        setInterval(streamScreen, 3000);
+                        
+                        console.log('[STREAMING] Screen capture started');
+                    } catch (screenErr) {
+                        console.warn('[STREAMING] Screen capture not available or denied:', screenErr);
+                        // Continue without screen capture - it's optional
+                    }
+                } catch (socketErr) {
+                    console.error('[STREAMING] Failed to initialize Socket.io streaming:', socketErr);
+                    // Continue with proctoring even if streaming fails
+                }
 
                 // Start audio stream and recorder
                 const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
