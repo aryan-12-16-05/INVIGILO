@@ -1670,6 +1670,116 @@ def get_exam_status(exam_id):
         app.logger.exception("Error in get_exam_status")
         return jsonify({"error": "Time calculation error", "detail": str(e)}), 500
 
+@app.route('/api/lecturer/exams/<exam_id>/monitor', methods=['GET'])
+@limiter.limit("60 per minute")
+def get_exam_monitoring_data(exam_id):
+    """
+    Get real-time monitoring data for all students taking this exam.
+    
+    Returns list of active students with their proctoring status, violations, and metrics.
+    Used by lecturer live monitoring dashboard.
+    
+    URL Parameters:
+        exam_id (str): Exam identifier
+    
+    Returns:
+        200 OK with monitoring data for all active students
+        404 Not Found: Exam not found
+        500 Internal Error: Database error
+    """
+    try:
+        # Validate exam exists
+        exam = exams_collection.find_one({'_id': ObjectId(exam_id)}) if ObjectId.is_valid(exam_id) else None
+        if not exam:
+            return jsonify({"error": "Exam not found"}), 404
+        
+        # Get all exam attempts for this exam that are in progress
+        attempts = list(exam_attempts_collection.find({
+            'exam_id': exam_id,
+            'status': 'in_progress'
+        }))
+        
+        # Build student monitoring data
+        students_data = []
+        for attempt in attempts:
+            user_id = attempt.get('user_id')
+            
+            # Get user info
+            user = users_collection.find_one({'_id': ObjectId(user_id)}) if ObjectId.is_valid(user_id) else None
+            if not user:
+                continue
+            
+            # Get latest proctoring logs for this user/exam
+            recent_logs = list(proctoring_logs_collection.find({
+                'exam_id': exam_id,
+                'user_id': user_id
+            }).sort('timestamp', -1).limit(10))
+            
+            # Calculate metrics
+            total_violations = len([log for log in recent_logs if log.get('violation_type')])
+            risk_score = attempt.get('risk_score', 0)
+            
+            # Determine status based on risk score
+            if risk_score >= 75:
+                status = 'critical'
+            elif risk_score >= 50:
+                status = 'suspicious'
+            elif risk_score >= 20:
+                status = 'warning'
+            else:
+                status = 'normal'
+            
+            # Get latest face/gaze/pose detection from logs
+            latest_log = recent_logs[0] if recent_logs else {}
+            face_detected = latest_log.get('face_detected', True)
+            gaze = latest_log.get('gaze_direction', 'forward')
+            head_pose = latest_log.get('head_pose', 'normal')
+            
+            # Calculate time remaining
+            start_time = attempt.get('start_time')
+            duration = exam.get('duration', 60)  # minutes
+            time_remaining = 0
+            
+            if start_time:
+                if isinstance(start_time, str):
+                    start_time = datetime.datetime.fromisoformat(start_time.replace('Z', ''))
+                elapsed_minutes = (datetime.datetime.now() - start_time).total_seconds() / 60
+                time_remaining = max(0, int((duration - elapsed_minutes) * 60))  # in seconds
+            
+            # Get latest violation details
+            latest_violation = None
+            violation_time = None
+            if recent_logs and recent_logs[0].get('violation_type'):
+                latest_violation = recent_logs[0].get('violation_message', 'Suspicious activity detected')
+                violation_time = recent_logs[0].get('timestamp', datetime.datetime.now()).strftime('%H:%M:%S')
+            
+            students_data.append({
+                'userId': str(user_id),
+                'studentId': user.get('studentId', user.get('email', '')),
+                'name': user.get('name', 'Unknown'),
+                'faceDetected': face_detected,
+                'gaze': gaze if gaze in ['forward', 'away', 'down'] else 'forward',
+                'headPose': head_pose if head_pose in ['normal', 'tilted', 'down'] else 'normal',
+                'violations': total_violations,
+                'status': status,
+                'timeRemaining': time_remaining,
+                'latestViolation': latest_violation,
+                'violationTime': violation_time
+            })
+        
+        return jsonify({
+            'students': students_data,
+            'stats': {
+                'activeExams': 1,
+                'studentsOnline': len(students_data),
+                'activeViolations': sum(1 for s in students_data if s['violations'] > 0)
+            }
+        }), 200
+        
+    except Exception as e:
+        app.logger.exception("Error in get_exam_monitoring_data")
+        return jsonify({"error": "Failed to fetch monitoring data", "detail": str(e)}), 500
+
 @app.route('/api/exams/<exam_id>', methods=['DELETE'])
 def delete_exam(exam_id):
     try:
@@ -3663,6 +3773,72 @@ def handle_ping():
         - 'pong': Response to ping
     """
     emit('pong', {'timestamp': datetime.datetime.utcnow().isoformat() + 'Z'})
+
+
+@socketio.on('student-video-frame', namespace='/proctor')
+def handle_student_video_frame(data):
+    """
+    Receive video frame from student and broadcast to lecturers monitoring this exam.
+    
+    Args:
+        data (dict): Contains examId, userId, frame (base64 image), timestamp
+    """
+    try:
+        exam_id = data.get('examId')
+        user_id = data.get('userId')
+        frame = data.get('frame')
+        
+        if not exam_id or not user_id or not frame:
+            app.logger.warning('[VIDEO] Missing required fields in video frame')
+            return
+        
+        # Broadcast to all lecturers monitoring this exam (send to exam room)
+        socketio.emit(
+            'video-frame',
+            {
+                'userId': user_id,
+                'frame': frame,
+                'timestamp': data.get('timestamp', int(datetime.datetime.utcnow().timestamp() * 1000))
+            },
+            room=exam_id,
+            namespace='/proctor'
+        )
+        
+    except Exception as e:
+        app.logger.error(f'[VIDEO] Error handling video frame: {e}')
+
+
+@socketio.on('student-screen-frame', namespace='/proctor')
+def handle_student_screen_frame(data):
+    """
+    Receive screen capture frame from student and broadcast to lecturers monitoring this exam.
+    
+    Args:
+        data (dict): Contains examId, userId, frame (base64 image), timestamp
+    """
+    try:
+        exam_id = data.get('examId')
+        user_id = data.get('userId')
+        frame = data.get('frame')
+        
+        if not exam_id or not user_id or not frame:
+            app.logger.warning('[SCREEN] Missing required fields in screen frame')
+            return
+        
+        # Broadcast to all lecturers monitoring this exam
+        socketio.emit(
+            'screen-frame',
+            {
+                'userId': user_id,
+                'frame': frame,
+                'timestamp': data.get('timestamp', int(datetime.datetime.utcnow().timestamp() * 1000))
+            },
+            room=exam_id,
+            namespace='/proctor'
+        )
+        
+    except Exception as e:
+        app.logger.error(f'[SCREEN] Error handling screen frame: {e}')
 
 
 def broadcast_violation(exam_id, user_id, violation_data):

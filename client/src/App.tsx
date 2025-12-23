@@ -3538,10 +3538,20 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
 
                     socket.on('connect', () => {
                         console.log('[STREAMING] Connected to proctoring server for live video streaming');
+                        // Join the exam room so lecturers can receive our frames
+                        socket.emit('join_exam', { examId: exam._id });
                     });
 
                     socket.on('disconnect', () => {
                         console.log('[STREAMING] Disconnected from proctoring server');
+                    });
+
+                    socket.on('status', (data: any) => {
+                        console.log('[STREAMING] Status:', data.message);
+                    });
+
+                    socket.on('error', (data: any) => {
+                        console.error('[STREAMING] Error:', data.message);
                     });
 
                     proctoringSocketRef.current = socket;

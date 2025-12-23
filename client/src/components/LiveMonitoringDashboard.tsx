@@ -96,10 +96,20 @@ export default function LiveMonitoringDashboard({
 
         newSocket.on('connect', () => {
             console.log('[DASHBOARD] Connected to proctoring server');
+            // Join the exam room to receive frames from students
+            newSocket.emit('join_exam', { examId });
+        });
+
+        newSocket.on('status', (data: any) => {
+            console.log('[DASHBOARD] Status:', data.message);
+        });
+
+        newSocket.on('error', (data: any) => {
+            console.error('[DASHBOARD] Error:', data.message);
         });
 
         // Listen for video frames from students
-        newSocket.on('student-video-frame', (data: { userId: string; frame: string; timestamp: number }) => {
+        newSocket.on('video-frame', (data: { userId: string; frame: string; timestamp: number }) => {
             videoFramesRef.current[data.userId] = data.frame;
             // Force re-render every 5 frames to update UI
             if (Math.random() < 0.2) {
@@ -108,7 +118,7 @@ export default function LiveMonitoringDashboard({
         });
 
         // Listen for screen frames from students
-        newSocket.on('student-screen-frame', (data: { userId: string; frame: string; timestamp: number }) => {
+        newSocket.on('screen-frame', (data: { userId: string; frame: string; timestamp: number }) => {
             screenFramesRef.current[data.userId] = data.frame;
             if (Math.random() < 0.2) {
                 setStudents(prev => [...prev]);
