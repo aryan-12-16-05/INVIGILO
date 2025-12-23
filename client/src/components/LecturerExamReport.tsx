@@ -61,18 +61,16 @@ export default function LecturerExamReport({
     useEffect(() => {
         const fetchReport = async () => {
             try {
-                const res = await fetch(`${API_URL}/lecturer/exams/${examId}/report`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                });
+                const res = await fetch(`${API_URL}/lecturer/exams/${examId}/report`);
                 const data = await res.json();
-                if (res.ok) {
+                if (res.ok && data.examId) {
                     setReport(data);
+                    setIsLoading(false);
                 } else {
-                    // Load mock data if API not ready
+                    // Load mock data if API returns error
                     loadMockData();
+                    setIsLoading(false);
                 }
-                setIsLoading(false);
             } catch (err) {
                 console.error('Failed to fetch report:', err);
                 // Load mock data on error

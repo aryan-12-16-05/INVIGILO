@@ -1780,6 +1780,146 @@ def get_exam_monitoring_data(exam_id):
         app.logger.exception("Error in get_exam_monitoring_data")
         return jsonify({"error": "Failed to fetch monitoring data", "detail": str(e)}), 500
 
+@app.route('/api/lecturer/exams/<exam_id>/report', methods=['GET', 'POST'])
+@limiter.limit("30 per minute")
+def get_exam_report(exam_id):
+    """
+    Get comprehensive exam report with student results, violations, and statistics.
+    
+    Returns detailed report for completed/in-progress exam including:
+    - Overall statistics (attendance, average score, pass rate)
+    - Individual student results with scores and violations
+    - Incident breakdown by type
+    
+    URL Parameters:
+        exam_id (str): Exam identifier
+    
+    Returns:
+        200 OK with exam report data
+        404 Not Found: Exam not found
+        500 Internal Error: Database error
+    """
+    try:
+        # Validate exam exists
+        exam = exams_collection.find_one({'_id': ObjectId(exam_id)}) if ObjectId.is_valid(exam_id) else None
+        if not exam:
+            return jsonify({"error": "Exam not found"}), 404
+        
+        # Get all exam attempts for this exam
+        attempts = list(exam_attempts_collection.find({'exam_id': exam_id}))
+        
+        # Calculate statistics
+        total_students = len(attempts)
+        completed_students = len([a for a in attempts if a.get('status') == 'completed'])
+        
+        # Get student results
+        students_data = []
+        total_score = 0
+        passed_students = 0
+        total_incidents = 0
+        high_risk_count = 0
+        
+        incident_breakdown = {
+            'identityMismatch': 0,
+            'multipleFaces': 0,
+            'phoneDetected': 0,
+            'tabSwitch': 0,
+            'gazeAway': 0,
+            'audioViolation': 0
+        }
+        
+        for attempt in attempts:
+            user_id = attempt.get('user_id')
+            user = users_collection.find_one({'_id': ObjectId(user_id)}) if ObjectId.is_valid(user_id) else None
+            if not user:
+                continue
+            
+            score = attempt.get('score', 0)
+            total_questions = len(exam.get('questions', []))
+            percentage = round((score / total_questions * 100), 2) if total_questions > 0 else 0
+            risk_score = attempt.get('risk_score', 0)
+            
+            # Get proctoring logs for incident count
+            logs = list(proctoring_logs_collection.find({
+                'exam_id': exam_id,
+                'user_id': user_id
+            }))
+            
+            incident_count = len([log for log in logs if log.get('violation_type')])
+            
+            # Count incident types
+            for log in logs:
+                violation_type = log.get('violation_type', '')
+                if 'identity' in violation_type.lower() or 'face_mismatch' in violation_type.lower():
+                    incident_breakdown['identityMismatch'] += 1
+                elif 'multiple' in violation_type.lower():
+                    incident_breakdown['multipleFaces'] += 1
+                elif 'phone' in violation_type.lower() or 'mobile' in violation_type.lower():
+                    incident_breakdown['phoneDetected'] += 1
+                elif 'tab' in violation_type.lower() or 'window' in violation_type.lower():
+                    incident_breakdown['tabSwitch'] += 1
+                elif 'gaze' in violation_type.lower() or 'eye' in violation_type.lower():
+                    incident_breakdown['gazeAway'] += 1
+                elif 'audio' in violation_type.lower() or 'voice' in violation_type.lower():
+                    incident_breakdown['audioViolation'] += 1
+            
+            # Calculate duration
+            start_time = attempt.get('start_time')
+            end_time = attempt.get('end_time')
+            duration = 0
+            if start_time and end_time:
+                if isinstance(start_time, str):
+                    start_time = datetime.datetime.fromisoformat(start_time.replace('Z', ''))
+                if isinstance(end_time, str):
+                    end_time = datetime.datetime.fromisoformat(end_time.replace('Z', ''))
+                duration = int((end_time - start_time).total_seconds() / 60)  # in minutes
+            
+            total_score += score
+            if percentage >= 50:  # Pass threshold
+                passed_students += 1
+            
+            total_incidents += incident_count
+            if risk_score >= 60:
+                high_risk_count += 1
+            
+            students_data.append({
+                'studentId': user.get('studentId', user.get('email', '')),
+                'name': user.get('name', 'Unknown'),
+                'score': score,
+                'percentage': percentage,
+                'riskScore': risk_score,
+                'incidentCount': incident_count,
+                'duration': duration,
+                'status': attempt.get('status', 'in_progress')
+            })
+        
+        # Calculate overall metrics
+        average_score = round(total_score / total_students, 2) if total_students > 0 else 0
+        pass_rate = round((passed_students / total_students * 100), 1) if total_students > 0 else 0
+        attendance_rate = round((total_students / total_students * 100), 1) if total_students > 0 else 100
+        
+        report_data = {
+            'examId': exam_id,
+            'title': exam.get('title', 'Untitled Exam'),
+            'courseCode': exam.get('courseCode', 'N/A'),
+            'date': exam.get('startTime', datetime.datetime.now()).strftime('%Y-%m-%d') if exam.get('startTime') else 'N/A',
+            'duration': exam.get('duration', 0),
+            'totalStudents': total_students,
+            'attendanceRate': attendance_rate,
+            'averageScore': average_score,
+            'passRate': pass_rate,
+            'totalIncidents': total_incidents,
+            'highRiskStudents': high_risk_count,
+            'students': students_data,
+            'incidentBreakdown': incident_breakdown
+        }
+        
+        return jsonify(report_data), 200
+        
+    except Exception as e:
+        app.logger.exception("Error in get_exam_report")
+        return jsonify({"error": "Failed to fetch exam report", "detail": str(e)}), 500
+
 @app.route('/api/exams/<exam_id>', methods=['DELETE'])
 def delete_exam(exam_id):
     try:

@@ -148,18 +148,15 @@ export default function LiveMonitoringDashboard({
 
         const fetchData = async () => {
             try {
-                const res = await fetch(`${API_URL}/lecturer/exams/${examId}/monitor`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' }
-                });
+                const res = await fetch(`${API_URL}/lecturer/exams/${examId}/monitor`);
 
                 if (res.ok) {
                     const data = await res.json();
                     if (data.students) {
                         setStudents(data.students);
-                        setStats({
+                        setStats(data.stats || {
                             activeExams: 1,
-                            studentsOnline: data.students.filter((s: LiveStudent) => s.faceDetected).length,
+                            studentsOnline: data.students.length,
                             activeViolations: data.students.filter((s: LiveStudent) => s.violations > 0).length
                         });
                     }
