@@ -1703,68 +1703,71 @@ def get_exam_monitoring_data(exam_id):
         students_data = []
         for attempt in attempts:
             user_id = attempt.get('user_id')
-            
-            # Get user info
             user = users_collection.find_one({'_id': ObjectId(user_id)}) if ObjectId.is_valid(user_id) else None
             if not user:
                 continue
             
-            # Get latest proctoring logs for this user/exam
-            recent_logs = list(proctoring_logs_collection.find({
+            # Get score and percentage
+            score = attempt.get('score', 0)
+            percentage = attempt.get('percentage', 0)
+            
+            # If percentage not stored, calculate it
+            if not percentage and attempt.get('total_marks'):
+                percentage = round((score / attempt.get('total_marks', 1)) * 100, 2)
+            
+            # Get proctoring logs for incident count
+            logs = list(proctoring_logs_collection.find({
                 'exam_id': exam_id,
                 'user_id': user_id
-            }).sort('timestamp', -1).limit(10))
+            }))
             
-            # Calculate metrics
-            total_violations = len([log for log in recent_logs if log.get('violation_type')])
-            risk_score = attempt.get('risk_score', 0)
+            incident_count = len([log for log in logs if log.get('violation_type')])
             
-            # Determine status based on risk score
-            if risk_score >= 75:
-                status = 'critical'
-            elif risk_score >= 50:
-                status = 'suspicious'
-            elif risk_score >= 20:
-                status = 'warning'
-            else:
-                status = 'normal'
+            # Count incident types
+            for log in logs:
+                violation_type = log.get('violation_type', '')
+                if 'identity' in violation_type.lower() or 'face_mismatch' in violation_type.lower():
+                    incident_breakdown['identityMismatch'] += 1
+                elif 'multiple' in violation_type.lower():
+                    incident_breakdown['multipleFaces'] += 1
+                elif 'phone' in violation_type.lower() or 'mobile' in violation_type.lower():
+                    incident_breakdown['phoneDetected'] += 1
+                elif 'tab' in violation_type.lower() or 'window' in violation_type.lower():
+                    incident_breakdown['tabSwitch'] += 1
+                elif 'gaze' in violation_type.lower() or 'eye' in violation_type.lower():
+                    incident_breakdown['gazeAway'] += 1
+                elif 'audio' in violation_type.lower() or 'voice' in violation_type.lower():
+                    incident_breakdown['audioViolation'] += 1
             
-            # Get latest face/gaze/pose detection from logs
-            latest_log = recent_logs[0] if recent_logs else {}
-            face_detected = latest_log.get('face_detected', True)
-            gaze = latest_log.get('gaze_direction', 'forward')
-            head_pose = latest_log.get('head_pose', 'normal')
-            
-            # Calculate time remaining
+            # Calculate duration
             start_time = attempt.get('start_time')
-            duration = exam.get('duration', 60)  # minutes
-            time_remaining = 0
-            
-            if start_time:
+            end_time = attempt.get('end_time')
+            duration = 0
+            if start_time and end_time:
                 if isinstance(start_time, str):
                     start_time = datetime.datetime.fromisoformat(start_time.replace('Z', ''))
-                elapsed_minutes = (datetime.datetime.now() - start_time).total_seconds() / 60
-                time_remaining = max(0, int((duration - elapsed_minutes) * 60))  # in seconds
+                if isinstance(end_time, str):
+                    end_time = datetime.datetime.fromisoformat(end_time.replace('Z', ''))
+                duration = int((end_time - start_time).total_seconds() / 60)  # in minutes
             
-            # Get latest violation details
-            latest_violation = None
-            violation_time = None
-            if recent_logs and recent_logs[0].get('violation_type'):
-                latest_violation = recent_logs[0].get('violation_message', 'Suspicious activity detected')
-                violation_time = recent_logs[0].get('timestamp', datetime.datetime.now()).strftime('%H:%M:%S')
+            total_score += score
+            if percentage >= 50:  # Pass threshold
+                passed_students += 1
+            
+            risk_score = attempt.get('risk_score', 0)
+            total_incidents += incident_count
+            if risk_score >= 60:
+                high_risk_count += 1
             
             students_data.append({
-                'userId': str(user_id),
                 'studentId': user.get('studentId', user.get('email', '')),
                 'name': user.get('name', 'Unknown'),
-                'faceDetected': face_detected,
-                'gaze': gaze if gaze in ['forward', 'away', 'down'] else 'forward',
-                'headPose': head_pose if head_pose in ['normal', 'tilted', 'down'] else 'normal',
-                'violations': total_violations,
-                'status': status,
-                'timeRemaining': time_remaining,
-                'latestViolation': latest_violation,
-                'violationTime': violation_time
+                'score': score,
+                'percentage': percentage,
+                'riskScore': risk_score,
+                'incidentCount': incident_count,
+                'duration': duration,
+                'status': attempt.get('status', 'in_progress')
             })
         
         return jsonify({
@@ -1894,9 +1897,11 @@ def get_exam_report(exam_id):
             })
         
         # Calculate overall metrics
+        total_questions = len(exam.get('questions', []))
         average_score = round(total_score / total_students, 2) if total_students > 0 else 0
+        average_percentage = round((average_score / total_questions * 100), 2) if total_questions > 0 else 0
         pass_rate = round((passed_students / total_students * 100), 1) if total_students > 0 else 0
-        attendance_rate = round((total_students / total_students * 100), 1) if total_students > 0 else 100
+        attendance_rate = 100.0  # All attempts represent attendance
         
         report_data = {
             'examId': exam_id,
@@ -1906,7 +1911,7 @@ def get_exam_report(exam_id):
             'duration': exam.get('duration', 0),
             'totalStudents': total_students,
             'attendanceRate': attendance_rate,
-            'averageScore': average_score,
+            'averageScore': average_percentage,  # Show as percentage for consistency
             'passRate': pass_rate,
             'totalIncidents': total_incidents,
             'highRiskStudents': high_risk_count,
@@ -1957,11 +1962,12 @@ def submit_exam(exam_id):
         
         total_marks = 0
         score = 0
+        correct_count = 0
         per_question = []
 
         for question in exam.get('questions', []):
             q_id = str(question['_id'])
-            marks = question.get('marks', 0) or 0
+            marks = 1  # Each question is worth 1 mark
             total_marks += marks
             user_answer = answers.get(q_id)
             correct = False
@@ -2030,6 +2036,7 @@ def submit_exam(exam_id):
 
             if correct:
                 score += marks
+                correct_count += 1
 
             per_question.append({
                 'questionId': q_id,
@@ -2040,16 +2047,19 @@ def submit_exam(exam_id):
                 'correct': correct
             })
 
-        percentage = round((score / total_marks) * 100) if total_marks > 0 else 0
+        percentage = round((score / total_marks) * 100, 2) if total_marks > 0 else 0
 
         attempt_record = {
             'userId': user_id,
-            'score': percentage,
+            'score': score,  # Actual score (number of correct answers)
+            'totalMarks': total_marks,
+            'percentage': percentage,
+            'correctCount': correct_count,
             'completedAt': datetime.datetime.utcnow().isoformat(),
             'perQuestion': per_question
         }
 
-        # Store attempt and mark this user as completed for this exam
+        # Store attempt in exams collection
         exams_collection.update_one(
             {'_id': ObjectId(exam_id)},
             {
@@ -2057,10 +2067,35 @@ def submit_exam(exam_id):
                 '$addToSet': {'completedBy': user_id}
             }
         )
+        
+        # Also store in exam_attempts collection for easier querying
+        exam_attempts_collection.update_one(
+            {
+                'exam_id': exam_id,
+                'user_id': user_id
+            },
+            {
+                '$set': {
+                    'exam_id': exam_id,
+                    'user_id': user_id,
+                    'score': score,
+                    'total_marks': total_marks,
+                    'percentage': percentage,
+                    'correct_count': correct_count,
+                    'status': 'completed',
+                    'end_time': datetime.datetime.utcnow(),
+                    'per_question': per_question,
+                    'risk_score': 0  # Will be updated by proctoring
+                }
+            },
+            upsert=True
+        )
 
         return jsonify({
-            'score': percentage,
+            'score': score,
             'totalMarks': total_marks,
+            'percentage': percentage,
+            'correctCount': correct_count,
             'perQuestion': per_question
         }), 200
 
