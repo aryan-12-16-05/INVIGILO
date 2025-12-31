@@ -297,103 +297,6 @@ def validate_password(password):
 # ================================================================================
 
 # ================================================================================
-# ADMIN ROLE ENFORCEMENT
-# ================================================================================
-def require_admin():
-    """
-    Verifies that the current request is from an admin user.
-    Checks X-User-Id header and validates admin role.
-    
-    Returns:
-        tuple: (is_admin: bool, user: dict or None, error_response: tuple or None)
-            - is_admin: True if user is admin, False otherwise
-            - user: User document if found, None otherwise
-            - error_response: (jsonify, status_code) tuple if not admin, None if admin
-    
-    Usage:
-        is_admin, user, error = require_admin()
-        if not is_admin:
-            return error  # Returns 403 Forbidden or 401 Unauthorized
-        # Continue with admin action...
-    """
-    # Get user ID from header
-    user_id = request.headers.get('X-User-Id')
-    if not user_id:
-        return False, None, (jsonify({
-            'error': 'Unauthorized',
-            'message': 'X-User-Id header required'
-        }), 401)
-    
-    # Validate ObjectId format
-    if not ObjectId.is_valid(user_id):
-        return False, None, (jsonify({
-            'error': 'Unauthorized',
-            'message': 'Invalid user ID format'
-        }), 401)
-    
-    # Fetch user from database
-    try:
-        user = users_collection.find_one({'_id': ObjectId(user_id)})
-    except Exception as e:
-        app.logger.error(f"Error fetching user for admin check: {e}")
-        return False, None, (jsonify({
-            'error': 'Internal error',
-            'message': 'Failed to verify user'
-        }), 500)
-    
-    # Check if user exists
-    if not user:
-        return False, None, (jsonify({
-            'error': 'Unauthorized',
-            'message': 'User not found'
-        }), 401)
-    
-    # Check if user has admin role
-    if user.get('role') != 'admin':
-        app.logger.warning(f"Non-admin user {user_id} attempted to access admin endpoint: {request.path}")
-        return False, user, (jsonify({
-            'error': 'Forbidden',
-            'message': 'Only admins can perform this action'
-        }), 403)
-    
-    # User is admin
-    return True, user, None
-
-def log_admin_action(admin_id, action, details=None):
-    """
-    Logs admin actions to audit_logs collection for security and compliance.
-    
-    Args:
-        admin_id (str): The ObjectId of the admin user
-        action (str): The action performed (e.g., 'delete_lecturer', 'update_settings')
-        details (dict): Additional details about the action (e.g., deleted user ID, old/new values)
-    
-    Example:
-        log_admin_action(admin_id, 'delete_lecturer', {
-            'lecturer_id': lect_id,
-            'lecturer_email': 'john@example.com'
-        })
-    """
-    try:
-        log_entry = {
-            'admin_id': admin_id,
-            'action': action,
-            'details': details or {},
-            'timestamp': datetime.datetime.utcnow(),
-            'ip_address': request.remote_addr,
-            'user_agent': request.headers.get('User-Agent', 'Unknown'),
-            'endpoint': request.path
-        }
-        audit_logs_collection.insert_one(log_entry)
-        app.logger.info(f"Admin action logged: {action} by {admin_id}")
-    except Exception as e:
-        # Don't fail the request if logging fails, but log the error
-        app.logger.error(f"Failed to log admin action: {e}")
-
-# ================================================================================
-# END ADMIN ROLE ENFORCEMENT
-# ================================================================================
-
 # ================================================================================
 # USER DATA SANITIZATION
 # ================================================================================
@@ -469,7 +372,8 @@ db = None
 users_collection = None
 exams_collection = None
 proctor_events_collection = None
-audit_logs_collection = None  # For admin action logging
+exam_attempts_collection = None
+proctoring_logs_collection = None
 
 if not MONGO_URI:
     # In production (Render) MONGO_URI must be set. For local dev, allow the app
@@ -481,7 +385,8 @@ else:
     users_collection = db['users']
     exams_collection = db['exams']
     proctor_events_collection = db['proctor_events']
-    audit_logs_collection = db['audit_logs']  # For admin action logging
+    exam_attempts_collection = db['exam_attempts']
+    proctoring_logs_collection = db['proctoring_logs']
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 settings_collection = db['settings'] if db is not None else None
 
@@ -1783,7 +1688,7 @@ def get_exam_monitoring_data(exam_id):
         app.logger.exception("Error in get_exam_monitoring_data")
         return jsonify({"error": "Failed to fetch monitoring data", "detail": str(e)}), 500
 
-@app.route('/api/lecturer/exams/<exam_id>/report', methods=['GET', 'POST'])
+@app.route('/api/exams/<exam_id>/report', methods=['GET', 'POST'])
 @limiter.limit("30 per minute")
 def get_exam_report(exam_id):
     """
@@ -1935,6 +1840,49 @@ def delete_exam(exam_id):
             return jsonify({"error": "Exam not found"}), 404
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route('/api/exams/<exam_id>/start', methods=['POST'])
+def start_exam(exam_id):
+    """Track when a student starts an exam to calculate duration and participation."""
+    try:
+        data = request.get_json() or {}
+        user_id = data.get('userId')
+        
+        if not user_id:
+            return jsonify({"error": "userId is required"}), 400
+        
+        # Validate exam exists
+        exam = exams_collection.find_one({'_id': ObjectId(exam_id)}) if ObjectId.is_valid(exam_id) else None
+        if not exam:
+            return jsonify({"error": "Exam not found"}), 404
+        
+        # Create or update exam attempt record
+        exam_attempts_collection.update_one(
+            {
+                'exam_id': exam_id,
+                'user_id': user_id
+            },
+            {
+                '$setOnInsert': {
+                    'exam_id': exam_id,
+                    'user_id': user_id,
+                    'start_time': datetime.datetime.utcnow(),
+                    'status': 'in_progress',
+                    'score': 0,
+                    'total_marks': len(exam.get('questions', [])),
+                    'percentage': 0,
+                    'correct_count': 0,
+                    'risk_score': 0
+                }
+            },
+            upsert=True
+        )
+        
+        return jsonify({"message": "Exam started successfully"}), 200
+        
+    except Exception as e:
+        app.logger.exception("Error in start_exam")
+        return jsonify({"error": "Failed to start exam", "detail": str(e)}), 500
 
 @app.route('/api/exams/<exam_id>/submit', methods=['POST', 'OPTIONS'])
 def submit_exam(exam_id):
@@ -2357,38 +2305,6 @@ def get_exams():
     return jsonify({"exams": all_exams}), 200
 
 
-@app.route('/api/admin/stats', methods=['GET'])
-def get_admin_stats():
-    """Return small set of stats for the admin dashboard (mock-friendly)."""
-    # Require admin role
-    is_admin, admin_user, error = require_admin()
-    if not is_admin:
-        return error
-
-    try:
-        total_students = users_collection.count_documents({'role': 'student'})
-        live_exams = exams_collection.count_documents({'status': 'Live'})
-        # active alerts in last 24 hours
-        since = datetime.datetime.utcnow() - datetime.timedelta(hours=24)
-        active_alerts = proctor_events_collection.count_documents({'timestamp': {'$gte': since}})
-
-        uptime_delta = datetime.datetime.utcnow() - APP_START
-        uptime_hours = uptime_delta.total_seconds() / 3600.0
-        # For display, mock uptime percentage as 99.9 if server has been up > 1 minute, else 100%
-        uptime_percent = '99.9%'
-
-        return jsonify({
-            'totalStudents': total_students,
-            'liveExams': live_exams,
-            'activeAlerts': active_alerts,
-            'systemUptime': uptime_percent,
-            'serverUptimeHours': round(uptime_hours, 2)
-        }), 200
-    except Exception as e:
-        print(f"Error getting admin stats: {e}")
-        return jsonify({'error': str(e)}), 500
-
-
 @app.route('/api/exams/<exam_id>', methods=['PUT'])
 def update_exam(exam_id):
     """Update exam fields and questions. Expects fields similar to creation payload."""
@@ -2483,7 +2399,21 @@ def record_proctor_event():
         except Exception:
             pass
     try:
+        # Store in proctor_events_collection (main collection)
         proctor_events_collection.insert_one(event)
+        
+        # Also store in proctoring_logs_collection for report queries
+        # Create a compatible format for reports
+        log_entry = {
+            'exam_id': str(data['examId']),
+            'user_id': str(data['userId']),
+            'violation_type': event_type,
+            'details': event.get('details', {}),
+            'severity': severity,
+            'timestamp': datetime.datetime.utcnow()
+        }
+        proctoring_logs_collection.insert_one(log_entry)
+        
         return jsonify({'message': 'Event recorded'}), 201
     except Exception as e:
         print(f"[PROCTOR-EVENT] ERROR saving event: {e}")
@@ -3537,58 +3467,6 @@ def debug_set_selected_model():
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/admin/lecturers/<lect_id>', methods=['DELETE'])
-def admin_delete_lecturer(lect_id):
-    """Delete a lecturer and cascade-delete all their data: exams, attempts, proctor events.
-    Note: This is a best-effort cascading delete without multi-document transactions (unless running on a replica set).
-    """
-    # Require admin role
-    is_admin, admin_user, error = require_admin()
-    if not is_admin:
-        return error
-
-    try:
-        user = users_collection.find_one({'_id': ObjectId(lect_id)}) if ObjectId.is_valid(lect_id) else None
-        if not user or user.get('role') != 'lecturer':
-            return jsonify({'error': 'Lecturer not found'}), 404
-
-        # Log the action before deletion
-        log_admin_action(
-            admin_id=str(admin_user['_id']),
-            action='delete_lecturer',
-            details={
-                'lecturer_id': lect_id,
-                'lecturer_email': user.get('email'),
-                'lecturer_name': user.get('name')
-            }
-        )
-
-        # Find all exams by this lecturer
-        exam_docs = list(exams_collection.find({'lecturerId': lect_id}))
-        exam_ids = [str(d.get('_id')) for d in exam_docs]
-
-        # Delete proctor events for these exams
-        pe_res = {'deletedCount': 0}
-        if exam_ids:
-            pe_res = proctor_events_collection.delete_many({'examId': {'$in': exam_ids}})
-
-        # Delete exams
-        ex_res = exams_collection.delete_many({'lecturerId': lect_id})
-
-        # Finally, delete the lecturer account
-        u_res = users_collection.delete_one({'_id': ObjectId(lect_id)})
-
-        return jsonify({
-            'message': 'Lecturer and related data deleted',
-            'deletedProctorEvents': getattr(pe_res, 'deleted_count', 0),
-            'deletedExams': getattr(ex_res, 'deleted_count', 0),
-            'deletedLecturer': getattr(u_res, 'deleted_count', 0)
-        }), 200
-    except Exception as e:
-        print(f"Error deleting lecturer {lect_id}: {e}")
-        return jsonify({'error': str(e)}), 500
-
-
 @app.route('/api/users/<user_id>', methods=['PUT'])
 def update_user(user_id):
     """Update user profile fields. Allowed fields: name, phoneNumber, institution, department, year, studentId, lecturerId."""
@@ -3669,51 +3547,6 @@ def add_face_samples(user_id):
             update['faceEmbedding'] = updated[0]
         users_collection.update_one({'_id': ObjectId(user_id)}, {'$set': update})
         return jsonify({'message': 'Samples added', 'count': len(updated), 'added': len(new_vecs), 'max': max_samples}), 200
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/admin/settings/face-threshold', methods=['GET'])
-def get_face_threshold_setting():
-    """Get current face recognition threshold setting. Admin only."""
-    # Require admin role
-    is_admin, admin_user, error = require_admin()
-    if not is_admin:
-        return error
-    
-    return jsonify({'threshold': get_face_threshold()}), 200
-
-
-@app.route('/api/admin/settings/face-threshold', methods=['PUT'])
-def set_face_threshold_setting():
-    """Update face recognition threshold setting. Admin only."""
-    # Require admin role
-    is_admin, admin_user, error = require_admin()
-    if not is_admin:
-        return error
-    
-    body = request.get_json() or {}
-    try:
-        thr = float(body.get('threshold'))
-        if thr <= 0 or thr > 1:
-            return jsonify({'error': 'Threshold must be between 0 and 1'}), 400
-    except Exception:
-        return jsonify({'error': 'Invalid threshold'}), 400
-    
-    try:
-        # Log the settings change
-        old_threshold = get_face_threshold()
-        log_admin_action(
-            admin_id=str(admin_user['_id']),
-            action='update_face_threshold',
-            details={
-                'old_threshold': old_threshold,
-                'new_threshold': thr
-            }
-        )
-        
-        settings_collection.update_one({'key': 'FACE_SIMILARITY_THRESHOLD'}, {'$set': {'key': 'FACE_SIMILARITY_THRESHOLD', 'value': thr}}, upsert=True)
-        return jsonify({'message': 'Threshold updated', 'threshold': thr}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

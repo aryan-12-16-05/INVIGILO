@@ -61,7 +61,7 @@ export default function LecturerExamReport({
     useEffect(() => {
         const fetchReport = async () => {
             try {
-                const res = await fetch(`${API_URL}/lecturer/exams/${examId}/report`);
+                const res = await fetch(`${API_URL}/exams/${examId}/report`);
                 const data = await res.json();
                 if (res.ok && data.examId) {
                     setReport(data);

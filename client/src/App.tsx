@@ -1,11 +1,11 @@
-import React, { useState, useEffect, type FormEvent, type ChangeEvent, useRef, useCallback } from 'react';
+﻿import React, { useState, useEffect, type FormEvent, type ChangeEvent, useRef, useCallback } from 'react';
 import Sidebar from './sidebar';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
     User, LogIn, ShieldCheck, Cpu, BrainCircuit,
     Timer, PlusCircle, Monitor, AlertTriangle, CheckCircle, XCircle,
     School, GraduationCap, ChevronLeft, Eye, EyeOff,
-    Lock, Users, Wifi, Mic, Video, Globe, Trash2, Unlock, Edit, Save, Play
+    Lock, Users, Wifi, Mic, Video, Globe, Trash2, Unlock, Edit, Save
 } from 'lucide-react';
 
 // Import new proctoring components
@@ -251,7 +251,7 @@ const INSTITUTIONS: { [key: string]: string[] } = {
 
 // --- TYPE DEFINITIONS ---
 type AppState = 'loading' | 'landing' | 'auth' | 'student-dashboard' | 'lecturer-dashboard' | 'exam' | 'result' | 'results-analysis' | 'live-proctoring' | 'help' | 'my-exams' | 'profile' | 'lecturer-proctor' | 'lecturer-report' | 'lecturer-live-exams' | 'lecturer-live-monitor';
-type UserRole = 'student' | 'lecturer' | 'admin';
+type UserRole = 'student' | 'lecturer';
 type ExamStatus = 'Scheduled' | 'Available' | 'Locked' | 'Completed' | 'Live';
 type QuestionType = 'multiple-choice' | 'true-false' | 'short-answer' | 'essay';
 
@@ -502,7 +502,7 @@ export default function App() {
         navigateTo(user.role === 'student' ? 'student-dashboard' : 'lecturer-dashboard');
     };
     
-    const handleStartExam = (examId: string) => {
+    const handleStartExam = async (examId: string) => {
         const examToStart = exams.find(e => e._id === examId);
         if (examToStart) {
             // Prevent starting if user already completed the exam or server indicates they cannot start
@@ -514,6 +514,19 @@ export default function App() {
                 showToast('This exam cannot be started at this time.', 'error');
                 return;
             }
+            
+            // Track exam start in database
+            try {
+                await fetch(`${API_URL}/exams/${examId}/start`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ userId: currentUser?._id })
+                });
+            } catch (err) {
+                console.error('Failed to track exam start:', err);
+                // Continue anyway - don't block exam start
+            }
+            
             setCurrentExam(examToStart);
             navigateTo('exam');
         } else {
@@ -533,10 +546,10 @@ export default function App() {
             case 'loading': return <LoadingScreen key="loading" />;
             case 'landing': return <LandingPage key="landing" onNavigate={navigateTo} />;
             case 'auth': return <AuthPage key="auth" initialRole={authRole} onAuthSuccess={onAuthSuccess} showToast={showToast} onBack={() => navigateTo('landing')} />;
-            case 'student-dashboard': return currentUser && <StudentDashboard key="student-dashboard" user={currentUser} exams={exams} onLogout={handleLogout} onStartExam={handleStartExam} onBack={() => navigateTo('landing')} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} />;
-            case 'my-exams': return currentUser && <MyExamsPage key="my-exams" user={currentUser} exams={exams} onLogout={handleLogout} onStartExam={handleStartExam} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} />;
-            case 'results-analysis': return currentUser && <ResultsAnalysisPage key="results-analysis" user={currentUser} exams={exams} onLogout={handleLogout} onBack={() => navigateTo('student-dashboard')} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} />;
-                case 'lecturer-dashboard': return currentUser && <LecturerDashboard key="lecturer-dashboard" user={currentUser} exams={exams} onLogout={handleLogout} onBack={() => navigateTo('landing')} onExamChange={fetchExams} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} setSelectedExamIdForProctoring={setSelectedExamIdForProctoring} />;
+            case 'student-dashboard': return currentUser && <StudentDashboard key="student-dashboard" user={currentUser} exams={exams} onLogout={handleLogout} onStartExam={handleStartExam} onBack={() => navigateTo('landing')} showToast={showToast} navigateTo={navigateTo} />;
+            case 'my-exams': return currentUser && <MyExamsPage key="my-exams" user={currentUser} exams={exams} onLogout={handleLogout} onStartExam={handleStartExam} showToast={showToast} navigateTo={navigateTo} />;
+            case 'results-analysis': return currentUser && <ResultsAnalysisPage key="results-analysis" user={currentUser} exams={exams} onLogout={handleLogout} onBack={() => navigateTo('student-dashboard')} showToast={showToast} navigateTo={navigateTo} />;
+                case 'lecturer-dashboard': return currentUser && <LecturerDashboard key="lecturer-dashboard" user={currentUser} exams={exams} onLogout={handleLogout} onBack={() => navigateTo('landing')} onExamChange={fetchExams} showToast={showToast} navigateTo={navigateTo} setSelectedExamIdForProctoring={setSelectedExamIdForProctoring} />;
             case 'lecturer-live-exams': return currentUser && <LecturerLiveExamsList key="lecturer-live-exams" lecturerId={currentUser._id} onBack={() => navigateTo('lecturer-dashboard')} onSelectExam={(examId, examTitle) => { setSelectedExamIdForProctoring(examId); setSelectedExamTitle(examTitle); navigateTo('lecturer-live-monitor'); }} />;
             case 'lecturer-live-monitor': return currentUser && selectedExamIdForProctoring && <LiveMonitoringDashboard key="lecturer-live-monitor" examId={selectedExamIdForProctoring} examTitle={selectedExamTitle} onBack={() => navigateTo('lecturer-live-exams')} />;
             case 'lecturer-proctor': return currentUser && selectedExamIdForProctoring && <LecturerProctoringMonitor key="lecturer-proctor" examId={selectedExamIdForProctoring} onBack={() => navigateTo('lecturer-live-exams')} showToast={showToast} />;
@@ -646,18 +659,6 @@ const LandingPage = ({ onNavigate }: { onNavigate: (state: AppState, role: UserR
                             </Button>
                         </div>
                     </AnimatedCard>
-                    <AnimatedCard delay={0.8}>
-                        <div className="flex flex-col items-center text-center">
-                            <div className="p-4 bg-sky-500/10 rounded-full mb-4">
-                                <ShieldCheck className="h-12 w-12 text-sky-300" />
-                            </div>
-                            <h3 className="text-2xl font-bold mb-2">Admin Panel</h3>
-                            <p className="text-slate-400 mb-6">Manage system settings, view statistics, and oversee all platform activities.</p>
-                            <Button className="w-full bg-sky-600 hover:bg-sky-500 shadow-sky-500/30" onClick={() => onNavigate('auth', 'admin')}>
-                                Enter as Admin <ShieldCheck className="ml-2 h-4 w-4" />
-                            </Button>
-                        </div>
-                    </AnimatedCard>
                 </div>
             </main>
         </motion.div>
@@ -684,7 +685,7 @@ const AuthPage = ({
         const [signupPassword, setSignupPassword] = useState("");
         const [signupConfirmPassword, setSignupConfirmPassword] = useState("");
   const videoRef = useRef<HTMLVideoElement>(null);
-  const streamRef = useRef<MediaStream | null>(null); // ✅ Persist webcam stream
+  const streamRef = useRef<MediaStream | null>(null); // âœ… Persist webcam stream
   const [captureMessage, setCaptureMessage] = useState<string>("");
   const [institution, setInstitution] = useState("");
   const [department, setDepartment] = useState("");
@@ -956,7 +957,7 @@ const getVideoStatus = () => {
                     }
                 }
 
-      // ✅ Countdown before capture
+      // âœ… Countdown before capture
       for (let i = 3; i > 0; i--) {
         setCaptureMessage(i.toString());
         await new Promise((res) => setTimeout(res, 1000));
@@ -1098,7 +1099,7 @@ const getVideoStatus = () => {
             if (!faceRes.ok) {
                 const sim = faceData?.similarity ? ` (similarity: ${Number(faceData.similarity).toFixed(3)})` : '';
                 showToast(faceData.error || faceData.message || `Face verification failed${sim}`, 'error');
-                // Do NOT auto-retry — user must click Verify again
+                // Do NOT auto-retry â€” user must click Verify again
                 setIsLoading(false);
                 setCaptureMessage('');
                 return;
@@ -1454,7 +1455,7 @@ const getVideoStatus = () => {
                                                 {isPasswordValid(signupPassword) ? (
                                                     <span className="text-green-300">Password looks good.</span>
                                                 ) : (
-                                                    <span className="text-slate-400">Keep going—you're almost there.</span>
+                                                    <span className="text-slate-400">Keep goingâ€”you're almost there.</span>
                                                 )}
                                             </div>
                                         )}
@@ -1536,7 +1537,7 @@ const getVideoStatus = () => {
                                                             const newStream = await navigator.mediaDevices.getUserMedia({ video: true });
                                                             v.srcObject = newStream;
                                                         } catch {}
-                                                        // No long waits—attempt quick ready check then capture
+                                                        // No long waitsâ€”attempt quick ready check then capture
                                                         try { await waitForVideoReady(v, 1500); } catch {}
                                                         dataUrl = captureFrame();
                                                     }
@@ -1572,7 +1573,7 @@ const getVideoStatus = () => {
 
 
 
-const DashboardLayout = ({ children, user, onLogout, onBack, onAction, onUpdateUser, showToast }: { children: React.ReactNode, user: UserProfile, onLogout?: () => void, onBack: () => void, onAction?: (action: string) => void, onUpdateUser?: (u: UserProfile) => void, showToast?: (msg:string, type:'success'|'error') => void }) => {
+const DashboardLayout = ({ children, user, onLogout, onBack, onAction, showToast }: { children: React.ReactNode, user: UserProfile, onLogout?: () => void, onBack: () => void, onAction?: (action: string) => void, showToast?: (msg:string, type:'success'|'error') => void }) => {
     const [faceDialogOpen, setFaceDialogOpen] = useState(false);
     const videoRef = useRef<HTMLVideoElement>(null);
     const [faceSamples, setFaceSamples] = useState<string[]>([]);
@@ -1672,7 +1673,7 @@ const ProfilePage = ({ user, onLogout, onBack, showToast, onUpdateUser, navigate
     };
 
     return (
-        <DashboardLayout user={user} onLogout={onLogout} onBack={onBack} showToast={showToast} onUpdateUser={onUpdateUser} onAction={(a) => {
+        <DashboardLayout user={user} onLogout={onLogout} onBack={onBack} showToast={showToast} onAction={(a) => {
             if (a === 'dashboard') { navigateTo(user.role === 'student' ? 'student-dashboard' : 'lecturer-dashboard'); return; }
             if (a === 'my-exams') { navigateTo('my-exams'); return; }
             if (a === 'results') { navigateTo('results-analysis'); return; }
@@ -1824,7 +1825,7 @@ const ProfilePage = ({ user, onLogout, onBack, showToast, onUpdateUser, navigate
     );
 };
 
-const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, onUpdateUser, navigateTo }: { user: UserProfile; exams: Exam[]; onLogout: () => void; onBack: () => void; showToast: (message:string, type:'success'|'error') => void; onUpdateUser: (u: UserProfile) => void; navigateTo: (state: AppState) => void }) => {
+const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, navigateTo }: { user: UserProfile; exams: Exam[]; onLogout: () => void; onBack: () => void; showToast: (message:string, type:'success'|'error') => void; navigateTo: (state: AppState) => void }) => {
     const [selectedExam, setSelectedExam] = useState<Exam | null>(null);
     const [resultAttempt, setResultAttempt] = useState<any>(null);
     const [expandedQuestion, setExpandedQuestion] = useState<number | null>(null);
@@ -1865,7 +1866,7 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, onUpdat
     };
 
     return (
-        <DashboardLayout user={user} onLogout={onLogout} onBack={onBack} showToast={showToast} onUpdateUser={onUpdateUser} onAction={(a) => {
+        <DashboardLayout user={user} onLogout={onLogout} onBack={onBack} showToast={showToast} onAction={(a) => {
             if (a === 'dashboard') { navigateTo('student-dashboard'); return; }
             if (a === 'my-exams') { navigateTo('my-exams'); return; }
             if (a === 'results') { /* already here */ return; }
@@ -1935,7 +1936,7 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, onUpdat
                                                     Score: <span className="text-white font-medium">{score}%</span>
                                                     {totalQuestions ? (
                                                         <>
-                                                            {' '}•{' '}
+                                                            {' '}â€¢{' '}
                                                             {correctCount}/{totalQuestions} correct
                                                         </>
                                                     ) : null}
@@ -2043,7 +2044,7 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, onUpdat
                                                                     <span className="text-slate-200">{String.fromCharCode(65 + optIdx)}. {opt}</span>
                                                                     <div className="flex gap-2">
                                                                         {userAns === optIdx && <span className="text-xs text-blue-400 font-medium">Your Answer</span>}
-                                                                        {correctAns === optIdx && <span className="text-xs text-green-400 font-medium">✓ Correct</span>}
+                                                                        {correctAns === optIdx && <span className="text-xs text-green-400 font-medium">âœ“ Correct</span>}
                                                                     </div>
                                                                 </div>
                                                             </div>
@@ -2062,7 +2063,7 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, onUpdat
                                             )}
                                             <div className="flex items-center justify-between pt-3 border-t border-slate-700">
                                                 <span className="text-sm text-slate-400">Marks: <span className={q.correct ? 'text-green-400' : 'text-red-400'}>{q.correct ? q.marks : 0}</span> / {q.marks}</span>
-                                                <span className={cn('text-sm font-semibold', q.correct ? 'text-green-400' : 'text-red-400')}>{q.correct ? '✓ Correct' : '✗ Incorrect'}</span>
+                                                <span className={cn('text-sm font-semibold', q.correct ? 'text-green-400' : 'text-red-400')}>{q.correct ? 'âœ“ Correct' : 'âœ— Incorrect'}</span>
                                             </div>
                                         </motion.div>
                                     )}
@@ -2076,7 +2077,7 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, onUpdat
     );
 };
 
-const MyExamsPage = ({ user, exams, onLogout, onStartExam, showToast, onUpdateUser, navigateTo }: { user: UserProfile; exams: Exam[]; onLogout: () => void; onStartExam: (examId: string) => void; showToast: (message:string, type:'success'|'error') => void; onUpdateUser: (u: UserProfile) => void; navigateTo: (state: AppState) => void }) => {
+const MyExamsPage = ({ user, exams, onLogout, onStartExam, showToast, navigateTo }: { user: UserProfile; exams: Exam[]; onLogout: () => void; onStartExam: (examId: string) => void; showToast: (message:string, type:'success'|'error') => void; navigateTo: (state: AppState) => void }) => {
     const [activeTab, setActiveTab] = useState<'upcoming' | 'finished'>('upcoming');
     const [selectedExam, setSelectedExam] = useState<Exam | null>(null);
     const [detailsOpen, setDetailsOpen] = useState(false);
@@ -2140,7 +2141,7 @@ const MyExamsPage = ({ user, exams, onLogout, onStartExam, showToast, onUpdateUs
     };
 
     return (
-        <DashboardLayout user={user} onLogout={onLogout} onBack={() => navigateTo('student-dashboard')} showToast={showToast} onUpdateUser={onUpdateUser} onAction={(a) => {
+        <DashboardLayout user={user} onLogout={onLogout} onBack={() => navigateTo('student-dashboard')} showToast={showToast} onAction={(a) => {
             if (a === 'dashboard') { navigateTo('student-dashboard'); return; }
             if (a === 'my-exams') { /* already here */ return; }
             if (a === 'results') { navigateTo('results-analysis'); return; }
@@ -2299,7 +2300,7 @@ const MyExamsPage = ({ user, exams, onLogout, onStartExam, showToast, onUpdateUs
     );
 };
 
-const StudentDashboard = ({ user, exams, onLogout, onStartExam, onBack, showToast, onUpdateUser, navigateTo }: { user: UserProfile; exams: Exam[]; onLogout: () => void; onStartExam: (examId: string) => void; onBack: () => void; showToast: (message:string, type:'success'|'error') => void; onUpdateUser: (u: UserProfile) => void; navigateTo: (state: AppState) => void }) => {
+const StudentDashboard = ({ user, exams, onLogout, onStartExam, onBack, showToast, navigateTo }: { user: UserProfile; exams: Exam[]; onLogout: () => void; onStartExam: (examId: string) => void; onBack: () => void; showToast: (message:string, type:'success'|'error') => void; navigateTo: (state: AppState) => void }) => {
     const [systemCheckOpen, setSystemCheckOpen] = useState(false);
     const [resultsOpen, setResultsOpen] = useState(false);
     const [resultExamTitle, setResultExamTitle] = useState<string>('');
@@ -2359,7 +2360,7 @@ const StudentDashboard = ({ user, exams, onLogout, onStartExam, onBack, showToas
     };
 
     return (
-    <DashboardLayout user={user} onLogout={onLogout} onBack={onBack} showToast={showToast} onUpdateUser={onUpdateUser} onAction={(a) => {
+    <DashboardLayout user={user} onLogout={onLogout} onBack={onBack} showToast={showToast} onAction={(a) => {
         // Keep students on the main dashboard unless explicitly opening tools
         if (a === 'dashboard') { setSystemCheckOpen(false); return; }
         if (a === 'my-exams') { navigateTo('my-exams'); return; }
@@ -2507,7 +2508,7 @@ const StudentDashboard = ({ user, exams, onLogout, onStartExam, onBack, showToas
                                 <div className="text-sm text-white font-medium">{idx + 1}. {pq.question}</div>
                                 <div className="text-xs text-slate-300">Your answer: {String(pq.given)}</div>
                                 <div className="text-xs text-slate-300">Correct answer: {String(pq.expected)}</div>
-                                <div className="text-xs text-slate-300">Marks: {pq.marks} — {pq.correct ? 'Correct' : 'Incorrect'}</div>
+                                <div className="text-xs text-slate-300">Marks: {pq.marks} â€” {pq.correct ? 'Correct' : 'Incorrect'}</div>
                             </div>
                         ))}
                     </div>
@@ -2521,20 +2522,11 @@ const StudentDashboard = ({ user, exams, onLogout, onStartExam, onBack, showToas
         </DashboardLayout>
     );
 };
-const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showToast, onUpdateUser, navigateTo, setSelectedExamIdForProctoring }: { user: UserProfile; exams: Exam[]; onLogout: () => void; onBack: () => void; onExamChange: () => void; showToast: (message: string, type: 'success' | 'error') => void; onUpdateUser: (u: UserProfile) => void; navigateTo: (state: AppState) => void; setSelectedExamIdForProctoring: (id: string) => void }) => {
+const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showToast, navigateTo, setSelectedExamIdForProctoring }: { user: UserProfile; exams: Exam[]; onLogout: () => void; onBack: () => void; onExamChange: () => void; showToast: (message: string, type: 'success' | 'error') => void; navigateTo: (state: AppState) => void; setSelectedExamIdForProctoring: (id: string) => void }) => {
     const lecturerExams = exams.filter((exam) => exam.lecturerId === user._id);
     const [createExamOpen, setCreateExamOpen] = useState(false);
     const [examToDelete, setExamToDelete] = useState<Exam | null>(null);
     const [examToEdit, setExamToEdit] = useState<Exam | null>(null);
-    const [proctorOpen, setProctorOpen] = useState(false);
-    const [proctorExamId, setProctorExamId] = useState<string | null>(null);
-    const [adminStats, setAdminStats] = useState<{ totalStudents: number; liveExams: number; activeAlerts: number; systemUptime: string; serverUptimeHours?: number }>({ totalStudents: 0, liveExams: 0, activeAlerts: 0, systemUptime: '99.9%' });
-    const [reportOpen, setReportOpen] = useState(false);
-    const [reportData, setReportData] = useState<any>(null);
-    const [reportExamTitle, setReportExamTitle] = useState<string>('');
-    const [attemptOpen, setAttemptOpen] = useState(false);
-    const [selectedAttempt, setSelectedAttempt] = useState<any | null>(null);
-    const [attemptEvents, setAttemptEvents] = useState<any[]>([]);
 
 
     
@@ -2587,79 +2579,16 @@ const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showTo
     };
 
 
-    const StatCard = ({ title, value, icon, colorClass }: { title: string, value: string | number, icon: React.ReactNode, colorClass: string }) => (
-        <Card className={cn("p-4 flex items-center space-x-4", colorClass)}>
-            <div className="p-3 bg-white/10 rounded-lg">{icon}</div>
-            <div>
-                <p className="text-sm text-slate-300">{title}</p>
-                <p className="text-2xl font-bold text-white">{value}</p>
-            </div>
-        </Card>
-    );
 
-    // Fetch admin stats for lecturer dashboard (only if admin role)
-    useEffect(() => {
-        const fetchStats = async () => {
-            // Skip if not admin to avoid 403 errors
-            if (user.role !== 'admin') {
-                return;
-            }
-            try {
-                const res = await fetch(`${API_URL}/admin/stats`, { headers: { 'Content-Type': 'application/json', 'X-User-Id': user._id } });
-                const data = await res.json();
-                if (res.ok) {
-                    setAdminStats({ totalStudents: data.totalStudents || 0, liveExams: data.liveExams || 0, activeAlerts: data.activeAlerts || 0, systemUptime: data.systemUptime || '99.9%', serverUptimeHours: data.serverUptimeHours });
-                }
-            } catch (err) {
-                console.error('Failed to load admin stats', err);
-            }
-        };
-        fetchStats();
-    }, [user._id, user.role]);
-
-    const fetchReport = async (examId: string, examTitle?: string) => {
-        try {
-            const res = await fetch(`${API_URL}/exams/${examId}/report`, { headers: { 'Content-Type': 'application/json', 'X-User-Id': user._id } });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.error || 'Failed to fetch report');
-            setReportData(data);
-            setReportExamTitle(examTitle || 'Exam Report');
-            setReportOpen(true);
-        } catch (err: any) {
-            showToast(err.message || 'Failed to load report', 'error');
-        }
-    };
-
-    const openAttemptDetails = async (attempt: any) => {
-        setSelectedAttempt(attempt);
-        setAttemptEvents([]);
-        setAttemptOpen(true);
-        try {
-            const examId = reportData?.exam?._id || reportData?.exam?.id || '';
-            if (!examId || !attempt?.userId) return;
-            const res = await fetch(`${API_URL}/exams/${examId}/proctoring/${attempt.userId}`, { headers: { 'Content-Type': 'application/json', 'X-User-Id': user._id } });
-            const data = await res.json();
-            if (res.ok && Array.isArray(data.events)) setAttemptEvents(data.events);
-        } catch (err) {
-            // ignore silently
-        }
-    };
 
     return (
-    <DashboardLayout user={user} onLogout={onLogout} onBack={onBack} showToast={showToast} onUpdateUser={onUpdateUser} onAction={(a) => {
+    <DashboardLayout user={user} onLogout={onLogout} onBack={onBack} showToast={showToast} onAction={(a) => {
         if (a === 'overview' || a === 'dashboard') { /* default overview; no-op */ return; }
         if (a === 'create-exam') { setCreateExamOpen(true); return; }
         if (a === 'live-proctoring') { navigateTo('live-proctoring'); return; }
         if (a === 'help') { navigateTo('help'); return; }
         if (a === 'profile') { navigateTo('profile'); return; }
     }}>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-                <StatCard title="Total Students" value={adminStats.totalStudents} icon={<Users className="h-6 w-6 text-indigo-300"/>} colorClass="border-indigo-500/50" />
-                <StatCard title="Live Exams" value={adminStats.liveExams} icon={<Monitor className="h-6 w-6 text-green-300"/>} colorClass="border-green-500/50" />
-                <StatCard title="Active Alerts" value={adminStats.activeAlerts} icon={<AlertTriangle className="h-6 w-6 text-yellow-300"/>} colorClass="border-yellow-500/50" />
-                <StatCard title="System Uptime" value={adminStats.systemUptime} icon={<ShieldCheck className="h-6 w-6 text-sky-300"/>} colorClass="border-sky-500/50" />
-            </div>
-
             <div className="flex justify-between items-center mb-4">
                 <h2 className="text-2xl font-bold text-white">Your Exams</h2>
                 <Button onClick={() => setCreateExamOpen(true)}><PlusCircle className="h-4 w-4 mr-2" /> Create Exam</Button>
@@ -2715,111 +2644,6 @@ const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showTo
                 )) : <p className="text-slate-400 text-center py-8">You haven't created any exams yet.</p>}
             </div>
             <CreateExamDialog open={createExamOpen} onOpenChange={(open) => { if (!open) setExamToEdit(null); setCreateExamOpen(open); }} lecturer={user} onExamCreated={() => { setExamToEdit(null); onExamChange(); }} showToast={showToast} examToEdit={examToEdit || undefined} />
-            <ProctorDashboard open={proctorOpen} onOpenChange={setProctorOpen} examId={proctorExamId} user={user} />
-            <Dialog open={reportOpen} onOpenChange={setReportOpen} className="max-w-4xl">
-                <h2 className="text-2xl font-bold mb-2">Report: {reportExamTitle}</h2>
-                <div className="space-y-3">
-                    {reportData ? (
-                        <div>
-                            <p className="text-sm text-slate-400">Average Score: {reportData.averageScore}%</p>
-                            <h3 className="font-semibold mt-3 mb-2">Per Question Stats</h3>
-                            <div className="space-y-2 max-h-64 overflow-y-auto p-2">
-                                {reportData.perQuestionStats && reportData.perQuestionStats.map((q: any) => (
-                                    <div key={q.questionId} className="p-2 bg-slate-800 rounded">
-                                        <div className="font-medium text-white">{q.question}</div>
-                                        <div className="text-xs text-slate-300">Attempts: {q.attempts} — Correct: {q.correctCount} ({q.correctRatio}%)</div>
-                                    </div>
-                                ))}
-                            </div>
-                            <h3 className="font-semibold mt-4 mb-2">Student Attempts</h3>
-                            <div className="space-y-2 max-h-60 overflow-y-auto p-2">
-                                {reportData.attempts && reportData.attempts.length > 0 ? reportData.attempts.map((a: any, idx: number) => (
-                                    <div key={idx} className="p-2 bg-slate-800 rounded flex items-center justify-between">
-                                        <div>
-                                            <div className="font-medium text-white">{a.userName || a.userId}</div>
-                                            <div className="text-xs text-slate-300">Score: {a.score}% — Completed: {a.completedAt ? new Date(a.completedAt).toLocaleString() : 'N/A'}</div>
-                                        </div>
-                                        <div className="flex items-center space-x-2">
-                                            <Button size="sm" variant="outline" onClick={() => openAttemptDetails(a)}>View Details</Button>
-                                        </div>
-                                    </div>
-                                )) : <div className="text-slate-400">No attempts yet.</div>}
-                            </div>
-                        </div>
-                    ) : <div className="text-slate-400">No report data available.</div>}
-                </div>
-                <div className="flex justify-end mt-4">
-                    <Button variant="outline" onClick={() => setReportOpen(false)}>Close</Button>
-                </div>
-            </Dialog>
-            <Dialog open={attemptOpen} onOpenChange={setAttemptOpen} className="max-w-4xl">
-                <h2 className="text-2xl font-bold mb-2">Attempt Details</h2>
-                {selectedAttempt ? (
-                    <div className="space-y-4">
-                        <div className="bg-slate-900 p-3 rounded">
-                            <div className="font-medium text-white">{selectedAttempt.userName || selectedAttempt.userId}</div>
-                            <div className="text-xs text-slate-300">Score: {selectedAttempt.score}% — Completed: {selectedAttempt.completedAt ? new Date(selectedAttempt.completedAt).toLocaleString() : 'N/A'}</div>
-                        </div>
-                        <div>
-                            <h3 className="font-semibold mb-2">Answers</h3>
-                            <div className="space-y-2 max-h-60 overflow-y-auto">
-                                {selectedAttempt.perQuestion && selectedAttempt.perQuestion.map((pq: any, idx: number) => (
-                                    <div key={idx} className={cn('p-2 rounded border', pq.correct ? 'border-green-600 bg-green-900/10' : 'border-red-600 bg-red-900/10')}>
-                                        <div className="text-sm text-white font-medium">{idx + 1}. {pq.question}</div>
-                                        <div className="text-xs text-slate-300">Answer: {String(pq.given)} — Expected: {String(pq.expected)} — Marks: {pq.marks}</div>
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
-                        <div>
-                            <h3 className="font-semibold mb-2">Proctoring Timeline</h3>
-                            <div className="space-y-2 max-h-64 overflow-y-auto">
-                                {attemptEvents.length === 0 && <div className="text-slate-400">No proctoring events recorded.</div>}
-                                {attemptEvents.map((ev: any) => (
-                                    <div key={ev._id} className="p-2 bg-slate-800 rounded">
-                                        <div className="flex items-start justify-between">
-                                            <div className="flex-1">
-                                                <div className="text-sm font-medium text-white">{ev.eventType}</div>
-                                                <div className="text-xs text-slate-400">{new Date(ev.timestamp).toLocaleString()}</div>
-                                                {ev.severity && (
-                                                    <span className={cn(
-                                                        'inline-block px-2 py-0.5 text-xs rounded mt-1',
-                                                        ev.severity === 'high' && 'bg-red-600/20 text-red-400 border border-red-500/30',
-                                                        ev.severity === 'medium' && 'bg-yellow-600/20 text-yellow-400 border border-yellow-500/30',
-                                                        ev.severity === 'low' && 'bg-blue-600/20 text-blue-400 border border-blue-500/30'
-                                                    )}>
-                                                        {ev.severity.toUpperCase()}
-                                                    </span>
-                                                )}
-                                            </div>
-                                            {/* Display frame evidence (new field) or legacy snapshot */}
-                                            {(ev.frameEvidence || ev.details?.snapshot) && (
-                                                <div className="ml-3">
-                                                    <img 
-                                                        src={ev.frameEvidence || ev.details.snapshot} 
-                                                        alt="evidence" 
-                                                        className="w-32 h-24 object-cover rounded border border-slate-700" 
-                                                    />
-                                                </div>
-                                            )}
-                                        </div>
-                                        {ev.details?.message && (
-                                            <div className="text-xs text-slate-300 mt-2 italic">{ev.details.message}</div>
-                                        )}
-                                        <details className="text-xs mt-2">
-                                            <summary className="cursor-pointer text-slate-400 hover:text-slate-300">Show raw details</summary>
-                                            <pre className="text-xs mt-1 text-slate-300 bg-black/10 p-2 rounded overflow-x-auto">{JSON.stringify(ev.details, null, 2)}</pre>
-                                        </details>
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
-                    </div>
-                ) : <div className="text-slate-400">No attempt selected.</div>}
-                <div className="flex justify-end mt-4">
-                    <Button variant="outline" onClick={() => setAttemptOpen(false)}>Close</Button>
-                </div>
-            </Dialog>
             
             <Dialog open={!!examToDelete} onOpenChange={() => setExamToDelete(null)}>
                 <h2 className="text-xl font-bold text-white">Confirm Deletion</h2>
@@ -3026,7 +2850,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                 await uploadEvidence(frame, { evidenceType: 'screenshot', violationType: 'screen_snapshot' });
             }
 
-            // Periodic snapshots (low frequency; keeps lecturer “screen” preview fresh)
+            // Periodic snapshots (low frequency; keeps lecturer â€œscreenâ€ preview fresh)
             if (screenCaptureTimerRef.current) window.clearInterval(screenCaptureTimerRef.current);
             screenCaptureTimerRef.current = window.setInterval(async () => {
                 if (proctorDecision.status !== 'active') return;
@@ -4083,7 +3907,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                             {/* Using a simple heuristic: if we recently backed off uploads, show badge */}
                             {/* Note: this badge updates on next render cycles driven by other state; lightweight UX hint only */}
                             {/* In a more advanced setup, lift degraded state into React state for deterministic updates */}
-                            <span className="text-xs px-2 py-1 rounded bg-yellow-500/20 text-yellow-300 border border-yellow-600/30">Network adapting…</span>
+                            <span className="text-xs px-2 py-1 rounded bg-yellow-500/20 text-yellow-300 border border-yellow-600/30">Network adaptingâ€¦</span>
                         </div>
                         <div className="flex items-center space-x-2">
                             <Timer className="h-5 w-5 text-slate-400"/>
@@ -4106,8 +3930,8 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                                             {proctorDecision.reason || pauseReasonRef.current || 'Paused by invigilator. Please wait for a decision.'}
                                         </p>
                                         <div className="mt-4 rounded-lg border border-slate-700 bg-slate-800/70 p-3">
-                                            <p className="text-xs text-slate-300">Your answers are safe. Don’t refresh the page.</p>
-                                            <p className="text-xs text-slate-400 mt-1">We’ll automatically resume when the invigilator allows you to continue.</p>
+                                            <p className="text-xs text-slate-300">Your answers are safe. Donâ€™t refresh the page.</p>
+                                            <p className="text-xs text-slate-400 mt-1">Weâ€™ll automatically resume when the invigilator allows you to continue.</p>
                                         </div>
                                     </div>
                                 </div>
@@ -4167,7 +3991,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                                     </Button>
                                 </div>
                                 <p className="text-xs text-slate-500 mt-4">
-                                    Note: Browsers can’t fully block OS-level shortcuts. These controls are best-effort and all suspicious activity is logged.
+                                    Note: Browsers canâ€™t fully block OS-level shortcuts. These controls are best-effort and all suspicious activity is logged.
                                 </p>
                             </div>
                         </div>
@@ -4202,7 +4026,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                                     )}
                                 </div>
                                 <div className="mt-2 text-[10px] text-slate-500">
-                                    Tip: choose “Entire Screen” for best evidence quality.
+                                    Tip: choose â€œEntire Screenâ€ for best evidence quality.
                                 </div>
                             </div>
                         </div>
@@ -4217,10 +4041,10 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                                 {proctorStats.backoff && <span className="text-yellow-300">Backoff</span>}
                             </div>
                             <div className="mt-1 text-slate-300">
-                                Frames: {proctorStats.framesSent} · Errors: {proctorStats.uploadErrors}
+                                Frames: {proctorStats.framesSent} Â· Errors: {proctorStats.uploadErrors}
                             </div>
                             <div className="mt-0.5 text-slate-400">
-                                Last upload: {proctorStats.lastUploadMs}ms · Q: {Math.round(encodeQualityRef.current * 100)} · W: {encodeWidthRef.current}px
+                                Last upload: {proctorStats.lastUploadMs}ms Â· Q: {Math.round(encodeQualityRef.current * 100)} Â· W: {encodeWidthRef.current}px
                             </div>
                         </div>
                     )}
@@ -4262,7 +4086,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                     </div>
                     {Object.keys(answers).length < exam.questions.length && submitStatus !== 'sending' && (
                         <div className="bg-yellow-500/20 text-yellow-300 p-3 rounded-lg mb-4 text-sm">
-                            ⚠️ You have unanswered questions. They will be marked as incorrect.
+                            âš ï¸ You have unanswered questions. They will be marked as incorrect.
                         </div>
                     )}
 
@@ -4350,7 +4174,7 @@ const ResultScreen = ({ result, onDone }: { result: ExamResult, onDone: () => vo
                             <div className="flex items-start justify-between gap-4">
                                 <div>
                                     <div className="text-slate-200 text-xl font-bold">Your result</div>
-                                    <div className="text-slate-400 text-sm mt-1">You’ve completed the exam successfully.</div>
+                                    <div className="text-slate-400 text-sm mt-1">Youâ€™ve completed the exam successfully.</div>
                                 </div>
                                 <div className={cn('px-3 py-1 rounded-full text-xs font-semibold border',
                                     scoreTone === 'emerald'
@@ -4827,7 +4651,9 @@ const LiveProctoring = ({ user, onBack }: { user: UserProfile; onBack: () => voi
     // Student view (keep the existing simple recent list)
     const [events, setEvents] = React.useState<any[]>([]);
 
-    // Lecturer view (new grid + alert queue)
+    // Lecturer view - exam selection + monitoring
+    const [liveExams, setLiveExams] = React.useState<Exam[]>([]);
+    const [selectedExam, setSelectedExam] = React.useState<Exam | null>(null);
     const [examId, setExamId] = React.useState<string>('');
     const [summary, setSummary] = React.useState<{ userId: string; name: string; count: number; lastEvent: any; countsByType?: any }[]>([]);
     const [latestByUser, setLatestByUser] = React.useState<Record<string, any>>({});
@@ -4842,6 +4668,29 @@ const LiveProctoring = ({ user, onBack }: { user: UserProfile; onBack: () => voi
 
     const socketRef = React.useRef<Socket | null>(null);
     const pollRef = React.useRef<number | null>(null);
+
+    // Fetch live exams for lecturer
+    React.useEffect(() => {
+        if (user.role !== 'lecturer') return;
+        const fetchLiveExams = async () => {
+            try {
+                const res = await fetch(`${API_URL}/exams`, { headers: { 'X-User-Id': user._id } });
+                const data = await res.json();
+                if (res.ok && Array.isArray(data.exams)) {
+                    // Filter for Live status exams created by this lecturer
+                    const live = data.exams.filter((e: Exam) => 
+                        e.status === 'Live' && e.lecturerId === user._id
+                    );
+                    setLiveExams(live);
+                }
+            } catch (err) {
+                console.error('Failed to fetch live exams:', err);
+            }
+        };
+        fetchLiveExams();
+        const interval = window.setInterval(fetchLiveExams, 10000); // Refresh every 10s
+        return () => window.clearInterval(interval);
+    }, [user]);
 
     const getSeverityColor = (severity: string) => {
         switch (severity) {
@@ -5077,18 +4926,57 @@ const LiveProctoring = ({ user, onBack }: { user: UserProfile; onBack: () => voi
                 </div>
             ) : (
                 <div className="space-y-6">
-                    <Card className="p-5 bg-slate-900 border-slate-800">
-                        <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-                            <div className="flex-1">
-                                <h3 className="text-lg font-semibold text-white">Select exam to monitor</h3>
-                                <p className="text-sm text-slate-400">Enter an exam ID, then you’ll see a live 5×3 grid and an action queue for high-severity alerts.</p>
-                            </div>
-                            <div className="flex gap-2">
-                                <Input value={examId} onChange={(e: any) => setExamId(e.target.value)} placeholder="Exam ID" className="w-80" />
-                                <Button onClick={() => { setPage(0); refreshSummary(); }}>Load</Button>
-                            </div>
-                        </div>
-                    </Card>
+                    {!selectedExam ? (
+                        <Card className="p-6 bg-slate-900 border-slate-800">
+                            <h3 className="text-xl font-semibold text-white mb-4">Select an Exam to Monitor</h3>
+                            {liveExams.length > 0 ? (
+                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                    {liveExams.map((exam) => (
+                                        <motion.div
+                                            key={exam._id}
+                                            whileHover={{ scale: 1.02 }}
+                                            className="rounded-lg border border-slate-700 bg-slate-800/50 p-4 cursor-pointer hover:border-blue-500 transition-colors"
+                                            onClick={() => {
+                                                setSelectedExam(exam);
+                                                setExamId(exam._id);
+                                                setPage(0);
+                                                refreshSummary();
+                                            }}
+                                        >
+                                            <div className="flex items-center justify-between mb-2">
+                                                <h4 className="text-lg font-semibold text-white">{exam.title}</h4>
+                                                <Badge variant="success" className="flex items-center gap-1">
+                                                    <div className="h-2 w-2 rounded-full bg-green-400 animate-pulse"></div>
+                                                    Live
+                                                </Badge>
+                                            </div>
+                                            <p className="text-sm text-slate-400 mb-3">{exam.description || 'No description'}</p>
+                                            <div className="text-xs text-slate-500">
+                                                <div>Duration: {exam.duration} mins</div>
+                                                <div>Start: {new Date(exam.scheduledDate).toLocaleString()}</div>
+                                            </div>
+                                            <Button className="w-full mt-3">Start Monitoring</Button>
+                                        </motion.div>
+                                    ))}
+                                </div>
+                            ) : (
+                                <div className="text-center py-12 text-slate-400">
+                                    <Users className="h-12 w-12 mx-auto mb-3 text-slate-600" />
+                                    <p>No live exams currently</p>
+                                </div>
+                            )}
+                        </Card>
+                    ) : (
+                        <>
+                            <Card className="p-4 bg-slate-900 border-slate-800">
+                                <div className="flex items-center justify-between">
+                                    <div>
+                                        <h3 className="text-lg font-semibold text-white">Monitoring: {selectedExam.title}</h3>
+                                        <p className="text-sm text-slate-400">Live proctoring grid - 5 columns Ã— 3 rows</p>
+                                    </div>
+                                    <Button variant="outline" onClick={() => { setSelectedExam(null); setExamId(''); }}>Back to Exams</Button>
+                                </div>
+                            </Card>
 
                     {/* Action-required alert modal (one at a time, no collisions) */}
                     <Dialog open={!!activeAlert} onOpenChange={(open) => { if (!open) setActiveAlert(null); }}>
@@ -5102,7 +4990,7 @@ const LiveProctoring = ({ user, onBack }: { user: UserProfile; onBack: () => voi
                                     <div className="text-sm text-slate-200 font-semibold">
                                         {(activeAlert.eventType || 'violation').replace(/_/g, ' ')}
                                     </div>
-                                    <div className="mt-1 text-xs text-slate-300">Student: {activeAlert.userId} • Exam: {activeAlert.examId}</div>
+                                    <div className="mt-1 text-xs text-slate-300">Student: {activeAlert.userId} â€¢ Exam: {activeAlert.examId}</div>
                                     <div className="mt-2 text-sm text-slate-200">{activeAlert?.details?.message || activeAlert?.message || 'High severity event detected.'}</div>
                                 </div>
 
@@ -5160,11 +5048,12 @@ const LiveProctoring = ({ user, onBack }: { user: UserProfile; onBack: () => voi
                         )}
                     </Dialog>
 
+                    {selectedExam && (
                     <Card className="p-6 bg-slate-900 border-slate-800">
                         <div className="flex items-center justify-between mb-4">
                             <div>
                                 <h3 className="text-xl font-semibold text-white">Live proctoring grid</h3>
-                                <p className="text-sm text-slate-400">Showing {pageSize} students per page (5 columns × 3 rows).</p>
+                                <p className="text-sm text-slate-400">Showing {pageSize} students per page (5 columns Ã— 3 rows).</p>
                             </div>
                             <div className="flex items-center gap-2">
                                 <Button variant="outline" onClick={() => setPage(p => Math.max(0, p - 1))}>Prev</Button>
@@ -5215,7 +5104,7 @@ const LiveProctoring = ({ user, onBack }: { user: UserProfile; onBack: () => voi
                                             <div className={cn('rounded-lg border p-2', getSeverityColor(sev))}>
                                                 <div className="text-xs font-semibold text-white truncate">{(ev?.eventType || 'No events').replace(/_/g, ' ')}</div>
                                                 <div className="mt-1 text-[11px] text-slate-300 line-clamp-2">
-                                                    {ev?.details?.message || ev?.message || '—'}
+                                                    {ev?.details?.message || ev?.message || 'â€”'}
                                                 </div>
                                             </div>
 
@@ -5262,165 +5151,14 @@ const LiveProctoring = ({ user, onBack }: { user: UserProfile; onBack: () => voi
                             )}
                         </div>
                     </Card>
-                </div>
-            )}
-            </div>
-        </motion.div>
-    );
-};
-
-const ProctorDashboard = ({ open, onOpenChange, examId, user }: { open: boolean; onOpenChange: (b: boolean) => void; examId?: string | null; user?: UserProfile }) => {
-    const [summary, setSummary] = useState<{ userId: string; name: string; count: number; lastEvent: any; countsByType?: any }[]>([]);
-    const [selectedUser, setSelectedUser] = useState<string | null>(null);
-    const [details, setDetails] = useState<any[]>([]);
-    const lastTimestampRef = useRef<string | null>(null);
-    const pollRef = useRef<number | null>(null);
-    const [newCounts, setNewCounts] = useState<Record<string, number>>({});
-    const clearTimersRef = useRef<Record<string, number>>({});
-
-    useEffect(() => {
-        if (!open || !examId) return;
-        fetch(`${API_URL}/exams/${examId}/proctoring`, { headers: { 'Content-Type': 'application/json', 'X-User-Id': user?._id || '' } }).then(r => r.json()).then(data => {
-            if (data && data.summary) setSummary(data.summary);
-            // initialize lastTimestamp to now so polling fetches only new events
-            lastTimestampRef.current = new Date().toISOString();
-            // start polling for recent events
-            if (pollRef.current) window.clearInterval(pollRef.current);
-            pollRef.current = window.setInterval(async () => {
-                try {
-                    const since = lastTimestampRef.current || new Date(0).toISOString();
-                    const res = await fetch(`${API_URL}/exams/${examId}/proctoring/recent?since=${encodeURIComponent(since)}`, { headers: { 'Content-Type': 'application/json', 'X-User-Id': user?._id || '' } });
-                    if (!res.ok) return;
-                    const recent = await res.json();
-                    if (!recent || !Array.isArray(recent.events) || recent.events.length === 0) return;
-                    // update lastTimestamp to newest event timestamp
-                    const newest = recent.events.reduce((acc: string, ev: any) => ev.timestamp > acc ? ev.timestamp : acc, lastTimestampRef.current || '1970-01-01T00:00:00.000Z');
-                    lastTimestampRef.current = newest;
-                    // apply events to summary and details
-                    setSummary(prev => {
-                        const copy = [...prev];
-                        for (const ev of recent.events) {
-                            const userId = ev.userId || ev.user || 'unknown';
-                            const idx = copy.findIndex(s => s.userId === userId);
-                            if (idx >= 0) {
-                                copy[idx] = { ...copy[idx], count: (copy[idx].count || 0) + 1, lastEvent: ev };
-                            } else {
-                                copy.push({ userId, name: ev.userName || userId, count: 1, lastEvent: ev });
-                            }
-                        }
-                        return copy;
-                    });
-                    // compute per-user new event counts and set temporary badges/highlights
-                    const perUserCounts: Record<string, number> = {};
-                    for (const ev of recent.events) {
-                        const userId = ev.userId || ev.user || 'unknown';
-                        perUserCounts[userId] = (perUserCounts[userId] || 0) + 1;
-                    }
-                    setNewCounts(prev => {
-                        const copy = { ...prev };
-                        for (const uid of Object.keys(perUserCounts)) {
-                            copy[uid] = (copy[uid] || 0) + perUserCounts[uid];
-                            // reset any existing timer
-                            if (clearTimersRef.current[uid]) { window.clearTimeout(clearTimersRef.current[uid]); }
-                            // auto-clear the new badge after 6s
-                            // capture uid for closure
-                            const timerId = window.setTimeout(() => {
-                                setNewCounts(curr => {
-                                    const c2 = { ...curr };
-                                    delete c2[uid];
-                                    return c2;
-                                });
-                                delete clearTimersRef.current[uid];
-                            }, 6000);
-                            clearTimersRef.current[uid] = timerId;
-                        }
-                        return copy;
-                    });
-                    // if currently viewing one user's details, append new events for that user
-                    if (selectedUser) {
-                        const userEvents = recent.events.filter((e: any) => (e.userId || e.user) === selectedUser);
-                        if (userEvents.length > 0) setDetails(prev => [...userEvents.map((ev: any) => ev), ...prev]);
-                    }
-                } catch (err) {
-                    // ignore polling errors silently (optionally log)
-                    // console.error('Polling proctor recent failed', err);
-                }
-            }, 1000); // Poll lecturer proctoring endpoint every 1s for near-real-time updates
-        }).catch(err => console.error('Failed to load proctor summary', err));
-        return () => {
-            if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; }
-            // clear any pending badge timers
-            Object.values(clearTimersRef.current).forEach(tid => window.clearTimeout(tid));
-            clearTimersRef.current = {};
-            lastTimestampRef.current = null;
-            setNewCounts({});
-        };
-    }, [open, examId]);
-
-    useEffect(() => {
-        if (!selectedUser || !examId) return;
-        fetch(`${API_URL}/exams/${examId}/proctoring/${selectedUser}`, { headers: { 'Content-Type': 'application/json', 'X-User-Id': user?._id || '' } }).then(r => r.json()).then(data => {
-            if (data && data.events) setDetails(data.events);
-        }).catch(err => console.error('Failed to load proctor details', err));
-    }, [selectedUser, examId]);
-
-    return (
-        <Dialog open={open} onOpenChange={onOpenChange} className="max-w-4xl">
-            <h2 className="text-2xl font-bold mb-2">Proctoring Dashboard</h2>
-            <div className="grid grid-cols-3 gap-4">
-                <div className="col-span-1 bg-slate-900 p-3 rounded">
-                    <h3 className="font-semibold mb-2">Students</h3>
-                    <div className="space-y-2 max-h-80 overflow-y-auto">
-                        {summary.map(s => (
-                            <button key={s.userId} onClick={() => {
-                                setSelectedUser(s.userId);
-                                // clear new count for this user when lecturer opens details
-                                if (newCounts[s.userId]) {
-                                    setNewCounts(prev => { const c = { ...prev }; delete c[s.userId]; return c; });
-                                    if (clearTimersRef.current[s.userId]) { window.clearTimeout(clearTimersRef.current[s.userId]); delete clearTimersRef.current[s.userId]; }
-                                }
-                            }} className={cn('w-full text-left p-2 rounded hover:bg-slate-800 flex justify-between items-center', newCounts[s.userId] ? 'ring-2 ring-yellow-400' : '')}>
-                                <div>
-                                    <div className="font-medium">{s.name}</div>
-                                    <div className="text-xs text-slate-400">Events: {s.count}</div>
-                                </div>
-                                <div className="flex items-center space-x-2">
-                                    {newCounts[s.userId] ? (
-                                        <div className="bg-red-500 text-white text-xs px-2 py-0.5 rounded-full font-medium animate-pulse">{newCounts[s.userId]}</div>
-                                    ) : null}
-                                    <div className={cn('h-3 w-20 rounded-full', s.count > 0 ? 'bg-red-500' : 'bg-green-500')}></div>
-                                </div>
-                            </button>
-                        ))}
-                    </div>
-                </div>
-                <div className="col-span-2 bg-slate-900 p-3 rounded">
-                    <h3 className="font-semibold mb-2">Events</h3>
-                    {selectedUser ? (
-                        <div>
-                            <div className="text-sm text-slate-400 mb-3">Showing events for <strong>{selectedUser}</strong></div>
-                            <div className="space-y-2 max-h-96 overflow-y-auto">
-                                {details.length === 0 && <div className="text-slate-400">No events recorded.</div>}
-                                {details.map((ev: any) => (
-                                    <div key={ev._id} className="p-2 bg-slate-800 rounded">
-                                        <div className="text-sm font-medium">{ev.eventType}</div>
-                                        <div className="text-xs text-slate-400">{new Date(ev.timestamp).toLocaleString()}</div>
-                                        {ev.details?.snapshot ? (
-                                            <div className="mt-2">
-                                                <img src={ev.details.snapshot} alt="snapshot" className="w-40 h-28 object-cover rounded border border-slate-700" />
-                                            </div>
-                                        ) : null}
-                                        <pre className="text-xs mt-2 text-slate-300 bg-black/10 p-2 rounded overflow-x-auto">{JSON.stringify(ev.details)}</pre>
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
-                    ) : (
-                        <div className="text-slate-400">Select a student to view detailed proctoring events.</div>
+                    )}
+                        </>
                     )}
                 </div>
+            )}
+
             </div>
-        </Dialog>
+        </motion.div>
     );
 };
 
