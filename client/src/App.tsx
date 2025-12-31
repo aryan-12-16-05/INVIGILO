@@ -634,7 +634,7 @@ const LandingPage = ({ onNavigate }: { onNavigate: (state: AppState, role: UserR
                 >
                     Next-generation AI proctoring for secure, fair, and intelligent online examinations.
                 </motion.p>
-                <div className="grid md:grid-cols-3 gap-6 max-w-6xl mx-auto">
+                <div className="grid md:grid-cols-2 gap-6 max-w-4xl mx-auto">
                     <AnimatedCard delay={0.4}>
                         <div className="flex flex-col items-center text-center">
                             <div className="p-4 bg-indigo-500/10 rounded-full mb-4">
@@ -3090,6 +3090,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
         try {
             const url = `${API_URL}/exams/${exam._id}/submit`;
             console.log('[SUBMIT] Now submitting to:', url);
+            console.log('[SUBMIT] Answers being sent:', JSON.stringify(answers, null, 2));
             
             const res = await fetch(url, {
                 method: 'POST',

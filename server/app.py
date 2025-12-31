@@ -1919,6 +1919,8 @@ def submit_exam(exam_id):
             total_marks += marks
             user_answer = answers.get(q_id)
             correct = False
+            
+            print(f"[GRADING] Processing question {q_id}, type={question.get('type')}, user_answer={user_answer}")
 
             # Robust comparison by question type
             qtype = question.get('type')
@@ -1928,13 +1930,17 @@ def submit_exam(exam_id):
                 if user_answer is not None:
                     # Multiple choice: support numeric (1-based) or option-text answers
                     if qtype == 'multiple-choice':
+                        print(f"[GRADING] Q{q_id}: user={user_answer} (type={type(user_answer)}), correct={correct_answer} (type={type(correct_answer)})")
                         if isinstance(correct_answer, (int, float)):
                             try:
                                 if int(user_answer) == int(correct_answer):
                                     correct = True
-                            except Exception:
+                                    print(f"[GRADING] Q{q_id}: CORRECT via numeric comparison")
+                            except Exception as e:
+                                print(f"[GRADING] Q{q_id}: Numeric comparison failed: {e}")
                                 if str(user_answer) == str(correct_answer):
                                     correct = True
+                                    print(f"[GRADING] Q{q_id}: CORRECT via string comparison")
                         else:
                             if isinstance(user_answer, (int, float)):
                                 try:
@@ -1985,6 +1991,9 @@ def submit_exam(exam_id):
             if correct:
                 score += marks
                 correct_count += 1
+                print(f"[GRADING] Q{q_id}: MARKED CORRECT, score now={score}")
+            else:
+                print(f"[GRADING] Q{q_id}: MARKED WRONG")
 
             per_question.append({
                 'questionId': q_id,
@@ -1996,6 +2005,8 @@ def submit_exam(exam_id):
             })
 
         percentage = round((score / total_marks) * 100, 2) if total_marks > 0 else 0
+        
+        print(f"[GRADING] FINAL RESULTS: score={score}, total_marks={total_marks}, percentage={percentage}, correct_count={correct_count}")
 
         attempt_record = {
             'userId': user_id,
