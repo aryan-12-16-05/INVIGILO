@@ -63,102 +63,21 @@ export default function LecturerExamReport({
             try {
                 const res = await fetch(`${API_URL}/exams/${examId}/report`);
                 const data = await res.json();
-                if (res.ok && data.examId) {
+                if (res.ok) {
                     setReport(data);
-                    setIsLoading(false);
                 } else {
-                    // Load mock data if API returns error
-                    loadMockData();
-                    setIsLoading(false);
+                    showToast(data.error || 'Failed to load report', 'error');
                 }
             } catch (err) {
                 console.error('Failed to fetch report:', err);
-                // Load mock data on error
-                loadMockData();
+                showToast('Failed to load report. Please try again.', 'error');
+            } finally {
                 setIsLoading(false);
             }
         };
 
         fetchReport();
     }, [examId]);
-
-    const loadMockData = () => {
-        const mockReport: ExamReport = {
-            examId: examId,
-            title: 'Data Science Mid-Term Examination',
-            courseCode: 'CSE401',
-            date: '2024-01-15',
-            duration: 90,
-            totalStudents: 45,
-            attendanceRate: 93.3,
-            averageScore: 76.5,
-            passRate: 84.4,
-            totalIncidents: 23,
-            highRiskStudents: 3,
-            students: [
-                {
-                    studentId: 'S001',
-                    name: 'John Doe',
-                    score: 85,
-                    percentage: 85,
-                    riskScore: 5,
-                    incidentCount: 0,
-                    duration: 88,
-                    status: 'completed'
-                },
-                {
-                    studentId: 'S002',
-                    name: 'Jane Smith',
-                    score: 72,
-                    percentage: 72,
-                    riskScore: 65,
-                    incidentCount: 5,
-                    duration: 90,
-                    status: 'completed'
-                },
-                {
-                    studentId: 'S003',
-                    name: 'Mike Johnson',
-                    score: 0,
-                    percentage: 0,
-                    riskScore: 0,
-                    incidentCount: 0,
-                    duration: 0,
-                    status: 'abandoned'
-                },
-                {
-                    studentId: 'S004',
-                    name: 'Sarah Williams',
-                    score: 91,
-                    percentage: 91,
-                    riskScore: 10,
-                    incidentCount: 1,
-                    duration: 85,
-                    status: 'completed'
-                },
-                {
-                    studentId: 'S005',
-                    name: 'Robert Brown',
-                    score: 0,
-                    percentage: 0,
-                    riskScore: 95,
-                    incidentCount: 12,
-                    duration: 45,
-                    status: 'disqualified'
-                }
-            ],
-            incidentBreakdown: {
-                identityMismatch: 2,
-                multipleFaces: 8,
-                phoneDetected: 4,
-                tabSwitch: 5,
-                gazeAway: 3,
-                audioViolation: 1
-            }
-        };
-
-        setReport(mockReport);
-    };
 
     const handleExport = (format: 'pdf' | 'csv') => {
         showToast(`Exporting report as ${format.toUpperCase()}...`, 'success');
@@ -240,43 +159,55 @@ export default function LecturerExamReport({
                     Back to Dashboard
                 </button>
 
-                {/* Report Header */}
-                <div className="bg-slate-900 border border-slate-800 rounded-lg p-8 mb-6">
-                    <div className="flex justify-between items-start mb-6">
-                        <div>
-                            <div className="flex items-center gap-3 mb-2">
-                                <FileText className="h-8 w-8 text-indigo-400" />
-                                <h1 className="text-3xl font-bold text-white">Exam Report</h1>
-                            </div>
-                            <h2 className="text-2xl font-semibold text-slate-300 mb-2">{report.title}</h2>
-                            <p className="text-slate-400">
-                                {report.courseCode} • {new Date(report.date).toLocaleDateString()} • {report.duration} minutes
-                            </p>
-                        </div>
-
-                        <div className="flex gap-2 print:hidden">
-                            <button 
-                                onClick={() => handleExport('pdf')}
-                                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors flex items-center gap-2"
-                            >
-                                <Download className="h-4 w-4" />
-                                PDF
-                            </button>
-                            <button 
-                                onClick={() => handleExport('csv')}
-                                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors flex items-center gap-2"
-                            >
-                                <Download className="h-4 w-4" />
-                                CSV
-                            </button>
-                            <button 
-                                onClick={handlePrint}
-                                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors"
-                            >
-                                Print
-                            </button>
-                        </div>
+                {isLoading ? (
+                    <div className="flex items-center justify-center h-96">
+                        <div className="text-slate-400">Loading report...</div>
                     </div>
+                ) : !report ? (
+                    <div className="flex flex-col items-center justify-center h-96 space-y-4">
+                        <AlertTriangle className="h-16 w-16 text-orange-400" />
+                        <div className="text-xl text-slate-400">No report data available</div>
+                        <p className="text-sm text-slate-500">The exam may not have any submissions yet.</p>
+                    </div>
+                ) : (
+                    <>
+                        {/* Report Header */}
+                        <div className="bg-slate-900 border border-slate-800 rounded-lg p-8 mb-6">
+                            <div className="flex justify-between items-start mb-6">
+                                <div>
+                                    <div className="flex items-center gap-3 mb-2">
+                                        <FileText className="h-8 w-8 text-indigo-400" />
+                                        <h1 className="text-3xl font-bold text-white">Exam Report</h1>
+                                    </div>
+                                    <h2 className="text-2xl font-semibold text-slate-300 mb-2">{report.title}</h2>
+                                    <p className="text-slate-400">
+                                        {report.courseCode} • {new Date(report.date).toLocaleDateString()} • {report.duration} minutes
+                                    </p>
+                                </div>
+
+                                <div className="flex gap-2 print:hidden">
+                                    <button 
+                                        onClick={() => handleExport('pdf')}
+                                        className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors flex items-center gap-2"
+                                    >
+                                        <Download className="h-4 w-4" />
+                                        PDF
+                                    </button>
+                                    <button 
+                                        onClick={() => handleExport('csv')}
+                                        className="px-4 py-2 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors flex items-center gap-2"
+                                    >
+                                        <Download className="h-4 w-4" />
+                                        CSV
+                                    </button>
+                                    <button 
+                                        onClick={handlePrint}
+                                        className="px-4 py-2 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors"
+                                    >
+                                        Print
+                                    </button>
+                                </div>
+                            </div>
 
                     {/* KPI Cards */}
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -523,6 +454,8 @@ export default function LecturerExamReport({
                     <p>Report generated on {new Date().toLocaleString()}</p>
                     <p className="mt-1">Invigilo Proctoring System © 2024</p>
                 </div>
+                </>
+                )}
             </div>
         </div>
     );
