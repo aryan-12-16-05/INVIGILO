@@ -1716,17 +1716,28 @@ def get_exam_report(exam_id):
         404 Not Found: Exam not found
         500 Internal Error: Database error
     """
+    print(f"[REPORT] Fetching report for exam {exam_id}")
+    
     try:
         # Validate exam exists
-        exam = exams_collection.find_one({'_id': ObjectId(exam_id)}) if ObjectId.is_valid(exam_id) else None
+        if not ObjectId.is_valid(exam_id):
+            print(f"[REPORT] Invalid exam ID format: {exam_id}")
+            return jsonify({"error": "Invalid exam ID"}), 400
+            
+        exam = exams_collection.find_one({'_id': ObjectId(exam_id)})
         if not exam:
+            print(f"[REPORT] Exam not found: {exam_id}")
             return jsonify({"error": "Exam not found"}), 404
+        
+        print(f"[REPORT] Found exam: {exam.get('title')}")
         
         # Get all exam attempts for this exam
         attempts = list(exam_attempts_collection.find({'exam_id': exam_id}))
+        print(f"[REPORT] Found {len(attempts)} attempts")
         
         # Initialize default values for empty exam
         total_questions = len(exam.get('questions', []))
+        print(f"[REPORT] Exam has {total_questions} questions")
         
         # Calculate statistics
         total_students = len(attempts)
@@ -1818,13 +1829,28 @@ def get_exam_report(exam_id):
         average_score = round(total_score / total_students, 2) if total_students > 0 else 0
         average_percentage = round((average_score / total_questions * 100), 2) if total_questions > 0 else 0
         pass_rate = round((passed_students / total_students * 100), 1) if total_students > 0 else 0
-        attendance_rate = 100.0  # All attempts represent attendance
+        attendance_rate = round((total_students / total_students * 100), 1) if total_students > 0 else 0
+        
+        # Format date properly
+        exam_date = 'N/A'
+        scheduled_date = exam.get('scheduledDate')
+        if scheduled_date:
+            if isinstance(scheduled_date, str):
+                try:
+                    # Try to parse and format the date
+                    dt = datetime.datetime.fromisoformat(scheduled_date.replace('Z', ''))
+                    exam_date = dt.strftime('%Y-%m-%d')
+                except:
+                    # If it's already in YYYY-MM-DD format, use as-is
+                    exam_date = scheduled_date.split('T')[0] if 'T' in scheduled_date else scheduled_date
+            elif isinstance(scheduled_date, datetime.datetime):
+                exam_date = scheduled_date.strftime('%Y-%m-%d')
         
         report_data = {
             'examId': exam_id,
             'title': exam.get('title', 'Untitled Exam'),
             'courseCode': exam.get('courseCode', 'N/A'),
-            'date': exam.get('startTime', datetime.datetime.now()).strftime('%Y-%m-%d') if exam.get('startTime') else 'N/A',
+            'date': exam_date,
             'duration': exam.get('duration', 0),
             'totalStudents': total_students,
             'attendanceRate': attendance_rate,
@@ -1835,6 +1861,8 @@ def get_exam_report(exam_id):
             'students': students_data,
             'incidentBreakdown': incident_breakdown
         }
+        
+        print(f"[REPORT] Generated report for exam {exam_id}: {total_students} students, avg score: {average_percentage}%")
         
         return jsonify(report_data), 200
         

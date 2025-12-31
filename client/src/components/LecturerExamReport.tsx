@@ -61,15 +61,22 @@ export default function LecturerExamReport({
     useEffect(() => {
         const fetchReport = async () => {
             try {
+                console.log(`[REPORT] Fetching report for exam: ${examId}`);
                 const res = await fetch(`${API_URL}/exams/${examId}/report`);
+                console.log(`[REPORT] Response status: ${res.status}`);
+                
                 const data = await res.json();
+                console.log(`[REPORT] Response data:`, data);
+                
                 if (res.ok) {
                     setReport(data);
+                    console.log(`[REPORT] Report loaded successfully:`, data.title);
                 } else {
+                    console.error(`[REPORT] Error response:`, data);
                     showToast(data.error || 'Failed to load report', 'error');
                 }
             } catch (err) {
-                console.error('Failed to fetch report:', err);
+                console.error('[REPORT] Fetch error:', err);
                 showToast('Failed to load report. Check your connection and try again.', 'error');
             } finally {
                 setIsLoading(false);
