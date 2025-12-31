@@ -381,8 +381,10 @@ export default function LiveMonitoringDashboard({
                                             className="absolute inset-0 w-full h-full object-cover"
                                         />
                                     ) : (
-                                        <div className="absolute inset-0 bg-gradient-to-br from-slate-800 to-slate-900 flex items-center justify-center">
-                                            <Camera className="h-8 w-8 text-slate-600" />
+                                        <div className="absolute inset-0 bg-gradient-to-br from-slate-800 to-slate-900 flex flex-col items-center justify-center text-center p-2">
+                                            <Camera className="h-8 w-8 text-slate-600 mb-2" />
+                                            <p className="text-xs text-slate-500">Preview Unavailable</p>
+                                            <p className="text-xs text-slate-600 mt-1">Waiting for stream...</p>
                                         </div>
                                     )}
                                 </div>
@@ -828,27 +830,50 @@ export default function LiveMonitoringDashboard({
                         {/* Action Buttons */}
                         <div className="flex gap-3 mt-6">
                             <Button
+                                variant="outline"
+                                className="flex-1 bg-yellow-600 hover:bg-yellow-700"
+                                onClick={() => {
+                                    socketRef.current?.emit('pause_student', {
+                                        examId,
+                                        userId: selectedStudent.userId
+                                    });
+                                    alert(`Paused exam for ${selectedStudent.name}`);
+                                }}
+                            >
+                                <Pause className="h-4 w-4" />
+                                Pause Exam
+                            </Button>
+
+                            <Button
                                 variant="destructive"
                                 className="flex-1 bg-red-600 hover:bg-red-700"
+                                onClick={() => {
+                                    if (confirm(`Are you sure you want to stop the exam for ${selectedStudent.name}? This cannot be undone.`)) {
+                                        socketRef.current?.emit('stop_student', {
+                                            examId,
+                                            userId: selectedStudent.userId
+                                        });
+                                        alert(`Stopped exam for ${selectedStudent.name}`);
+                                    }
+                                }}
                             >
-                                <AlertTriangle className="h-4 w-4" />
-                                Flag Student
+                                <X className="h-4 w-4" />
+                                Stop Exam
                             </Button>
 
                             <Button
                                 variant="outline"
-                                className="flex-1"
+                                className="flex-1 bg-green-600 hover:bg-green-700"
+                                onClick={() => {
+                                    socketRef.current?.emit('allow_student', {
+                                        examId,
+                                        userId: selectedStudent.userId
+                                    });
+                                    alert(`Allowed ${selectedStudent.name} to continue`);
+                                }}
                             >
-                                <Download className="h-4 w-4" />
-                                Download Recording
-                            </Button>
-
-                            <Button
-                                variant="outline"
-                                className="flex-1"
-                            >
-                                <FileText className="h-4 w-4" />
-                                View Full Report
+                                <CheckCircle className="h-4 w-4" />
+                                Allow Continue
                             </Button>
                         </div>
                     </motion.div>

@@ -4045,6 +4045,108 @@ def api_set_proctor_status(exam_id, user_id):
     return jsonify({'status': dec}), 200
 
 
+@socketio.on('pause_student', namespace='/proctor')
+def handle_pause_student(data):
+    """Lecturer pauses a student's exam."""
+    try:
+        exam_id = data.get('examId')
+        user_id = data.get('userId')
+        
+        if not exam_id or not user_id:
+            emit('error', {'message': 'examId and userId are required'})
+            return
+        
+        app.logger.info(f'[PROCTOR] Pausing student {user_id} in exam {exam_id}')
+        
+        # Update decision
+        set_proctor_decision(
+            exam_id=exam_id,
+            user_id=user_id,
+            status='paused',
+            reason='Paused by lecturer',
+            actor_id=None
+        )
+        
+        emit('status', {
+            'message': f'Student {user_id} paused successfully',
+            'examId': exam_id,
+            'userId': user_id,
+            'status': 'paused'
+        })
+        
+    except Exception as e:
+        app.logger.error(f'[PROCTOR] Error pausing student: {e}')
+        emit('error', {'message': 'Failed to pause student'})
+
+
+@socketio.on('stop_student', namespace='/proctor')
+def handle_stop_student(data):
+    """Lecturer stops/terminates a student's exam."""
+    try:
+        exam_id = data.get('examId')
+        user_id = data.get('userId')
+        
+        if not exam_id or not user_id:
+            emit('error', {'message': 'examId and userId are required'})
+            return
+        
+        app.logger.info(f'[PROCTOR] Stopping student {user_id} in exam {exam_id}')
+        
+        # Update decision
+        set_proctor_decision(
+            exam_id=exam_id,
+            user_id=user_id,
+            status='terminated',
+            reason='Stopped by lecturer',
+            actor_id=None
+        )
+        
+        emit('status', {
+            'message': f'Student {user_id} stopped successfully',
+            'examId': exam_id,
+            'userId': user_id,
+            'status': 'terminated'
+        })
+        
+    except Exception as e:
+        app.logger.error(f'[PROCTOR] Error stopping student: {e}')
+        emit('error', {'message': 'Failed to stop student'})
+
+
+@socketio.on('allow_student', namespace='/proctor')
+def handle_allow_student(data):
+    """Lecturer allows a paused student to continue."""
+    try:
+        exam_id = data.get('examId')
+        user_id = data.get('userId')
+        
+        if not exam_id or not user_id:
+            emit('error', {'message': 'examId and userId are required'})
+            return
+        
+        app.logger.info(f'[PROCTOR] Allowing student {user_id} to continue in exam {exam_id}')
+        
+        # Update decision
+        set_proctor_decision(
+            exam_id=exam_id,
+            user_id=user_id,
+            status='active',
+            reason='Allowed by lecturer',
+            actor_id=None
+        )
+        
+        emit('status', {
+            'message': f'Student {user_id} allowed to continue',
+            'examId': exam_id,
+            'userId': user_id,
+            'status': 'active'
+        })
+        
+    except Exception as e:
+        app.logger.error(f'[PROCTOR] Error allowing student: {e}')
+        emit('error', {'message': 'Failed to allow student'})
+
+
 # ================================================================================
 # Main Application Entry Point
 # ================================================================================
