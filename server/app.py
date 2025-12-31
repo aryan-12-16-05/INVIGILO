@@ -1416,6 +1416,15 @@ def create_exam():
     for q in data.get('questions', []):
         q_with_id = q.copy()
         q_with_id['_id'] = ObjectId()
+        
+        # Normalize correctAnswer type for multiple choice questions
+        if q_with_id.get('type') == 'multiple-choice' and 'correctAnswer' in q_with_id:
+            try:
+                # Ensure it's stored as an integer
+                q_with_id['correctAnswer'] = int(q_with_id['correctAnswer'])
+            except (ValueError, TypeError):
+                pass  # Keep as-is if conversion fails
+        
         questions_with_ids.append(q_with_id)
 
     new_exam = {
@@ -1716,6 +1725,9 @@ def get_exam_report(exam_id):
         # Get all exam attempts for this exam
         attempts = list(exam_attempts_collection.find({'exam_id': exam_id}))
         
+        # Initialize default values for empty exam
+        total_questions = len(exam.get('questions', []))
+        
         # Calculate statistics
         total_students = len(attempts)
         completed_students = len([a for a in attempts if a.get('status') == 'completed'])
@@ -1928,31 +1940,22 @@ def submit_exam(exam_id):
 
             try:
                 if user_answer is not None:
-                    # Multiple choice: support numeric (1-based) or option-text answers
+                    # Multiple choice: both stored as integers (1, 2, 3, 4)
                     if qtype == 'multiple-choice':
                         print(f"[GRADING] Q{q_id}: user={user_answer} (type={type(user_answer)}), correct={correct_answer} (type={type(correct_answer)})")
-                        if isinstance(correct_answer, (int, float)):
-                            try:
-                                if int(user_answer) == int(correct_answer):
-                                    correct = True
-                                    print(f"[GRADING] Q{q_id}: CORRECT via numeric comparison")
-                            except Exception as e:
-                                print(f"[GRADING] Q{q_id}: Numeric comparison failed: {e}")
-                                if str(user_answer) == str(correct_answer):
-                                    correct = True
-                                    print(f"[GRADING] Q{q_id}: CORRECT via string comparison")
-                        else:
-                            if isinstance(user_answer, (int, float)):
-                                try:
-                                    idx = int(user_answer) - 1
-                                    opts = question.get('options') or []
-                                    if 0 <= idx < len(opts) and str(opts[idx]) == str(correct_answer):
-                                        correct = True
-                                except Exception:
-                                    pass
+                        
+                        # Convert both to integers for comparison
+                        try:
+                            user_answer_int = int(user_answer)
+                            correct_answer_int = int(correct_answer)
+                            
+                            if user_answer_int == correct_answer_int:
+                                correct = True
+                                print(f"[GRADING] Q{q_id}: CORRECT - user answered {user_answer_int}, correct is {correct_answer_int}")
                             else:
-                                if str(user_answer) == str(correct_answer):
-                                    correct = True
+                                print(f"[GRADING] Q{q_id}: WRONG - user answered {user_answer_int}, correct is {correct_answer_int}")
+                        except (ValueError, TypeError) as e:
+                            print(f"[GRADING] Q{q_id}: Conversion error: {e}")
 
                     elif qtype == 'true-false':
                         # Coerce user answer to boolean

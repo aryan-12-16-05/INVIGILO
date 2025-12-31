@@ -70,14 +70,14 @@ export default function LecturerExamReport({
                 }
             } catch (err) {
                 console.error('Failed to fetch report:', err);
-                showToast('Failed to load report. Please try again.', 'error');
+                showToast('Failed to load report. Check your connection and try again.', 'error');
             } finally {
                 setIsLoading(false);
             }
         };
 
         fetchReport();
-    }, [examId]);
+    }, [examId, showToast]);
 
     const handleExport = (format: 'pdf' | 'csv') => {
         showToast(`Exporting report as ${format.toUpperCase()}...`, 'success');
@@ -166,8 +166,14 @@ export default function LecturerExamReport({
                 ) : !report ? (
                     <div className="flex flex-col items-center justify-center h-96 space-y-4">
                         <AlertTriangle className="h-16 w-16 text-orange-400" />
-                        <div className="text-xl text-slate-400">No report data available</div>
-                        <p className="text-sm text-slate-500">The exam may not have any submissions yet.</p>
+                        <div className="text-xl text-slate-400">Failed to load report</div>
+                        <p className="text-sm text-slate-500">Please check your connection and try again.</p>
+                        <button 
+                            onClick={() => window.location.reload()} 
+                            className="mt-4 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors"
+                        >
+                            Retry
+                        </button>
                     </div>
                 ) : (
                     <>
@@ -183,6 +189,9 @@ export default function LecturerExamReport({
                                     <p className="text-slate-400">
                                         {report.courseCode} • {new Date(report.date).toLocaleDateString()} • {report.duration} minutes
                                     </p>
+                                    {report.totalStudents === 0 && (
+                                        <p className="text-yellow-400 text-sm mt-2">⚠ No student submissions yet</p>
+                                    )}
                                 </div>
 
                                 <div className="flex gap-2 print:hidden">
@@ -309,7 +318,16 @@ export default function LecturerExamReport({
                                 </tr>
                             </thead>
                             <tbody>
-                                {sortedStudents.map((student, idx) => (
+                                {sortedStudents.length === 0 ? (
+                                    <tr>
+                                        <td colSpan={7} className="py-12 text-center text-slate-400">
+                                            <Users className="h-12 w-12 mx-auto mb-2 text-slate-600" />
+                                            <p>No student submissions yet</p>
+                                            <p className="text-sm text-slate-500 mt-1">Students will appear here once they complete the exam</p>
+                                        </td>
+                                    </tr>
+                                ) : (
+                                    sortedStudents.map((student, idx) => (
                                     <motion.tr 
                                         key={student.studentId}
                                         initial={{ opacity: 0, y: 20 }}
@@ -350,7 +368,7 @@ export default function LecturerExamReport({
                                             </span>
                                         </td>
                                     </motion.tr>
-                                ))}
+                                )))}
                             </tbody>
                         </table>
                     </div>
