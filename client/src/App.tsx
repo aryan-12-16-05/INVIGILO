@@ -1,4 +1,4 @@
-import React, { useState, useEffect, type FormEvent, type ChangeEvent, useRef, useCallback } from 'react';
+﻿import React, { useState, useEffect, type FormEvent, type ChangeEvent, useRef, useCallback } from 'react';
 import Sidebar from './sidebar';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -2638,7 +2638,7 @@ const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showTo
                             <Button variant="ghost" size="sm" onClick={() => { setExamToEdit(exam); setCreateExamOpen(true); }} title="Edit Exam">
                                 Edit
                             </Button>
-                            <Button variant="ghost" size="sm" onClick={() => navigateTo('lecturer-live-exams')} title="Live Monitoring">
+                            <Button variant="ghost" size="sm" onClick={() => { setSelectedExamIdForProctoring(exam._id); navigateTo('lecturer-live-monitor'); }} title="Live Monitoring">
                                 Monitor
                             </Button>
                             <Button variant="ghost" size="sm" onClick={() => { setSelectedExamIdForProctoring(exam._id); navigateTo('lecturer-report'); }} title="View Report">

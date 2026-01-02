@@ -227,219 +227,229 @@ export default function LiveMonitoringDashboard({
         critical: students.filter(s => s.status === 'critical').length
     };
 
+    // Calculate additional stats
+    const averageRisk = students.length > 0
+        ? Math.round(students.reduce((sum, s) => sum + (s.violations * 10), 0) / students.length)
+        : 0;
+    
+    const idVerified = students.filter(s => s.faceDetected).length;
+    const timeLeft = students.length > 0 ? students[0].timeRemaining : 0;
+
     return (
         <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-white">
-            {/* Header Bar */}
-            <div className="border-b border-white/10 bg-white/5 backdrop-blur-xl sticky top-0 z-50">
-                <div className="p-4">
+            {/* Top Navigation & Global Stats */}
+            <div className="border-b border-white/10 bg-slate-900/80 backdrop-blur-xl sticky top-0 z-50 shadow-2xl">
+                <div className="px-6 py-4">
+                    {/* Lecturer Info Bar */}
                     <div className="flex items-center justify-between mb-4">
-                        {/* Branding */}
                         <div className="flex items-center gap-4">
                             <button onClick={onBack} className="p-2 hover:bg-white/10 rounded-lg transition-colors">
                                 <ArrowLeft className="h-5 w-5" />
                             </button>
-                            <div className="flex items-center gap-3">
+                            <div className="flex items-center gap-3 border-r border-white/20 pr-4">
                                 <Camera className="h-8 w-8 text-indigo-400" />
                                 <div>
-                                    <h1 className="text-xl font-bold">INVIGILO</h1>
-                                    <span className="text-xs text-gray-400">Lecturer</span>
+                                    <h1 className="text-lg font-bold">INVIGILO Live Proctoring</h1>
+                                    <p className="text-xs text-gray-400">Computer Science Department</p>
                                 </div>
                             </div>
-                        </div>
-
-                        {/* Stats Panel */}
-                        <div className="flex items-center gap-4">
-                            <div className="bg-white/5 rounded-xl border border-white/10 px-4 py-2 flex items-center gap-2">
-                                <FileText className="h-4 w-4 text-indigo-400" />
-                                <div>
-                                    <p className="text-xs text-gray-400">Active Exams</p>
-                                    <p className="text-white font-semibold">{stats.activeExams}</p>
-                                </div>
+                            <div className="flex items-center gap-2 bg-green-500/20 text-green-400 border border-green-500/30 px-3 py-1.5 rounded-lg animate-pulse">
+                                <Radio className="h-4 w-4" />
+                                <span className="text-sm font-bold">LIVE</span>
                             </div>
-
-                            <div className="bg-white/5 rounded-xl border border-white/10 px-4 py-2 flex items-center gap-2">
-                                <UsersIcon className="h-4 w-4 text-green-400" />
-                                <div>
-                                    <p className="text-xs text-gray-400">Students Online</p>
-                                    <p className="text-white font-semibold">{stats.studentsOnline}</p>
-                                </div>
-                            </div>
-
-                            <div className="bg-white/5 rounded-xl border border-white/10 px-4 py-2 flex items-center gap-2">
-                                <AlertTriangle className="h-4 w-4 text-red-400" />
-                                <div>
-                                    <p className="text-xs text-gray-400">Active Violations</p>
-                                    <p className="text-white font-semibold">{stats.activeViolations}</p>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    {/* Title & Actions */}
-                    <div className="flex items-center justify-between">
-                        <div>
-                            <h2 className="text-2xl font-bold text-white">Live Monitoring Dashboard</h2>
-                            <p className="text-gray-400 text-sm mt-1">{examTitle} • Real-time Student Surveillance</p>
                         </div>
 
                         <div className="flex items-center gap-3">
-                            <button className="bg-green-500/20 text-green-400 border border-green-500/30 px-4 py-2 rounded-lg flex items-center gap-2 animate-pulse">
-                                <Radio className="h-4 w-4" />
-                                <span className="font-semibold">LIVE PROCTORING</span>
-                            </button>
-
                             <Button variant="outline" size="sm">
                                 <Filter className="h-4 w-4" />
-                                Filter
                             </Button>
-
                             <Button variant="outline" size="sm">
                                 <Download className="h-4 w-4" />
-                                Export Report
+                                Export
                             </Button>
+                        </div>
+                    </div>
 
-                            <Button
-                                variant={isMonitoring ? 'ghost' : 'default'}
-                                size="sm"
-                                onClick={() => setIsMonitoring(!isMonitoring)}
-                            >
-                                {isMonitoring ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
-                                {isMonitoring ? 'Pause' : 'Resume'}
-                            </Button>
+                    {/* Metric Cards - 7 Cards */}
+                    <div className="grid grid-cols-7 gap-3">
+                        <div className="bg-gradient-to-br from-green-500/20 to-green-600/10 border border-green-500/30 rounded-xl p-3">
+                            <div className="flex items-center gap-2 mb-1">
+                                <CheckCircle className="h-4 w-4 text-green-400" />
+                                <span className="text-xs text-green-300 font-medium">Online</span>
+                            </div>
+                            <p className="text-2xl font-bold text-white">{stats.studentsOnline}/{students.length}</p>
+                        </div>
+
+                        <div className="bg-gradient-to-br from-green-500/20 to-green-600/10 border border-green-500/30 rounded-xl p-3">
+                            <div className="flex items-center gap-2 mb-1">
+                                <ScanFace className="h-4 w-4 text-green-400" />
+                                <span className="text-xs text-green-300 font-medium">ID Verified</span>
+                            </div>
+                            <p className="text-2xl font-bold text-white">{idVerified}</p>
+                        </div>
+
+                        <div className="bg-gradient-to-br from-orange-500/20 to-orange-600/10 border border-orange-500/30 rounded-xl p-3">
+                            <div className="flex items-center gap-2 mb-1">
+                                <Activity className="h-4 w-4 text-orange-400" />
+                                <span className="text-xs text-orange-300 font-medium">Time Left</span>
+                            </div>
+                            <p className="text-xl font-bold text-white font-mono">{formatTime(timeLeft)}</p>
+                        </div>
+
+                        <div className="bg-gradient-to-br from-red-500/20 to-red-600/10 border border-red-500/30 rounded-xl p-3">
+                            <div className="flex items-center gap-2 mb-1">
+                                <AlertTriangle className="h-4 w-4 text-red-400" />
+                                <span className="text-xs text-red-300 font-medium">Violations</span>
+                            </div>
+                            <p className="text-2xl font-bold text-white">{stats.activeViolations}</p>
+                        </div>
+
+                        <div className="bg-gradient-to-br from-yellow-500/20 to-yellow-600/10 border border-yellow-500/30 rounded-xl p-3">
+                            <div className="flex items-center gap-2 mb-1">
+                                <TrendingUp className="h-4 w-4 text-yellow-400" />
+                                <span className="text-xs text-yellow-300 font-medium">Avg Risk</span>
+                            </div>
+                            <p className="text-2xl font-bold text-white">{averageRisk}%</p>
+                        </div>
+
+                        <div className="bg-gradient-to-br from-cyan-500/20 to-cyan-600/10 border border-cyan-500/30 rounded-xl p-3">
+                            <div className="flex items-center gap-2 mb-1">
+                                <Eye className="h-4 w-4 text-cyan-400" />
+                                <span className="text-xs text-cyan-300 font-medium">Compliance</span>
+                            </div>
+                            <p className="text-2xl font-bold text-white">{complianceRate}%</p>
+                        </div>
+
+                        <div className="bg-gradient-to-br from-purple-500/20 to-purple-600/10 border border-purple-500/30 rounded-xl p-3">
+                            <div className="flex items-center gap-2 mb-1">
+                                <FileText className="h-4 w-4 text-purple-400" />
+                                <span className="text-xs text-purple-300 font-medium">Exam</span>
+                            </div>
+                            <p className="text-sm font-bold text-white truncate">{examTitle.substring(0, 8)}</p>
                         </div>
                     </div>
                 </div>
             </div>
 
-            {/* Main Content */}
+            {/* Main Content - Grid + Focus Panel */}
             <div className="p-6 flex gap-6">
-                {/* Student Grid - 80% */}
-                <div className="flex-[0.78]">
+                {/* Student Monitoring Grid - 75% width */}
+                <div className="flex-[0.75]">
+                    <div className="mb-4">
+                        <h2 className="text-xl font-bold text-white mb-1">Student Monitoring Grid</h2>
+                        <p className="text-sm text-gray-400">Real-time surveillance of {currentStudents.length} active students</p>
+                    </div>
+
                     <div className="grid grid-cols-5 gap-4 mb-6">
-                        {currentStudents.map((student, idx) => (
-                            <motion.div
-                                key={student.userId}
-                                initial={{ opacity: 0, scale: 0.9 }}
-                                animate={{ opacity: 1, scale: 1 }}
-                                transition={{ delay: idx * 0.05 }}
-                                whileHover={{ scale: 1.05, zIndex: 50 }}
-                                onDoubleClick={() => setSelectedStudent(student)}
-                                className={cn(
-                                    'bg-white/5 backdrop-blur-xl border-2 rounded-2xl p-3 transition-all duration-300 cursor-pointer',
-                                    getBorderColor(student.status)
-                                )}
-                            >
-                                {/* Video Feed */}
-                                <div className="aspect-[4/3] bg-black rounded-xl mb-3 relative overflow-hidden">
-                                    {/* LIVE Indicator */}
-                                    <div className="absolute top-2 left-2 bg-black/60 backdrop-blur-sm px-2 py-1 rounded-md flex items-center gap-1.5 z-10">
-                                        <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-                                        <span className="text-xs font-semibold text-white">LIVE</span>
-                                    </div>
+                        {currentStudents.map((student, idx) => {
+                            const riskScore = Math.min(100, student.violations * 15);
+                            const getBorderClass = () => {
+                                if (riskScore >= 70 || student.status === 'critical') return 'border-red-500/70 shadow-red-500/30';
+                                if (riskScore >= 40 || student.status === 'suspicious') return 'border-orange-500/70 shadow-orange-500/30';
+                                if (riskScore >= 20 || student.status === 'warning') return 'border-yellow-500/70 shadow-yellow-500/30';
+                                return 'border-green-500/50 shadow-green-500/20';
+                            };
 
-                                    {/* Violation Count Badge */}
-                                    {student.violations > 0 && (
+                            const getStatusText = () => {
+                                if (student.status === 'critical' || !student.faceDetected) return 'Critical';
+                                if (student.status === 'suspicious') return 'Suspicious';
+                                if (student.status === 'warning') return 'Warning';
+                                return 'Compliant';
+                            };
+
+                            const getStatusBgClass = () => {
+                                if (student.status === 'critical' || !student.faceDetected) return 'bg-red-500 text-white';
+                                if (student.status === 'suspicious') return 'bg-orange-500 text-white';
+                                if (student.status === 'warning') return 'bg-yellow-500 text-black';
+                                return 'bg-green-500 text-white';
+                            };
+
+                            return (
+                                <motion.div
+                                    key={student.userId}
+                                    initial={{ opacity: 0, scale: 0.95 }}
+                                    animate={{ opacity: 1, scale: 1 }}
+                                    transition={{ delay: idx * 0.03 }}
+                                    whileHover={{ scale: 1.03, zIndex: 10 }}
+                                    onDoubleClick={() => setSelectedStudent(student)}
+                                    className={cn(
+                                        'bg-slate-900/60 backdrop-blur-sm border-3 rounded-xl p-3 transition-all duration-300 cursor-pointer shadow-xl',
+                                        getBorderClass()
+                                    )}
+                                >
+                                    {/* Video Feed Area */}
+                                    <div className="aspect-[4/3] bg-black rounded-lg mb-3 relative overflow-hidden">
+                                        {/* AI Badge - Top Left */}
+                                        <div className="absolute top-2 left-2 bg-purple-600 text-white px-2 py-1 rounded-md flex items-center gap-1 z-20 text-xs font-bold">
+                                            <Activity className="h-3 w-3" />
+                                            AI
+                                        </div>
+
+                                        {/* Risk Score - Top Right */}
                                         <div className={cn(
-                                            'absolute top-2 right-2 px-2 py-1 rounded-md backdrop-blur-sm z-10 text-xs font-bold',
-                                            student.status === 'critical' && 'bg-red-500/90 text-white',
-                                            student.status === 'suspicious' && 'bg-orange-500/80 text-white',
-                                            student.status === 'warning' && 'bg-yellow-500/80 text-black'
+                                            'absolute top-2 right-2 px-2 py-1 rounded-md z-20 text-sm font-bold',
+                                            riskScore >= 70 && 'bg-red-500 text-white',
+                                            riskScore >= 40 && riskScore < 70 && 'bg-orange-500 text-white',
+                                            riskScore >= 20 && riskScore < 40 && 'bg-yellow-500 text-black',
+                                            riskScore < 20 && 'bg-green-500 text-white'
                                         )}>
-                                            {student.violations}
+                                            {riskScore}%
                                         </div>
-                                    )}
 
-                                    {/* Face Detection Box */}
-                                    {student.faceDetected && (
-                                        <div className={cn(
-                                            'absolute inset-3 border-2 rounded-lg transition-colors',
-                                            student.status === 'normal' && 'border-green-500',
-                                            student.status === 'warning' && 'border-yellow-500',
-                                            student.status === 'suspicious' && 'border-orange-500',
-                                            student.status === 'critical' && 'border-red-500'
-                                        )} />
-                                    )}
+                                        {/* No Face Overlay */}
+                                        {!student.faceDetected && (
+                                            <div className="absolute inset-0 bg-red-500/30 backdrop-blur-sm flex flex-col items-center justify-center z-10">
+                                                <XCircle className="h-10 w-10 text-red-400 mb-2" />
+                                                <span className="text-sm font-bold text-red-400">No Face</span>
+                                            </div>
+                                        )}
 
-                                    {/* No Face Warning */}
-                                    {!student.faceDetected && (
-                                        <div className="absolute inset-0 bg-red-500/20 backdrop-blur-sm flex flex-col items-center justify-center">
-                                            <XCircle className="h-8 w-8 text-red-400 mb-2" />
-                                            <span className="text-xs font-semibold text-red-400">No Face</span>
-                                        </div>
-                                    )}
+                                        {/* Video Stream */}
+                                        {videoFramesRef.current[student.userId] ? (
+                                            <img
+                                                src={videoFramesRef.current[student.userId]}
+                                                alt="Student video"
+                                                className="absolute inset-0 w-full h-full object-cover"
+                                            />
+                                        ) : (
+                                            <div className="absolute inset-0 bg-gradient-to-br from-slate-800 to-slate-900 flex items-center justify-center">
+                                                <Camera className="h-8 w-8 text-slate-600" />
+                                            </div>
+                                        )}
 
-                                    {/* Timer */}
-                                    <div className="absolute bottom-2 left-2 bg-black/60 backdrop-blur-sm px-2 py-1 rounded-md z-10">
-                                        <span className="text-xs font-mono text-white">{formatTime(student.timeRemaining)}</span>
+                                        {/* Face Detection Border */}
+                                        {student.faceDetected && (
+                                            <div className={cn(
+                                                'absolute inset-4 border-2 rounded-md transition-colors',
+                                                riskScore >= 70 && 'border-red-500',
+                                                riskScore >= 40 && riskScore < 70 && 'border-orange-500',
+                                                riskScore >= 20 && riskScore < 40 && 'border-yellow-500',
+                                                riskScore < 20 && 'border-green-500'
+                                            )} />
+                                        )}
                                     </div>
 
-                                    {/* Video Stream or Placeholder */}
-                                    {videoFramesRef.current[student.userId] ? (
-                                        <img
-                                            src={videoFramesRef.current[student.userId]}
-                                            alt="Student video"
-                                            className="absolute inset-0 w-full h-full object-cover"
-                                        />
-                                    ) : (
-                                        <div className="absolute inset-0 bg-gradient-to-br from-slate-800 to-slate-900 flex flex-col items-center justify-center text-center p-2">
-                                            <Camera className="h-8 w-8 text-slate-600 mb-2" />
-                                            <p className="text-xs text-slate-500">Preview Unavailable</p>
-                                            <p className="text-xs text-slate-600 mt-1">Waiting for stream...</p>
-                                        </div>
-                                    )}
-                                </div>
+                                    {/* Student Info */}
+                                    <div className="mb-2">
+                                        <p className="text-sm text-white font-bold truncate">{student.name}</p>
+                                        <p className="text-xs text-gray-400">{student.studentId}</p>
+                                    </div>
 
-                                {/* Student Info */}
-                                <div className="mb-2">
-                                    <p className="text-sm text-white truncate font-semibold">{student.name}</p>
-                                    <p className="text-xs text-gray-400">{student.studentId}</p>
-                                </div>
-
-                                {/* Status Indicators Grid */}
-                                <div className="grid grid-cols-3 gap-1 text-xs mb-2">
+                                    {/* Status Bar */}
                                     <div className={cn(
-                                        'flex items-center gap-1 px-2 py-1 rounded',
-                                        student.faceDetected ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
+                                        'w-full py-1.5 rounded-md text-center text-xs font-bold',
+                                        getStatusBgClass()
                                     )}>
-                                        <ScanFace className="h-3 w-3" />
-                                        <span className="text-[10px]">Face</span>
+                                        {getStatusText()}
                                     </div>
-
-                                    <div className={cn(
-                                        'flex items-center gap-1 px-2 py-1 rounded',
-                                        student.gaze === 'forward' ? 'bg-green-500/20 text-green-400' : 'bg-yellow-500/20 text-yellow-400'
-                                    )}>
-                                        <Eye className="h-3 w-3" />
-                                        <span className="text-[10px]">Gaze</span>
-                                    </div>
-
-                                    <div className={cn(
-                                        'flex items-center gap-1 px-2 py-1 rounded',
-                                        student.headPose === 'normal' ? 'bg-green-500/20 text-green-400' : 'bg-orange-500/20 text-orange-400'
-                                    )}>
-                                        <Activity className="h-3 w-3" />
-                                        <span className="text-[10px]">Pose</span>
-                                    </div>
-                                </div>
-
-                                {/* Overall Status Badge */}
-                                <div className={cn(
-                                    'mt-2 px-2 py-1 rounded-lg text-center text-xs font-semibold border',
-                                    getSeverityBg(student.status),
-                                    getSeverityColor(student.status)
-                                )}>
-                                    {student.status === 'normal' && '✓ Normal'}
-                                    {student.status === 'warning' && '⚠ Warning'}
-                                    {student.status === 'suspicious' && '⚠ Suspicious'}
-                                    {student.status === 'critical' && '✕ Critical'}
-                                </div>
-                            </motion.div>
-                        ))}
+                                </motion.div>
+                            );
+                        })}
                     </div>
 
                     {/* Pagination */}
                     {totalPages > 1 && (
-                        <div className="flex items-center justify-center gap-4 mt-6">
+                        <div className="flex items-center justify-center gap-4">
                             <Button
                                 variant="outline"
                                 size="sm"
@@ -447,10 +457,9 @@ export default function LiveMonitoringDashboard({
                                 disabled={currentPage === 0}
                             >
                                 <ChevronLeft className="h-4 w-4" />
-                                Previous
                             </Button>
                             <span className="text-sm text-gray-400">
-                                Page {currentPage + 1} of {totalPages} • Showing {currentStudents.length} of {students.length} students
+                                Page {currentPage + 1} of {totalPages}
                             </span>
                             <Button
                                 variant="outline"
@@ -458,87 +467,173 @@ export default function LiveMonitoringDashboard({
                                 onClick={() => setCurrentPage(Math.min(totalPages - 1, currentPage + 1))}
                                 disabled={currentPage === totalPages - 1}
                             >
-                                Next
                                 <ChevronRight className="h-4 w-4" />
                             </Button>
                         </div>
                     )}
                 </div>
 
-                {/* Violation Review Panel - 20% */}
-                <div className="flex-[0.22]">
-                    <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-6 sticky top-24">
-                        <div className="flex items-center gap-2 mb-4">
-                            <AlertTriangle className="h-5 w-5 text-red-400" />
-                            <h3 className="text-lg font-bold text-white">Violation Review</h3>
+                {/* Active Review Panel - 25% width - Focused Review */}
+                <div className="flex-[0.25]">
+                    <div className="bg-slate-900/80 backdrop-blur-xl border-2 border-white/20 rounded-2xl p-5 sticky top-32 shadow-2xl">
+                        <div className="flex items-center gap-2 mb-5">
+                            <AlertTriangle className="h-6 w-6 text-red-400" />
+                            <h3 className="text-xl font-bold text-white">Active Review</h3>
                         </div>
 
                         {violationReviews.length === 0 ? (
-                            <div className="text-center py-12">
-                                <CheckCircle className="h-16 w-16 text-green-400 mx-auto mb-4" />
-                                <p className="text-green-400 font-semibold mb-1">No violations detected</p>
-                                <p className="text-xs text-gray-400">All students are compliant</p>
+                            <div className="text-center py-16">
+                                <CheckCircle className="h-20 w-20 text-green-400 mx-auto mb-4" />
+                                <p className="text-green-400 font-bold text-lg mb-2">All Clear!</p>
+                                <p className="text-sm text-gray-400">No violations detected</p>
                             </div>
                         ) : (
                             <AnimatePresence mode="wait">
                                 <motion.div
                                     key={currentViolationIndex}
-                                    initial={{ opacity: 0, x: 20 }}
-                                    animate={{ opacity: 1, x: 0 }}
-                                    exit={{ opacity: 0, x: -20 }}
+                                    initial={{ opacity: 0, y: 10 }}
+                                    animate={{ opacity: 1, y: 0 }}
+                                    exit={{ opacity: 0, y: -10 }}
+                                    className="space-y-4"
                                 >
-                                    {/* Large Video Feed */}
-                                    <div className="aspect-[4/3] bg-black rounded-xl border-2 border-red-500/50 mb-4 relative overflow-hidden">
-                                        <div className="absolute top-2 left-2 bg-red-500/80 backdrop-blur-sm px-3 py-2 rounded-lg flex items-center gap-2 z-10">
-                                            <div className="w-2 h-2 rounded-full bg-white animate-pulse" />
-                                            <span className="text-xs font-bold text-white">REVIEWING</span>
-                                        </div>
+                                    {/* Primary Feed with Thick Red Border */}
+                                    <div className="relative">
+                                        <div className="aspect-[4/3] bg-black rounded-xl border-4 border-red-500 relative overflow-hidden shadow-xl shadow-red-500/30">
+                                            {/* REVIEWING Tag */}
+                                            <div className="absolute top-3 left-3 bg-red-600 text-white px-4 py-2 rounded-lg flex items-center gap-2 z-20 font-bold text-sm">
+                                                <div className="w-2.5 h-2.5 rounded-full bg-white animate-pulse" />
+                                                REVIEWING
+                                            </div>
 
-                                        <div className="absolute top-2 right-2 bg-red-500/90 text-white px-3 py-2 rounded-lg z-10">
-                                            <span className="text-xs font-bold">{currentViolation.violations} VIOLATIONS</span>
-                                        </div>
+                                            {/* Violations Alert */}
+                                            <div className="absolute top-3 right-3 bg-red-600 text-white px-4 py-2 rounded-lg z-20 font-bold text-sm">
+                                                {currentViolation.violations} VIOLATIONS
+                                            </div>
 
-                                        <div className="absolute inset-0 bg-gradient-to-br from-slate-800 to-slate-900" />
+                                            {/* Video Stream */}
+                                            {videoFramesRef.current[currentViolation.userId] ? (
+                                                <img
+                                                    src={videoFramesRef.current[currentViolation.userId]}
+                                                    alt="Review student"
+                                                    className="absolute inset-0 w-full h-full object-cover"
+                                                />
+                                            ) : (
+                                                <div className="absolute inset-0 bg-gradient-to-br from-slate-800 to-slate-900 flex items-center justify-center">
+                                                    <Camera className="h-12 w-12 text-slate-600" />
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    {/* Risk Breakdown */}
+                                    <div className="bg-white/5 backdrop-blur-sm border border-white/10 rounded-xl p-4">
+                                        <div className="flex items-center justify-between mb-3">
+                                            <span className="text-sm font-semibold text-gray-300">Risk Score</span>
+                                            <span className="text-2xl font-bold text-red-400">
+                                                {Math.min(100, currentViolation.violations * 15)}%
+                                            </span>
+                                        </div>
+                                        <div className="w-full bg-white/10 rounded-full h-3 overflow-hidden">
+                                            <div
+                                                className="h-full bg-gradient-to-r from-red-600 to-red-400 transition-all duration-500"
+                                                style={{ width: `${Math.min(100, currentViolation.violations * 15)}%` }}
+                                            />
+                                        </div>
                                     </div>
 
                                     {/* Student Details */}
-                                    <div className="bg-white/5 rounded-xl p-4 mb-4">
+                                    <div className="bg-white/5 backdrop-blur-sm border border-white/10 rounded-xl p-4">
                                         <div className="flex items-start justify-between mb-2">
                                             <div>
-                                                <p className="text-white font-semibold">{currentViolation.name}</p>
-                                                <p className="text-xs text-gray-400">{currentViolation.studentId}</p>
+                                                <p className="text-white font-bold text-lg">{currentViolation.name}</p>
+                                                <p className="text-sm text-gray-400">{currentViolation.studentId}</p>
                                             </div>
                                             <span className={cn(
-                                                'px-2 py-1 rounded text-xs font-semibold',
-                                                getSeverityBg(currentViolation.status),
-                                                getSeverityColor(currentViolation.status)
+                                                'px-3 py-1 rounded-lg text-xs font-bold uppercase',
+                                                currentViolation.status === 'critical' && 'bg-red-500 text-white',
+                                                currentViolation.status === 'suspicious' && 'bg-orange-500 text-white',
+                                                currentViolation.status === 'warning' && 'bg-yellow-500 text-black'
                                             )}>
-                                                {currentViolation.status.toUpperCase()}
+                                                {currentViolation.status}
                                             </span>
                                         </div>
-
-                                        <p className="text-sm text-gray-300 mb-2">{currentViolation.latestViolation || 'Multiple violations detected'}</p>
-                                        <p className="text-xs text-gray-500">{currentViolation.violationTime || 'Just now'}</p>
                                     </div>
 
-                                    {/* Action Buttons */}
-                                    <div className="grid grid-cols-2 gap-3 mb-4">
-                                        <Button variant="outline" size="sm" className="border-red-500/30 hover:bg-red-500/10 text-red-400">
-                                            <XCircle className="h-4 w-4" />
-                                            Remove
-                                        </Button>
-                                        <Button size="sm" className="bg-gradient-to-r from-green-600 to-emerald-600">
-                                            <CheckCircle className="h-4 w-4" />
-                                            Keep
-                                        </Button>
+                                    {/* Specific Triggers */}
+                                    <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4">
+                                        <p className="text-xs font-semibold text-red-300 mb-3 uppercase">Detected Violations</p>
+                                        <div className="space-y-2">
+                                            {currentViolation.latestViolation && (
+                                                <div className="flex items-start gap-2 text-sm">
+                                                    <AlertTriangle className="h-4 w-4 text-red-400 mt-0.5 flex-shrink-0" />
+                                                    <span className="text-gray-300">{currentViolation.latestViolation}</span>
+                                                </div>
+                                            )}
+                                            {!currentViolation.faceDetected && (
+                                                <div className="flex items-start gap-2 text-sm">
+                                                    <XCircle className="h-4 w-4 text-red-400 mt-0.5 flex-shrink-0" />
+                                                    <span className="text-gray-300">Face not detected</span>
+                                                </div>
+                                            )}
+                                            {currentViolation.gaze !== 'forward' && (
+                                                <div className="flex items-start gap-2 text-sm">
+                                                    <Eye className="h-4 w-4 text-orange-400 mt-0.5 flex-shrink-0" />
+                                                    <span className="text-gray-300">Suspicious gaze direction</span>
+                                                </div>
+                                            )}
+                                            {currentViolation.headPose !== 'normal' && (
+                                                <div className="flex items-start gap-2 text-sm">
+                                                    <Activity className="h-4 w-4 text-orange-400 mt-0.5 flex-shrink-0" />
+                                                    <span className="text-gray-300">Abnormal head pose</span>
+                                                </div>
+                                            )}
+                                        </div>
+                                        {currentViolation.violationTime && (
+                                            <p className="text-xs text-gray-500 mt-3">{currentViolation.violationTime}</p>
+                                        )}
+                                    </div>
+
+                                    {/* Action Buttons - 3 Large Buttons */}
+                                    <div className="grid grid-cols-3 gap-2">
+                                        <button
+                                            onClick={() => {
+                                                alert(`Flagged ${currentViolation.name} for review`);
+                                            }}
+                                            className="bg-yellow-500 hover:bg-yellow-600 text-black font-bold py-4 rounded-xl transition-all duration-200 hover:scale-105 flex flex-col items-center justify-center gap-1 shadow-lg"
+                                        >
+                                            <AlertTriangle className="h-5 w-5" />
+                                            <span className="text-xs">Flag</span>
+                                        </button>
+
+                                        <button
+                                            onClick={() => {
+                                                if (confirm(`Dismiss ${currentViolation.name}'s session?`)) {
+                                                    alert(`Dismissed ${currentViolation.name}`);
+                                                }
+                                            }}
+                                            className="bg-red-600 hover:bg-red-700 text-white font-bold py-4 rounded-xl transition-all duration-200 hover:scale-105 flex flex-col items-center justify-center gap-1 shadow-lg"
+                                        >
+                                            <XCircle className="h-5 w-5" />
+                                            <span className="text-xs">Dismiss</span>
+                                        </button>
+
+                                        <button
+                                            onClick={() => {
+                                                alert(`Approved ${currentViolation.name} to continue`);
+                                            }}
+                                            className="bg-green-600 hover:bg-green-700 text-white font-bold py-4 rounded-xl transition-all duration-200 hover:scale-105 flex flex-col items-center justify-center gap-1 shadow-lg"
+                                        >
+                                            <CheckCircle className="h-5 w-5" />
+                                            <span className="text-xs">Approve</span>
+                                        </button>
                                     </div>
 
                                     {/* Navigation */}
-                                    <div className="flex items-center justify-between">
+                                    <div className="flex items-center justify-between bg-white/5 rounded-lg p-2">
                                         <Button variant="ghost" size="sm" onClick={handlePrevious}>
                                             <ChevronLeft className="h-4 w-4" />
                                         </Button>
-                                        <span className="text-sm text-gray-400">
+                                        <span className="text-sm font-semibold text-gray-300">
                                             {currentViolationIndex + 1} / {violationReviews.length}
                                         </span>
                                         <Button variant="ghost" size="sm" onClick={handleNext}>
@@ -548,92 +643,6 @@ export default function LiveMonitoringDashboard({
                                 </motion.div>
                             </AnimatePresence>
                         )}
-                    </div>
-                </div>
-            </div>
-
-            {/* Bottom Summary */}
-            <div className="p-6 pt-0">
-                <div className="grid grid-cols-3 gap-6">
-                    {/* Session Statistics */}
-                    <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-6">
-                        <div className="flex items-center gap-2 mb-4">
-                            <TrendingUp className="h-5 w-5 text-cyan-400" />
-                            <h3 className="text-lg font-bold text-white">Session Statistics</h3>
-                        </div>
-
-                        <div className="space-y-4">
-                            <div>
-                                <div className="flex justify-between text-sm mb-2">
-                                    <span className="text-gray-400">Students Monitored</span>
-                                    <span className="text-white font-semibold">{students.length}/{students.length}</span>
-                                </div>
-                                <Progress value={100} />
-                            </div>
-
-                            <div>
-                                <div className="flex justify-between text-sm mb-2">
-                                    <span className="text-gray-400">Compliance Rate</span>
-                                    <span className="text-white font-semibold">{complianceRate}%</span>
-                                </div>
-                                <Progress value={complianceRate} />
-                            </div>
-                        </div>
-                    </div>
-
-                    {/* Violation Breakdown */}
-                    <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-6">
-                        <div className="flex items-center gap-2 mb-4">
-                            <AlertTriangle className="h-5 w-5 text-orange-400" />
-                            <h3 className="text-lg font-bold text-white">Violation Breakdown</h3>
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-3">
-                            <div className="bg-green-500/10 border border-green-500/20 rounded-lg p-3">
-                                <p className="text-2xl font-bold text-green-400">{statusCounts.normal}</p>
-                                <p className="text-xs text-gray-400">Normal</p>
-                            </div>
-
-                            <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-3">
-                                <p className="text-2xl font-bold text-yellow-400">{statusCounts.warning}</p>
-                                <p className="text-xs text-gray-400">Warnings</p>
-                            </div>
-
-                            <div className="bg-orange-500/10 border border-orange-500/20 rounded-lg p-3">
-                                <p className="text-2xl font-bold text-orange-400">{statusCounts.suspicious}</p>
-                                <p className="text-xs text-gray-400">Suspicious</p>
-                            </div>
-
-                            <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-3">
-                                <p className="text-2xl font-bold text-red-400">{statusCounts.critical}</p>
-                                <p className="text-xs text-gray-400">Critical</p>
-                            </div>
-                        </div>
-                    </div>
-
-                    {/* Quick Actions */}
-                    <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-6">
-                        <div className="flex items-center gap-2 mb-4">
-                            <Settings className="h-5 w-5 text-indigo-400" />
-                            <h3 className="text-lg font-bold text-white">Quick Actions</h3>
-                        </div>
-
-                        <div className="space-y-3">
-                            <Button className="w-full bg-gradient-to-r from-indigo-600 to-violet-600">
-                                <Plus className="h-4 w-4" />
-                                Create New Exam
-                            </Button>
-
-                            <Button variant="outline" className="w-full">
-                                <Bell className="h-4 w-4" />
-                                Send Announcement
-                            </Button>
-
-                            <Button variant="outline" className="w-full">
-                                <Download className="h-4 w-4" />
-                                Export Report
-                            </Button>
-                        </div>
                     </div>
                 </div>
             </div>
