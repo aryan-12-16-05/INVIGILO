@@ -180,9 +180,13 @@ export default function LiveMonitoringDashboard({
         };
     }, [examId]);
 
-    // Get violations for review panel
+    // Get violations for review panel - only critical and suspicious cases
     const violationReviews = students
-        .filter(s => s.violations > 0)
+        .filter(s => {
+            // Only show in review panel if status is critical or suspicious (high-risk violations)
+            // This filters out minor warnings and keeps the review panel focused on serious issues
+            return (s.status === 'critical' || s.status === 'suspicious') && s.violations > 0;
+        })
         .sort((a, b) => {
             const severityOrder = { critical: 4, suspicious: 3, warning: 2, normal: 1 };
             return severityOrder[b.status] - severityOrder[a.status];
@@ -623,7 +627,7 @@ export default function LiveMonitoringDashboard({
 
                                     {/* Specific Triggers */}
                                     <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4">
-                                        <p className="text-xs font-semibold text-red-300 mb-3 uppercase">Detected Violations</p>
+                                        <p className="text-xs font-semibold text-red-300 mb-3 uppercase">Critical Violations Detected</p>
                                         <div className="space-y-2">
                                             {currentViolation.latestViolation && (
                                                 <div className="flex items-start gap-2 text-sm">
@@ -653,6 +657,30 @@ export default function LiveMonitoringDashboard({
                                         {currentViolation.violationTime && (
                                             <p className="text-xs text-gray-500 mt-3">{currentViolation.violationTime}</p>
                                         )}
+                                    </div>
+
+                                    {/* Review Navigation - Prominent */}
+                                    <div className="flex items-center justify-between bg-gradient-to-r from-slate-800 to-slate-700 rounded-xl p-3 border border-white/20">
+                                        <button
+                                            onClick={handlePrevious}
+                                            className="p-2 hover:bg-white/10 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                            disabled={violationReviews.length <= 1}
+                                        >
+                                            <ChevronLeft className="h-6 w-6 text-white" />
+                                        </button>
+                                        <div className="text-center">
+                                            <p className="text-sm font-bold text-white">
+                                                Review {currentViolationIndex + 1} of {violationReviews.length}
+                                            </p>
+                                            <p className="text-xs text-gray-400">Navigate between flagged students</p>
+                                        </div>
+                                        <button
+                                            onClick={handleNext}
+                                            className="p-2 hover:bg-white/10 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                            disabled={violationReviews.length <= 1}
+                                        >
+                                            <ChevronRight className="h-6 w-6 text-white" />
+                                        </button>
                                     </div>
 
                                     {/* Action Buttons - 3 Large Buttons */}
@@ -688,19 +716,6 @@ export default function LiveMonitoringDashboard({
                                             <CheckCircle className="h-5 w-5" />
                                             <span className="text-xs">Approve</span>
                                         </button>
-                                    </div>
-
-                                    {/* Navigation */}
-                                    <div className="flex items-center justify-between bg-white/5 rounded-lg p-2">
-                                        <Button variant="ghost" size="sm" onClick={handlePrevious}>
-                                            <ChevronLeft className="h-4 w-4" />
-                                        </Button>
-                                        <span className="text-sm font-semibold text-gray-300">
-                                            {currentViolationIndex + 1} / {violationReviews.length}
-                                        </span>
-                                        <Button variant="ghost" size="sm" onClick={handleNext}>
-                                            <ChevronRight className="h-4 w-4" />
-                                        </Button>
                                     </div>
                                 </motion.div>
                             </AnimatePresence>
