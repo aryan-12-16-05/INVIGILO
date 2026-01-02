@@ -11,7 +11,8 @@ export type SidebarAction =
   | 'help'
   | 'overview'
   | 'create-exam'
-  | 'live-proctoring';
+  | 'live-proctoring'
+  | 'lecturer-live-exams';
 
 export default function Sidebar({ user, onAction, onLogout }: { user: any; onAction: (action: SidebarAction) => void; onLogout?: () => void }) {
   // Live alerts for lecturers
@@ -61,7 +62,7 @@ export default function Sidebar({ user, onAction, onLogout }: { user: any; onAct
   const lecturerItems = [
     { icon: <Monitor className="h-5 w-5" />, label: 'Overview', action: 'overview' as SidebarAction },
     { icon: <PlusCircle className="h-5 w-5" />, label: 'Create Exam', action: 'create-exam' as SidebarAction },
-    { icon: <Users className="h-5 w-5" />, label: 'Live Proctoring', action: 'live-proctoring' as SidebarAction },
+    { icon: <Users className="h-5 w-5" />, label: 'Live Proctoring', action: 'lecturer-live-exams' as SidebarAction },
     { icon: <User className="h-5 w-5" />, label: 'Profile', action: 'profile' as SidebarAction },
     { icon: <HelpCircle className="h-5 w-5" />, label: 'Help', action: 'help' as SidebarAction },
   ];

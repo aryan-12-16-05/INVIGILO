@@ -2597,6 +2597,7 @@ const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showTo
         if (a === 'overview' || a === 'dashboard') { /* default overview; no-op */ return; }
         if (a === 'create-exam') { setCreateExamOpen(true); return; }
         if (a === 'live-proctoring') { navigateTo('live-proctoring'); return; }
+        if (a === 'lecturer-live-exams') { navigateTo('lecturer-live-exams'); return; }
         if (a === 'help') { navigateTo('help'); return; }
         if (a === 'profile') { navigateTo('profile'); return; }
     }}>
