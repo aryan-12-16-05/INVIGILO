@@ -851,15 +851,17 @@ def verify_face():
         # 1) Generate embedding from current image
         ok_verify, verify_result = call_ml_service('/verify-face', {
             'imageDataUrl': normalized_image_data_url
-        }, timeout=15)
+        }, timeout=8)  # Reduced from 15 to 8 seconds for faster response
 
         if not ok_verify:
             detail = (verify_result or {}).get('error') if isinstance(verify_result, dict) else str(verify_result)
             print(f'[FACE-VERIFY] ERROR: ML verify-face failed: {detail}')
+            # Return faster error response instead of hanging
             return jsonify({
-                "error": "Failed to process face image",
-                "detail": detail
-            }), 400
+                "error": "Face verification timeout or failed",
+                "detail": detail,
+                "verified": False
+            }), 401
 
         if not isinstance(verify_result, dict) or 'embedding' not in verify_result:
             print(f'[FACE-VERIFY] ERROR: ML verify-face returned unexpected payload: {verify_result}')

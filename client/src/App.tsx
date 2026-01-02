@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, type FormEvent, type ChangeEvent, useRef, useCallback } from 'react';
+import React, { useState, useEffect, type FormEvent, type ChangeEvent, useRef, useCallback } from 'react';
 import Sidebar from './sidebar';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -685,7 +685,7 @@ const AuthPage = ({
         const [signupPassword, setSignupPassword] = useState("");
         const [signupConfirmPassword, setSignupConfirmPassword] = useState("");
   const videoRef = useRef<HTMLVideoElement>(null);
-  const streamRef = useRef<MediaStream | null>(null); // âœ… Persist webcam stream
+  const streamRef = useRef<MediaStream | null>(null); // ✅ Persist webcam stream
   const [captureMessage, setCaptureMessage] = useState<string>("");
   const [institution, setInstitution] = useState("");
   const [department, setDepartment] = useState("");
@@ -957,7 +957,7 @@ const getVideoStatus = () => {
                     }
                 }
 
-      // âœ… Countdown before capture
+      // ✅ Countdown before capture
       for (let i = 3; i > 0; i--) {
         setCaptureMessage(i.toString());
         await new Promise((res) => setTimeout(res, 1000));
@@ -1088,19 +1088,26 @@ const getVideoStatus = () => {
 
         try {
             console.log('[FACE] Sending verification request to:', `${API_URL}/verify-face`);
+            
+            // Add timeout for face verification to prevent hanging
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+            
             const faceRes = await fetch(`${API_URL}/verify-face`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ identifier: currentIdentifier, role: initialRole, imageDataUrl }),
+                signal: controller.signal
             });
+            
+            clearTimeout(timeoutId);
             console.log('[FACE] Verification response status:', faceRes.status);
             const faceData = await faceRes.json();
             console.log('[FACE] Verification response data:', faceData);
             if (!faceRes.ok) {
                 const sim = faceData?.similarity ? ` (similarity: ${Number(faceData.similarity).toFixed(3)})` : '';
                 showToast(faceData.error || faceData.message || `Face verification failed${sim}`, 'error');
-                // Do NOT auto-retry â€” user must click Verify again
-                setIsLoading(false);
+                                setIsLoading(false);
                 setCaptureMessage('');
                 return;
             }
@@ -1123,7 +1130,11 @@ const getVideoStatus = () => {
             showToast(`Welcome back, ${loginData.user.name}!`, "success");
             onAuthSuccess(loginData.user);
         } catch (error: any) {
-            showToast(error.message, "error");
+            if (error.name === 'AbortError') {
+                showToast("Face verification timeout. Please try again.", "error");
+            } else {
+                showToast(error.message || "Verification failed", "error");
+            }
         } finally {
             setIsLoading(false);
             setCaptureMessage("");
@@ -1455,7 +1466,7 @@ const getVideoStatus = () => {
                                                 {isPasswordValid(signupPassword) ? (
                                                     <span className="text-green-300">Password looks good.</span>
                                                 ) : (
-                                                    <span className="text-slate-400">Keep goingâ€”you're almost there.</span>
+                                                    <span className="text-slate-400">Keep going—you're almost there.</span>
                                                 )}
                                             </div>
                                         )}
@@ -1537,7 +1548,7 @@ const getVideoStatus = () => {
                                                             const newStream = await navigator.mediaDevices.getUserMedia({ video: true });
                                                             v.srcObject = newStream;
                                                         } catch {}
-                                                        // No long waitsâ€”attempt quick ready check then capture
+                                                        // No long waits—attempt quick ready check then capture
                                                         try { await waitForVideoReady(v, 1500); } catch {}
                                                         dataUrl = captureFrame();
                                                     }
@@ -1936,7 +1947,7 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, navigat
                                                     Score: <span className="text-white font-medium">{score}%</span>
                                                     {totalQuestions ? (
                                                         <>
-                                                            {' '}â€¢{' '}
+                                                            {' '}•{' '}
                                                             {correctCount}/{totalQuestions} correct
                                                         </>
                                                     ) : null}
@@ -2044,7 +2055,7 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, navigat
                                                                     <span className="text-slate-200">{String.fromCharCode(65 + optIdx)}. {opt}</span>
                                                                     <div className="flex gap-2">
                                                                         {userAns === optIdx && <span className="text-xs text-blue-400 font-medium">Your Answer</span>}
-                                                                        {correctAns === optIdx && <span className="text-xs text-green-400 font-medium">âœ“ Correct</span>}
+                                                                        {correctAns === optIdx && <span className="text-xs text-green-400 font-medium">✓ Correct</span>}
                                                                     </div>
                                                                 </div>
                                                             </div>
@@ -2063,7 +2074,7 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, navigat
                                             )}
                                             <div className="flex items-center justify-between pt-3 border-t border-slate-700">
                                                 <span className="text-sm text-slate-400">Marks: <span className={q.correct ? 'text-green-400' : 'text-red-400'}>{q.correct ? q.marks : 0}</span> / {q.marks}</span>
-                                                <span className={cn('text-sm font-semibold', q.correct ? 'text-green-400' : 'text-red-400')}>{q.correct ? 'âœ“ Correct' : 'âœ— Incorrect'}</span>
+                                                <span className={cn('text-sm font-semibold', q.correct ? 'text-green-400' : 'text-red-400')}>{q.correct ? '✓ Correct' : '✗ Incorrect'}</span>
                                             </div>
                                         </motion.div>
                                     )}
@@ -2508,7 +2519,7 @@ const StudentDashboard = ({ user, exams, onLogout, onStartExam, onBack, showToas
                                 <div className="text-sm text-white font-medium">{idx + 1}. {pq.question}</div>
                                 <div className="text-xs text-slate-300">Your answer: {String(pq.given)}</div>
                                 <div className="text-xs text-slate-300">Correct answer: {String(pq.expected)}</div>
-                                <div className="text-xs text-slate-300">Marks: {pq.marks} â€” {pq.correct ? 'Correct' : 'Incorrect'}</div>
+                                <div className="text-xs text-slate-300">Marks: {pq.marks} — {pq.correct ? 'Correct' : 'Incorrect'}</div>
                             </div>
                         ))}
                     </div>
@@ -2850,7 +2861,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                 await uploadEvidence(frame, { evidenceType: 'screenshot', violationType: 'screen_snapshot' });
             }
 
-            // Periodic snapshots (low frequency; keeps lecturer â€œscreenâ€ preview fresh)
+            // Periodic snapshots (low frequency; keeps lecturer “screen” preview fresh)
             if (screenCaptureTimerRef.current) window.clearInterval(screenCaptureTimerRef.current);
             screenCaptureTimerRef.current = window.setInterval(async () => {
                 if (proctorDecision.status !== 'active') return;
@@ -3908,7 +3919,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                             {/* Using a simple heuristic: if we recently backed off uploads, show badge */}
                             {/* Note: this badge updates on next render cycles driven by other state; lightweight UX hint only */}
                             {/* In a more advanced setup, lift degraded state into React state for deterministic updates */}
-                            <span className="text-xs px-2 py-1 rounded bg-yellow-500/20 text-yellow-300 border border-yellow-600/30">Network adaptingâ€¦</span>
+                            <span className="text-xs px-2 py-1 rounded bg-yellow-500/20 text-yellow-300 border border-yellow-600/30">Network adapting…</span>
                         </div>
                         <div className="flex items-center space-x-2">
                             <Timer className="h-5 w-5 text-slate-400"/>
@@ -3931,8 +3942,8 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                                             {proctorDecision.reason || pauseReasonRef.current || 'Paused by invigilator. Please wait for a decision.'}
                                         </p>
                                         <div className="mt-4 rounded-lg border border-slate-700 bg-slate-800/70 p-3">
-                                            <p className="text-xs text-slate-300">Your answers are safe. Donâ€™t refresh the page.</p>
-                                            <p className="text-xs text-slate-400 mt-1">Weâ€™ll automatically resume when the invigilator allows you to continue.</p>
+                                            <p className="text-xs text-slate-300">Your answers are safe. Don’t refresh the page.</p>
+                                            <p className="text-xs text-slate-400 mt-1">We’ll automatically resume when the invigilator allows you to continue.</p>
                                         </div>
                                     </div>
                                 </div>
@@ -3992,7 +4003,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                                     </Button>
                                 </div>
                                 <p className="text-xs text-slate-500 mt-4">
-                                    Note: Browsers canâ€™t fully block OS-level shortcuts. These controls are best-effort and all suspicious activity is logged.
+                                    Note: Browsers can’t fully block OS-level shortcuts. These controls are best-effort and all suspicious activity is logged.
                                 </p>
                             </div>
                         </div>
@@ -4027,7 +4038,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                                     )}
                                 </div>
                                 <div className="mt-2 text-[10px] text-slate-500">
-                                    Tip: choose â€œEntire Screenâ€ for best evidence quality.
+                                    Tip: choose “Entire Screen” for best evidence quality.
                                 </div>
                             </div>
                         </div>
@@ -4042,10 +4053,10 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                                 {proctorStats.backoff && <span className="text-yellow-300">Backoff</span>}
                             </div>
                             <div className="mt-1 text-slate-300">
-                                Frames: {proctorStats.framesSent} Â· Errors: {proctorStats.uploadErrors}
+                                Frames: {proctorStats.framesSent} · Errors: {proctorStats.uploadErrors}
                             </div>
                             <div className="mt-0.5 text-slate-400">
-                                Last upload: {proctorStats.lastUploadMs}ms Â· Q: {Math.round(encodeQualityRef.current * 100)} Â· W: {encodeWidthRef.current}px
+                                Last upload: {proctorStats.lastUploadMs}ms · Q: {Math.round(encodeQualityRef.current * 100)} · W: {encodeWidthRef.current}px
                             </div>
                         </div>
                     )}
@@ -4087,7 +4098,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                     </div>
                     {Object.keys(answers).length < exam.questions.length && submitStatus !== 'sending' && (
                         <div className="bg-yellow-500/20 text-yellow-300 p-3 rounded-lg mb-4 text-sm">
-                            âš ï¸ You have unanswered questions. They will be marked as incorrect.
+                            ⚠️ You have unanswered questions. They will be marked as incorrect.
                         </div>
                     )}
 
@@ -4175,7 +4186,7 @@ const ResultScreen = ({ result, onDone }: { result: ExamResult, onDone: () => vo
                             <div className="flex items-start justify-between gap-4">
                                 <div>
                                     <div className="text-slate-200 text-xl font-bold">Your result</div>
-                                    <div className="text-slate-400 text-sm mt-1">Youâ€™ve completed the exam successfully.</div>
+                                    <div className="text-slate-400 text-sm mt-1">You’ve completed the exam successfully.</div>
                                 </div>
                                 <div className={cn('px-3 py-1 rounded-full text-xs font-semibold border',
                                     scoreTone === 'emerald'
@@ -4973,7 +4984,7 @@ const LiveProctoring = ({ user, onBack }: { user: UserProfile; onBack: () => voi
                                 <div className="flex items-center justify-between">
                                     <div>
                                         <h3 className="text-lg font-semibold text-white">Monitoring: {selectedExam.title}</h3>
-                                        <p className="text-sm text-slate-400">Live proctoring grid - 5 columns Ã— 3 rows</p>
+                                        <p className="text-sm text-slate-400">Live proctoring grid - 5 columns × 3 rows</p>
                                     </div>
                                     <Button variant="outline" onClick={() => { setSelectedExam(null); setExamId(''); }}>Back to Exams</Button>
                                 </div>
@@ -4991,7 +5002,7 @@ const LiveProctoring = ({ user, onBack }: { user: UserProfile; onBack: () => voi
                                     <div className="text-sm text-slate-200 font-semibold">
                                         {(activeAlert.eventType || 'violation').replace(/_/g, ' ')}
                                     </div>
-                                    <div className="mt-1 text-xs text-slate-300">Student: {activeAlert.userId} â€¢ Exam: {activeAlert.examId}</div>
+                                    <div className="mt-1 text-xs text-slate-300">Student: {activeAlert.userId} • Exam: {activeAlert.examId}</div>
                                     <div className="mt-2 text-sm text-slate-200">{activeAlert?.details?.message || activeAlert?.message || 'High severity event detected.'}</div>
                                 </div>
 
@@ -5054,7 +5065,7 @@ const LiveProctoring = ({ user, onBack }: { user: UserProfile; onBack: () => voi
                         <div className="flex items-center justify-between mb-4">
                             <div>
                                 <h3 className="text-xl font-semibold text-white">Live proctoring grid</h3>
-                                <p className="text-sm text-slate-400">Showing {pageSize} students per page (5 columns Ã— 3 rows).</p>
+                                <p className="text-sm text-slate-400">Showing {pageSize} students per page (5 columns × 3 rows).</p>
                             </div>
                             <div className="flex items-center gap-2">
                                 <Button variant="outline" onClick={() => setPage(p => Math.max(0, p - 1))}>Prev</Button>
@@ -5105,7 +5116,7 @@ const LiveProctoring = ({ user, onBack }: { user: UserProfile; onBack: () => voi
                                             <div className={cn('rounded-lg border p-2', getSeverityColor(sev))}>
                                                 <div className="text-xs font-semibold text-white truncate">{(ev?.eventType || 'No events').replace(/_/g, ' ')}</div>
                                                 <div className="mt-1 text-[11px] text-slate-300 line-clamp-2">
-                                                    {ev?.details?.message || ev?.message || 'â€”'}
+                                                    {ev?.details?.message || ev?.message || '—'}
                                                 </div>
                                             </div>
 
