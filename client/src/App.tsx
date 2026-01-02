@@ -690,7 +690,6 @@ const AuthPage = ({
   const [institution, setInstitution] = useState("");
   const [department, setDepartment] = useState("");
   const formDataRef = useRef<any>({});
-    const [enrollSamples, setEnrollSamples] = useState<string[]>([]);
 
     // --- Basic field validation (client-side UX only; server must still validate) ---
     const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/i;
@@ -969,24 +968,16 @@ const getVideoStatus = () => {
         throw new Error("Could not capture image. Please ensure your camera is ready.");
       }
 
-            // Allow multi-sample: include existing samples + this capture (unique by string)
-            const samples = Array.from(new Set([...enrollSamples, imageDataUrl]));
-            const finalData: any = { ...formDataRef.current, role: initialRole };
+            const finalData: any = { ...formDataRef.current, role: initialRole, imageDataUrl };
             // Never send confirmPassword to backend
             delete finalData.confirmPassword;
-            if (samples.length > 1) finalData.imageDataUrls = samples;
-            else finalData.imageDataUrl = imageDataUrl;
 
             // Client-side validation to avoid server 400s and improve debugging
             const requiredFields = ['fullName', 'email', 'phoneNumber', 'roleId', 'password', 'role', 'institution', 'department'];
             const missing = requiredFields.filter(f => !finalData[f] || finalData[f] === "");
-            // Validate that at least one image field exists
-            const hasImage = !!finalData.imageDataUrl || (Array.isArray(finalData.imageDataUrls) && finalData.imageDataUrls.length > 0);
-            console.log('Register payload keys:', Object.keys(finalData));
-            console.log('imageDataUrl length:', imageDataUrl ? imageDataUrl.length : 0);
-            if (missing.length > 0 || !hasImage) {
+            if (missing.length > 0 || !finalData.imageDataUrl) {
                 console.error('Missing registration fields:', missing);
-                const imgMsg = hasImage ? '' : (missing.length > 0 ? '; image missing' : 'Image missing');
+                const imgMsg = finalData.imageDataUrl ? '' : (missing.length > 0 ? '; image missing' : 'Image missing');
                 showToast(`Missing required fields: ${missing.join(', ')}${imgMsg}`,'error');
                 setIsLoading(false);
                 setCaptureMessage('');
@@ -1536,37 +1527,6 @@ const getVideoStatus = () => {
                                         )}
                                     </div>
                                     <div className="space-y-2">
-                                        <div className="flex items-center justify-between">
-                                            <span className="text-xs text-slate-400">Samples captured: {enrollSamples.length} / 5</span>
-                                            <Button type="button" variant="secondary" onClick={async () => {
-                                                const v = videoRef.current; if (!v) { showToast('Camera not ready', 'error'); return; }
-                                                try {
-                                                    // Try instant capture; if it fails, reacquire stream once and retry immediately.
-                                                    let dataUrl = captureFrame();
-                                                    if (!dataUrl) {
-                                                        try {
-                                                            const newStream = await navigator.mediaDevices.getUserMedia({ video: true });
-                                                            v.srcObject = newStream;
-                                                        } catch {}
-                                                        // No long waits—attempt quick ready check then capture
-                                                        try { await waitForVideoReady(v, 1500); } catch {}
-                                                        dataUrl = captureFrame();
-                                                    }
-                                                    if (!dataUrl) throw new Error('Capture failed');
-                                                    setEnrollSamples(s => Array.from(new Set([...(s||[]), dataUrl])).slice(0,5));
-                                                    showToast('Sample added', 'success');
-                                                } catch (err:any) {
-                                                    showToast(err.message || 'Failed to add sample', 'error');
-                                                }
-                                            }}>Add another sample</Button>
-                                        </div>
-                                        {enrollSamples.length > 0 && (
-                                            <div className="grid grid-cols-5 gap-2">
-                                                {enrollSamples.map((s, i) => (
-                                                    <img key={i} src={s} className="w-full h-16 object-cover rounded border border-slate-700" />
-                                                ))}
-                                            </div>
-                                        )}
                                         <Button onClick={handleFullSignUp} className="w-full" isLoading={isLoading}>
                                             Complete Signup
                                         </Button>

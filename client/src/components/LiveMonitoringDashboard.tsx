@@ -59,6 +59,55 @@ const Progress = ({ value, className = '' }: { value: number; className?: string
     </div>
 );
 
+// Violation Clip Player - loops through saved frames when violations detected
+const ViolationClipPlayer = ({ userId, clips, liveFrame }: { userId: string; clips: string[]; liveFrame?: string }) => {
+    const [currentFrame, setCurrentFrame] = useState(0);
+
+    useEffect(() => {
+        if (!clips || clips.length === 0) return;
+        
+        // Loop through clips at ~10 FPS
+        const interval = setInterval(() => {
+            setCurrentFrame(prev => (prev + 1) % clips.length);
+        }, 100);
+
+        return () => clearInterval(interval);
+    }, [clips]);
+
+    // If we have violation clips, loop them; otherwise show live frame
+    if (clips && clips.length > 0) {
+        return (
+            <div className="absolute inset-0 w-full h-full">
+                <img
+                    src={clips[currentFrame]}
+                    alt="Violation clip"
+                    className="w-full h-full object-cover"
+                />
+                <div className="absolute bottom-3 left-3 bg-black/80 backdrop-blur-sm px-3 py-1 rounded-md z-10 text-xs text-red-400 font-bold">
+                    REPLAYING VIOLATION
+                </div>
+            </div>
+        );
+    }
+
+    // Fallback to live frame or placeholder
+    if (liveFrame) {
+        return (
+            <img
+                src={liveFrame}
+                alt="Live student"
+                className="absolute inset-0 w-full h-full object-cover"
+            />
+        );
+    }
+
+    return (
+        <div className="absolute inset-0 bg-gradient-to-br from-slate-800 to-slate-900 flex items-center justify-center">
+            <Camera className="h-12 w-12 text-slate-600" />
+        </div>
+    );
+};
+
 export default function LiveMonitoringDashboard({
     examId,
     examTitle,
@@ -74,11 +123,13 @@ export default function LiveMonitoringDashboard({
     const [currentViolationIndex, setCurrentViolationIndex] = useState(0);
     const [selectedStudent, setSelectedStudent] = useState<LiveStudent | null>(null);
     const socketRef = useRef<Socket | null>(null);    const videoFramesRef = useRef<Record<string, string>>({});
-    const screenFramesRef = useRef<Record<string, string>>({});    const [stats, setStats] = useState({
+    const screenFramesRef = useRef<Record<string, string>>({});
+    const violationClipsRef = useRef<Record<string, string[]>>({});    const [stats, setStats] = useState({
         activeExams: 1,
         studentsOnline: 0,
         activeViolations: 0
     });
+    const [, forceUpdate] = useState(0);
 
     const studentsPerPage = 15;
     const totalPages = Math.ceil(students.length / studentsPerPage);
@@ -111,18 +162,15 @@ export default function LiveMonitoringDashboard({
         // Listen for video frames from students
         newSocket.on('video-frame', (data: { userId: string; frame: string; timestamp: number }) => {
             videoFramesRef.current[data.userId] = data.frame;
-            // Force re-render every 5 frames to update UI
-            if (Math.random() < 0.2) {
-                setStudents(prev => [...prev]);
-            }
+            // Force UI update for real-time display
+            forceUpdate(prev => prev + 1);
         });
 
         // Listen for screen frames from students
         newSocket.on('screen-frame', (data: { userId: string; frame: string; timestamp: number }) => {
             screenFramesRef.current[data.userId] = data.frame;
-            if (Math.random() < 0.2) {
-                setStudents(prev => [...prev]);
-            }
+            // Force UI update for real-time display
+            forceUpdate(prev => prev + 1);
         });
 
         socketRef.current = newSocket;
@@ -153,7 +201,27 @@ export default function LiveMonitoringDashboard({
                 if (res.ok) {
                     const data = await res.json();
                     if (data.students) {
+                        const prevStudents = students;
                         setStudents(data.students);
+                        
+                        // Capture violation clips when violations increase
+                        data.students.forEach((student: LiveStudent) => {
+                            const prevStudent = prevStudents.find(s => s.userId === student.userId);
+                            if (student.violations > 0 && (!prevStudent || student.violations > prevStudent.violations)) {
+                                // New violation detected - capture current frame as clip
+                                if (videoFramesRef.current[student.userId]) {
+                                    if (!violationClipsRef.current[student.userId]) {
+                                        violationClipsRef.current[student.userId] = [];
+                                    }
+                                    // Store the frame (limit to last 30 frames for looping)
+                                    violationClipsRef.current[student.userId] = [
+                                        ...violationClipsRef.current[student.userId].slice(-29),
+                                        videoFramesRef.current[student.userId]
+                                    ];
+                                }
+                            }
+                        });
+                        
                         setStats(data.stats || {
                             activeExams: 1,
                             studentsOnline: data.students.length,
@@ -169,7 +237,7 @@ export default function LiveMonitoringDashboard({
         fetchData();
         const interval = setInterval(fetchData, 3000);
         return () => clearInterval(interval);
-    }, [examId, isMonitoring]);
+    }, [examId, isMonitoring, students]);
 
     const formatTime = (seconds: number) => {
         const h = Math.floor(seconds / 3600);
@@ -510,18 +578,12 @@ export default function LiveMonitoringDashboard({
                                                 {currentViolation.violations} VIOLATIONS
                                             </div>
 
-                                            {/* Video Stream */}
-                                            {videoFramesRef.current[currentViolation.userId] ? (
-                                                <img
-                                                    src={videoFramesRef.current[currentViolation.userId]}
-                                                    alt="Review student"
-                                                    className="absolute inset-0 w-full h-full object-cover"
-                                                />
-                                            ) : (
-                                                <div className="absolute inset-0 bg-gradient-to-br from-slate-800 to-slate-900 flex items-center justify-center">
-                                                    <Camera className="h-12 w-12 text-slate-600" />
-                                                </div>
-                                            )}
+                                            {/* Looping Violation Clip */}
+                                            <ViolationClipPlayer 
+                                                userId={currentViolation.userId}
+                                                clips={violationClipsRef.current[currentViolation.userId] || []}
+                                                liveFrame={videoFramesRef.current[currentViolation.userId]}
+                                            />
                                         </div>
                                     </div>
 
