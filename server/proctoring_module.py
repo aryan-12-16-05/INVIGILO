@@ -18,14 +18,18 @@ BLINK_THRESHOLD = 3.6
 
 # === GAZE DETECTION THRESHOLDS ===
 # Ratio of white pixels on one side vs other side of eye
-# Higher value = more extreme eye movement required
+# Higher value = more extreme eye movement required (stricter)
+# Lower value = detects even small eye movements (more sensitive)
 # Typical range: 1.0 - 1.5
-GAZE_RATIO_THRESHOLD = 1.2
+# Setting to 1.3 for fair and strong detection
+GAZE_RATIO_THRESHOLD = 1.3
 
 # Threshold value for binary eye segmentation
 # Lower value = more sensitive to darker pixels (pupil/iris)
+# Higher value = requires stronger contrast
 # Typical range: 40 - 70
-GAZE_THRESHOLD_VALUE = 50
+# Setting to 45 for better pupil detection in various lighting
+GAZE_THRESHOLD_VALUE = 45
 
 # === MOUTH DETECTION THRESHOLDS ===
 # Distance in pixels between outer top and bottom lip
@@ -35,14 +39,19 @@ MOUTH_OPEN_THRESHOLD = 23
 
 # === HEAD POSE DETECTION THRESHOLDS ===
 # Angle in degrees for vertical head movement (up/down)
-# Higher value = more head tilt required
+# Higher value = more head tilt required (less strict)
+# Lower value = detects smaller head movements (more strict)
 # Typical range: 20 - 40 degrees
-HEAD_VERTICAL_ANGLE_THRESHOLD = 30
+# Setting to 25 for fair and strong detection
+HEAD_VERTICAL_ANGLE_THRESHOLD = 25
 
 # Horizontal offset in pixels for lateral head movement (left/right)
 # Distance nose must be from eye center line
+# Higher value = more head turn required (less strict)
+# Lower value = detects smaller head turns (more strict)
 # Typical range: 5 - 15 pixels (depends on camera distance)
-HEAD_HORIZONTAL_OFFSET_THRESHOLD = 10
+# Setting to 8 for fair and strong detection
+HEAD_HORIZONTAL_OFFSET_THRESHOLD = 8
 
 # === AUDIO DETECTION THRESHOLDS ===
 # Amplitude range for human voice detection

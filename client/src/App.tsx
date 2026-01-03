@@ -3418,8 +3418,12 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                                 setProctorPauseOpen(true);
                                 pauseReasonRef.current = data.reason || 'Lecturer has paused your exam';
                             } else if (status === 'terminated') {
-                                alert('Your exam has been stopped by the lecturer: ' + (data.reason || 'Violation detected'));
-                                handleSubmit();
+                                // Immediately stop everything and show removal message
+                                stopProctoring();
+                                disableBrowserLock();
+                                alert('You have been removed from the exam due to suspicious behavior. Your exam has been terminated.');
+                                // Force navigate back without submitting
+                                window.location.reload();
                             } else if (status === 'active') {
                                 setProctorPauseOpen(false);
                                 showToast('You may continue the exam', 'success');
@@ -4103,17 +4107,19 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                             </div>
                         </div>
                     )}
-                    <div className="max-w-4xl mx-auto">
-                        {exam.questions[currentQuestion] ? (
-                            <QuestionRenderer 
-                                question={exam.questions[currentQuestion]} 
-                                onAnswer={(answer) => handleAnswerChange(exam.questions[currentQuestion]._id, answer)}
-                                savedAnswer={answers[exam.questions[currentQuestion]._id]}
-                            />
-                        ) : (
-                            <h2 className="text-xl font-semibold mb-6 text-slate-100">No question to display.</h2>
-                        )}
-                    </div>
+                    {!proctorPauseOpen && (
+                        <div className="max-w-4xl mx-auto">
+                            {exam.questions[currentQuestion] ? (
+                                <QuestionRenderer 
+                                    question={exam.questions[currentQuestion]} 
+                                    onAnswer={(answer) => handleAnswerChange(exam.questions[currentQuestion]._id, answer)}
+                                    savedAnswer={answers[exam.questions[currentQuestion]._id]}
+                                />
+                            ) : (
+                                <h2 className="text-xl font-semibold mb-6 text-slate-100">No question to display.</h2>
+                            )}
+                        </div>
+                    )}
                 </div>
                 <footer className="p-4 border-t border-slate-800 flex justify-between">
                     <Button variant="outline" disabled={currentQuestion === 0} onClick={() => setCurrentQuestion(p => p - 1)}>Previous</Button>

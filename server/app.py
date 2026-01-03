@@ -1648,7 +1648,13 @@ def get_exam_monitoring_data(exam_id):
                 'user_id': user_id
             }))
             
-            violation_count = len([log for log in logs if log.get('violation_type')])
+            # Filter out browser lock violations (they're already handled by security warnings)
+            # Only count ML-detected violations for action review
+            violation_count = len([
+                log for log in logs 
+                if log.get('violation_type') and 
+                not log.get('violation_type', '').startswith('browser_lock')
+            ])
             total_violations += violation_count
             
             # Determine status based on violations and risk
@@ -4133,6 +4139,16 @@ def handle_pause_student(data):
             actor_id=None
         )
         
+        # Immediately notify the student via their personal room
+        student_room = f"{exam_id}:{user_id}"
+        socketio.emit('student_paused', {
+            'examId': exam_id,
+            'userId': user_id,
+            'status': 'paused',
+            'reason': 'Paused by lecturer',
+            'timestamp': datetime.datetime.utcnow().isoformat() + 'Z'
+        }, room=student_room, namespace='/proctor')
+        
         emit('status', {
             'message': f'Student {user_id} paused successfully',
             'examId': exam_id,
@@ -4163,9 +4179,19 @@ def handle_stop_student(data):
             exam_id=exam_id,
             user_id=user_id,
             status='terminated',
-            reason='Stopped by lecturer',
+            reason='Removed due to suspicious behavior',
             actor_id=None
         )
+        
+        # Immediately notify the student via their personal room
+        student_room = f"{exam_id}:{user_id}"
+        socketio.emit('student_paused', {
+            'examId': exam_id,
+            'userId': user_id,
+            'status': 'terminated',
+            'reason': 'Removed due to suspicious behavior',
+            'timestamp': datetime.datetime.utcnow().isoformat() + 'Z'
+        }, room=student_room, namespace='/proctor')
         
         emit('status', {
             'message': f'Student {user_id} stopped successfully',
@@ -4173,6 +4199,8 @@ def handle_stop_student(data):
             'userId': user_id,
             'status': 'terminated'
         })
+        
+        app.logger.info(f'[PROCTOR] Student {user_id} terminated and notified')
         
     except Exception as e:
         app.logger.error(f'[PROCTOR] Error stopping student: {e}')
@@ -4200,6 +4228,28 @@ def handle_allow_student(data):
             reason='Allowed by lecturer',
             actor_id=None
         )
+        
+        # Immediately notify the student via their personal room
+        student_room = f"{exam_id}:{user_id}"
+        socketio.emit('student_paused', {
+            'examId': exam_id,
+            'userId': user_id,
+            'status': 'active',
+            'reason': 'Allowed by lecturer',
+            'timestamp': datetime.datetime.utcnow().isoformat() + 'Z'
+        }, room=student_room, namespace='/proctor')
+        
+        emit('status', {
+            'message': f'Student {user_id} allowed to continue',
+            'examId': exam_id,
+            'userId': user_id,
+            'status': 'active'
+        })
+        
+    except Exception as e:
+        app.logger.error(f'[PROCTOR] Error allowing student: {e}')
+        emit('error', {'message': 'Failed to allow student'})
+        actor_id=None
         
         emit('status', {
             'message': f'Student {user_id} allowed to continue',
