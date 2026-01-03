@@ -1439,6 +1439,23 @@ def create_exam():
     result = exams_collection.insert_one(new_exam)
     new_exam['_id'] = str(result.inserted_id)
     new_exam = serialize_doc(new_exam)
+    
+    # Emit real-time notification to students in the same institution/department/year
+    try:
+        socketio.emit('exam-created', {
+            'examId': str(result.inserted_id),
+            'title': data['title'],
+            'institution': data['institution'],
+            'department': data['department'],
+            'targetYear': data['targetYear'],
+            'scheduledDate': data.get('scheduledDate'),
+            'startTime': data.get('startTime'),
+            'timestamp': datetime.datetime.utcnow().isoformat() + 'Z'
+        }, namespace='/proctor')
+        app.logger.info(f'[EXAM-CREATE] Broadcasted exam-created for exam {result.inserted_id}')
+    except Exception as e:
+        app.logger.error(f'[EXAM-CREATE] Failed to emit exam-created: {e}')
+    
     return jsonify({"message": "Exam created successfully", "exam": new_exam}), 201
 
 @app.route('/api/exams/<exam_id>/status', methods=['PUT'])
@@ -1617,81 +1634,111 @@ def get_exam_monitoring_data(exam_id):
         
         # Build student monitoring data
         students_data = []
+        total_violations = 0
+        
         for attempt in attempts:
             user_id = attempt.get('user_id')
             user = users_collection.find_one({'_id': ObjectId(user_id)}) if ObjectId.is_valid(user_id) else None
             if not user:
                 continue
             
-            # Get score and percentage
-            score = attempt.get('score', 0)
-            percentage = attempt.get('percentage', 0)
-            
-            # If percentage not stored, calculate it
-            if not percentage and attempt.get('total_marks'):
-                percentage = round((score / attempt.get('total_marks', 1)) * 100, 2)
-            
-            # Get proctoring logs for incident count
+            # Get proctoring logs for violation count
             logs = list(proctoring_logs_collection.find({
                 'exam_id': exam_id,
                 'user_id': user_id
             }))
             
-            incident_count = len([log for log in logs if log.get('violation_type')])
+            violation_count = len([log for log in logs if log.get('violation_type')])
+            total_violations += violation_count
             
-            # Count incident types
-            for log in logs:
-                violation_type = log.get('violation_type', '')
-                if 'identity' in violation_type.lower() or 'face_mismatch' in violation_type.lower():
-                    incident_breakdown['identityMismatch'] += 1
-                elif 'multiple' in violation_type.lower():
-                    incident_breakdown['multipleFaces'] += 1
-                elif 'phone' in violation_type.lower() or 'mobile' in violation_type.lower():
-                    incident_breakdown['phoneDetected'] += 1
-                elif 'tab' in violation_type.lower() or 'window' in violation_type.lower():
-                    incident_breakdown['tabSwitch'] += 1
-                elif 'gaze' in violation_type.lower() or 'eye' in violation_type.lower():
-                    incident_breakdown['gazeAway'] += 1
-                elif 'audio' in violation_type.lower() or 'voice' in violation_type.lower():
-                    incident_breakdown['audioViolation'] += 1
+            # Determine status based on violations and risk
+            risk_score = attempt.get('risk_score', 0)
+            status = 'normal'
+            if violation_count >= 5 or risk_score >= 80:
+                status = 'critical'
+            elif violation_count >= 3 or risk_score >= 60:
+                status = 'suspicious'
+            elif violation_count >= 1 or risk_score >= 40:
+                status = 'warning'
             
-            # Calculate duration
+            # Get latest violation
+            latest_violation = None
+            violation_time = None
+            if logs:
+                sorted_logs = sorted(logs, key=lambda x: x.get('timestamp', datetime.datetime.min), reverse=True)
+                if sorted_logs:
+                    latest_log = sorted_logs[0]
+                    latest_violation = latest_log.get('violation_type', 'Unknown violation')
+                    violation_time = latest_log.get('timestamp')
+                    if violation_time:
+                        if isinstance(violation_time, str):
+                            violation_time = violation_time
+                        else:
+                            violation_time = violation_time.isoformat() + 'Z'
+            
+            # Calculate time remaining
             start_time = attempt.get('start_time')
-            end_time = attempt.get('end_time')
-            duration = 0
-            if start_time and end_time:
+            duration = exam.get('duration', 60)  # default 60 minutes
+            time_remaining = duration * 60  # convert to seconds
+            
+            if start_time:
                 if isinstance(start_time, str):
                     start_time = datetime.datetime.fromisoformat(start_time.replace('Z', ''))
-                if isinstance(end_time, str):
-                    end_time = datetime.datetime.fromisoformat(end_time.replace('Z', ''))
-                duration = int((end_time - start_time).total_seconds() / 60)  # in minutes
+                elapsed = (datetime.datetime.utcnow() - start_time).total_seconds()
+                time_remaining = max(0, (duration * 60) - int(elapsed))
             
-            total_score += score
-            if percentage >= 50:  # Pass threshold
-                passed_students += 1
+            # Get last known proctoring metrics
+            face_detected = True
+            gaze = 'forward'
+            head_pose = 'normal'
             
-            risk_score = attempt.get('risk_score', 0)
-            total_incidents += incident_count
-            if risk_score >= 60:
-                high_risk_count += 1
+            if logs:
+                for log in reversed(logs):
+                    metrics = log.get('metrics', {})
+                    if metrics:
+                        face_detected = metrics.get('face_detected', True)
+                        # Estimate gaze based on violations
+                        vtype = log.get('violation_type', '').lower()
+                        if 'gaze' in vtype or 'looking' in vtype:
+                            gaze = 'away'
+                        elif 'head' in vtype or 'pose' in vtype:
+                            head_pose = 'tilted'
+                        break
             
             students_data.append({
+                'userId': str(user_id),
                 'studentId': user.get('studentId', user.get('email', '')),
                 'name': user.get('name', 'Unknown'),
-                'score': score,
-                'percentage': percentage,
-                'riskScore': risk_score,
-                'incidentCount': incident_count,
-                'duration': duration,
-                'status': attempt.get('status', 'in_progress')
+                'faceDetected': face_detected,
+                'gaze': gaze,
+                'headPose': head_pose,
+                'violations': violation_count,
+                'status': status,
+                'timeRemaining': time_remaining,
+                'latestViolation': latest_violation,
+                'violationTime': violation_time
             })
+        
+        # Calculate ID verified count (students with successful face verification)
+        id_verified_count = len([s for s in students_data if s['faceDetected']])
+        
+        # Calculate average risk
+        total_risk = sum(s['violations'] * 10 for s in students_data)  # Simple risk calculation
+        avg_risk = (total_risk / len(students_data)) if students_data else 0
+        
+        # Calculate compliance rate
+        compliant_students = len([s for s in students_data if s['status'] == 'normal'])
+        compliance = (compliant_students / len(students_data) * 100) if students_data else 100
         
         return jsonify({
             'students': students_data,
             'stats': {
                 'activeExams': 1,
                 'studentsOnline': len(students_data),
-                'activeViolations': sum(1 for s in students_data if s['violations'] > 0)
+                'idVerified': id_verified_count,
+                'activeViolations': total_violations,
+                'avgRisk': round(avg_risk, 1),
+                'compliance': round(compliance, 1)
             }
         }), 200
         
@@ -1898,8 +1945,11 @@ def start_exam(exam_id):
         if not exam:
             return jsonify({"error": "Exam not found"}), 404
         
+        # Get user info
+        user = users_collection.find_one({'_id': ObjectId(user_id)}) if ObjectId.is_valid(user_id) else None
+        
         # Create or update exam attempt record
-        exam_attempts_collection.update_one(
+        result = exam_attempts_collection.update_one(
             {
                 'exam_id': exam_id,
                 'user_id': user_id
@@ -1919,6 +1969,20 @@ def start_exam(exam_id):
             },
             upsert=True
         )
+        
+        # Emit real-time notification to lecturers monitoring this exam
+        if result.upserted_id or result.matched_count > 0:
+            try:
+                socketio.emit('student-joined', {
+                    'examId': exam_id,
+                    'userId': user_id,
+                    'studentId': user.get('studentId', user.get('email', '')) if user else 'Unknown',
+                    'name': user.get('name', 'Unknown') if user else 'Unknown',
+                    'timestamp': datetime.datetime.utcnow().isoformat() + 'Z'
+                }, room=exam_id, namespace='/proctor')
+                app.logger.info(f'[EXAM-START] Broadcasted student-joined for user {user_id} in exam {exam_id}')
+            except Exception as e:
+                app.logger.error(f'[EXAM-START] Failed to emit student-joined: {e}')
         
         return jsonify({"message": "Exam started successfully"}), 200
         

@@ -477,8 +477,32 @@ export default function App() {
     useEffect(() => {
         if (currentUser) {
             fetchExams();
+            
+            // Setup socket connection for real-time exam updates
+            const baseUrl = API_URL.replace('/api', '');
+            const socket = io(`${baseUrl}/proctor`);
+            
+            socket.on('connect', () => {
+                console.log('[STUDENT] Connected to exam updates');
+            });
+            
+            // Listen for newly created exams
+            socket.on('exam-created', (data: any) => {
+                console.log('[STUDENT] New exam created:', data);
+                // Only fetch if this exam is relevant to the current user
+                if (data.institution === currentUser.institution &&
+                    data.department === currentUser.department &&
+                    data.targetYear === currentUser.year) {
+                    fetchExams(); // Refresh exam list
+                    showToast(`New exam available: ${data.title}`, 'success');
+                }
+            });
+            
+            return () => {
+                socket.disconnect();
+            };
         }
-    }, [currentUser, fetchExams]);
+    }, [currentUser, fetchExams, showToast]);
 
 
     const handleLogout = () => {
@@ -2063,7 +2087,9 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, navigat
                                             <ChevronLeft className="h-5 w-5 rotate-180" />
                                         </button>
                                     </div>
+                            }
                                 </div>
+
                             );
                         })()
                         )}

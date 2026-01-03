@@ -173,6 +173,17 @@ export default function LiveMonitoringDashboard({
             forceUpdate(prev => prev + 1);
         });
 
+        // Listen for students joining the exam in real-time
+        newSocket.on('student-joined', (data: { examId: string; userId: string; studentId: string; name: string; timestamp: string }) => {
+            console.log('[DASHBOARD] Student joined:', data);
+            // Trigger immediate data refresh when a new student joins
+            setIsMonitoring(prev => {
+                // Force a re-fetch by toggling and immediately setting back
+                setTimeout(() => setIsMonitoring(true), 0);
+                return prev;
+            });
+        });
+
         socketRef.current = newSocket;
 
         return () => {
