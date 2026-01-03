@@ -59,43 +59,131 @@ const Progress = ({ value, className = '' }: { value: number; className?: string
     </div>
 );
 
-// Violation Clip Player - paused with play button for manual control
+// Optimized Violation Clip Player - smooth 60 FPS playback with RAF
 const ViolationClipPlayer = ({ userId, clips, liveFrame }: { userId: string; clips: string[]; liveFrame?: string }) => {
-    const [currentFrame, setCurrentFrame] = useState(0);
     const [isPlaying, setIsPlaying] = useState(false);
+    const canvasRef = useRef<HTMLCanvasElement>(null);
+    const currentFrameRef = useRef(0);
+    const animationFrameRef = useRef<number | null>(null);
+    const lastFrameTimeRef = useRef(0);
+    const frameImagesRef = useRef<Map<string, HTMLImageElement>>(new Map());
 
+    // Preload and cache images for smooth playback
     useEffect(() => {
-        if (!clips || clips.length === 0 || !isPlaying) return;
-        
-        // Loop through clips at ~10 FPS when playing
-        const interval = setInterval(() => {
-            setCurrentFrame(prev => (prev + 1) % clips.length);
-        }, 100);
+        if (!clips || clips.length === 0) return;
 
-        return () => clearInterval(interval);
-    }, [clips, isPlaying]);
+        // Preload all frames as Image objects (avoid repeated base64 decode)
+        clips.forEach((src, idx) => {
+            if (!frameImagesRef.current.has(src)) {
+                const img = new Image();
+                img.src = src;
+                frameImagesRef.current.set(src, img);
+            }
+        });
 
-    // If we have violation clips, show with play button; otherwise show live frame
+        return () => {
+            // Cleanup on unmount
+            frameImagesRef.current.clear();
+        };
+    }, [clips]);
+
+    // RAF-based playback loop for smooth 60 FPS rendering
+    useEffect(() => {
+        if (!isPlaying || !clips || clips.length === 0) return;
+
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+
+        const ctx = canvas.getContext('2d', { alpha: false });
+        if (!ctx) return;
+
+        const FPS = 10; // Playback speed (10 FPS for clip playback)
+        const frameDuration = 1000 / FPS;
+
+        const renderFrame = (timestamp: number) => {
+            const elapsed = timestamp - lastFrameTimeRef.current;
+
+            if (elapsed >= frameDuration) {
+                lastFrameTimeRef.current = timestamp;
+
+                // Draw current frame
+                const img = frameImagesRef.current.get(clips[currentFrameRef.current]);
+                if (img && img.complete) {
+                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                }
+
+                // Advance to next frame
+                currentFrameRef.current++;
+
+                // Check if playback ended
+                if (currentFrameRef.current >= clips.length) {
+                    // Reset to start and pause
+                    currentFrameRef.current = 0;
+                    setIsPlaying(false);
+                    return;
+                }
+            }
+
+            // Continue animation loop
+            animationFrameRef.current = requestAnimationFrame(renderFrame);
+        };
+
+        animationFrameRef.current = requestAnimationFrame(renderFrame);
+
+        return () => {
+            if (animationFrameRef.current !== null) {
+                cancelAnimationFrame(animationFrameRef.current);
+            }
+        };
+    }, [isPlaying, clips]);
+
+    // Render static frame when paused
+    useEffect(() => {
+        if (isPlaying || !clips || clips.length === 0) return;
+
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+
+        const ctx = canvas.getContext('2d', { alpha: false });
+        if (!ctx) return;
+
+        const img = frameImagesRef.current.get(clips[currentFrameRef.current]);
+        if (img && img.complete) {
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        }
+    }, [isPlaying, clips]);
+
+    const handlePlayPause = () => {
+        if (!isPlaying) {
+            lastFrameTimeRef.current = performance.now();
+        }
+        setIsPlaying(!isPlaying);
+    };
+
+    // If we have violation clips, show canvas with play button
     if (clips && clips.length > 0) {
         return (
             <div className="absolute inset-0 w-full h-full">
-                <img
-                    src={clips[currentFrame]}
-                    alt="Violation clip"
+                <canvas
+                    ref={canvasRef}
+                    width={320}
+                    height={240}
                     className="w-full h-full object-cover"
+                    style={{ imageRendering: 'auto' }}
                 />
                 <div className="absolute bottom-3 left-3 bg-black/80 backdrop-blur-sm px-3 py-1 rounded-md z-10 text-xs text-red-400 font-bold">
                     VIOLATION RECORDED
                 </div>
-                {/* Play/Pause Button */}
+                {/* Compact Play/Pause Button - bottom-right overlay */}
                 <button
-                    onClick={() => setIsPlaying(!isPlaying)}
-                    className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-black/70 hover:bg-black/90 backdrop-blur-sm rounded-full p-6 transition-all hover:scale-110 z-20"
+                    onClick={handlePlayPause}
+                    className="absolute bottom-3 right-3 bg-black/60 hover:bg-black/80 backdrop-blur-sm rounded-full p-2 transition-all hover:scale-105 z-20"
+                    aria-label={isPlaying ? 'Pause' : 'Play'}
                 >
                     {isPlaying ? (
-                        <Pause className="h-10 w-10 text-white" />
+                        <Pause className="h-4 w-4 text-white" />
                     ) : (
-                        <Play className="h-10 w-10 text-white ml-1" />
+                        <Play className="h-4 w-4 text-white ml-0.5" />
                     )}
                 </button>
             </div>
