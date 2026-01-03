@@ -1961,11 +1961,12 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, navigat
                         </div>
 
                         <h3 className="text-xl font-bold text-white mb-4">Question Breakdown</h3>
-                        {resultAttempt.perQuestion && resultAttempt.perQuestion.length > 0 && (() => {
-                            const q = resultAttempt.perQuestion[currentQuestionIndex];
-                            const idx = currentQuestionIndex;
-                            const totalQuestions = resultAttempt.perQuestion.length;
-                            return (
+                        {resultAttempt.perQuestion && resultAttempt.perQuestion.length > 0 && (
+                            (() => {
+                                const q = resultAttempt.perQuestion[currentQuestionIndex];
+                                const idx = currentQuestionIndex;
+                                const totalQuestions = resultAttempt.perQuestion.length;
+                                return (
                                 <div key={idx}>
                                     <div 
                                         className={cn(
@@ -1997,48 +1998,47 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, navigat
                                         animate={{ opacity: 1 }}
                                         className="mt-2 p-4 bg-slate-800 rounded-lg border border-slate-700 space-y-3"
                                     >
+                                        <div>
+                                            <p className="text-sm font-semibold text-slate-300 mb-2">Question:</p>
+                                            <p className="text-white">{q.question}</p>
+                                        </div>
+                                        {q.options && q.options.length > 0 && (
                                             <div>
-                                                <p className="text-sm font-semibold text-slate-300 mb-2">Question:</p>
-                                                <p className="text-white">{q.question}</p>
-                                            </div>
-                                            {q.options && q.options.length > 0 && (
-                                                <div>
-                                                    <p className="text-sm font-semibold text-slate-300 mb-2">Options:</p>
-                                                    <div className="space-y-2">
-                                                        {q.options.map((opt: string, optIdx: number) => {
+                                                <p className="text-sm font-semibold text-slate-300 mb-2">Options:</p>
+                                                <div className="space-y-2">{q.options.map((opt: string, optIdx: number) => {
                                                             const userAns = q.given !== undefined ? q.given : q.userAnswer;
                                                             const correctAns = q.expected !== undefined ? q.expected : q.correctAnswer;
                                                             return (
-                                                            <div key={optIdx} className={cn(
-                                                                'p-2 rounded border',
-                                                                userAns === optIdx ? (q.correct ? 'border-green-500 bg-green-900/20' : 'border-red-500 bg-red-900/20') :
-                                                                correctAns === optIdx ? 'border-green-500 bg-green-900/10' : 'border-slate-700'
-                                                            )}>
-                                                                <div className="flex items-center justify-between">
-                                                                    <span className="text-slate-200">{String.fromCharCode(65 + optIdx)}. {opt}</span>
-                                                                    <div className="flex gap-2">
-                                                                        {userAns === optIdx && <span className="text-xs text-blue-400 font-medium">Your Answer</span>}
-                                                                        {correctAns === optIdx && <span className="text-xs text-green-400 font-medium">✓ Correct</span>}
+                                                                <div key={optIdx} className={cn(
+                                                                    'p-2 rounded border',
+                                                                    userAns === optIdx ? (q.correct ? 'border-green-500 bg-green-900/20' : 'border-red-500 bg-red-900/20') :
+                                                                    correctAns === optIdx ? 'border-green-500 bg-green-900/10' : 'border-slate-700'
+                                                                )}>
+                                                                    <div className="flex items-center justify-between">
+                                                                        <span className="text-slate-200">{String.fromCharCode(65 + optIdx)}. {opt}</span>
+                                                                        <div className="flex gap-2">
+                                                                            {userAns === optIdx && <span className="text-xs text-blue-400 font-medium">Your Answer</span>}
+                                                                            {correctAns === optIdx && <span className="text-xs text-green-400 font-medium">✓ Correct</span>}
+                                                                        </div>
                                                                     </div>
                                                                 </div>
-                                                            </div>
                                                             );
                                                         })}
-                                                    </div>
                                                 </div>
-                                            )}
-                                            {!q.options && (
-                                                <div>
-                                                    <p className="text-sm font-semibold text-slate-300 mb-1">Your Answer:</p>
-                                                    <p className="text-white mb-3">{String(q.given || q.userAnswer || 'No answer')}</p>
-                                                    <p className="text-sm font-semibold text-slate-300 mb-1">Correct Answer:</p>
-                                                    <p className="text-green-400">{String(q.expected || q.correctAnswer)}</p>
-                                                </div>
-                                            )}
-                                            <div className="flex items-center justify-between pt-3 border-t border-slate-700">
-                                                <span className="text-sm text-slate-400">Marks: <span className={q.correct ? 'text-green-400' : 'text-red-400'}>{q.correct ? q.marks : 0}</span> / {q.marks}</span>
-                                                <span className={cn('text-sm font-semibold', q.correct ? 'text-green-400' : 'text-red-400')}>{q.correct ? '✓ Correct' : '✗ Incorrect'}</span>
                                             </div>
+                                        )}
+                                        {!q.options && (
+                                            <div>
+                                                <p className="text-sm font-semibold text-slate-300 mb-1">Your Answer:</p>
+                                                <p className="text-white mb-3">{String(q.given || q.userAnswer || 'No answer')}</p>
+                                                <p className="text-sm font-semibold text-slate-300 mb-1">Correct Answer:</p>
+                                                <p className="text-green-400">{String(q.expected || q.correctAnswer)}</p>
+                                            </div>
+                                        )}
+                                        <div className="flex items-center justify-between pt-3 border-t border-slate-700">
+                                            <span className="text-sm text-slate-400">Marks: <span className={q.correct ? 'text-green-400' : 'text-red-400'}>{q.correct ? q.marks : 0}</span> / {q.marks}</span>
+                                            <span className={cn('text-sm font-semibold', q.correct ? 'text-green-400' : 'text-red-400')}>{q.correct ? '✓ Correct' : '✗ Incorrect'}</span>
+                                        </div>
                                     </motion.div>
 
                                     {/* Navigation Buttons */
@@ -2065,7 +2065,8 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, navigat
                                     </div>
                                 </div>
                             );
-                        })()}
+                        })()
+                        )}
                     </Card>
                 )}
             </div>
