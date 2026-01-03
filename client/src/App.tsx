@@ -1799,7 +1799,7 @@ const ProfilePage = ({ user, onLogout, onBack, showToast, onUpdateUser, navigate
 const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, navigateTo }: { user: UserProfile; exams: Exam[]; onLogout: () => void; onBack: () => void; showToast: (message:string, type:'success'|'error') => void; navigateTo: (state: AppState) => void }) => {
     const [selectedExam, setSelectedExam] = useState<Exam | null>(null);
     const [resultAttempt, setResultAttempt] = useState<any>(null);
-    const [expandedQuestion, setExpandedQuestion] = useState<number | null>(null);
+    const [currentQuestionIndex, setCurrentQuestionIndex] = useState<number>(0);
 
     const userExams = exams.filter(exam => 
         exam.institution.toLowerCase() === user.institution.toLowerCase() && 
@@ -1810,7 +1810,9 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, navigat
     const completedExams = userExams.filter(e => (e as any).attemptForUser || (e as any).completedByUser);
     const averageScore = completedExams.length > 0 ? Math.round(completedExams.reduce((acc, e) => {
         const attempt = (e as any).attemptForUser;
-        return acc + (attempt?.score || 0);
+        // Ensure we're using the percentage score
+        const score = attempt?.percentage || attempt?.score || 0;
+        return acc + score;
     }, 0) / completedExams.length) : 0;
 
     const loadExamResults = async (exam: Exam) => {
@@ -1818,7 +1820,7 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, navigat
         if (selectedExam?._id === exam._id) {
             setSelectedExam(null);
             setResultAttempt(null);
-            setExpandedQuestion(null);
+            setCurrentQuestionIndex(0);
             return;
         }
         try {
@@ -1831,6 +1833,7 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, navigat
             }
             setResultAttempt(data.attempt);
             setSelectedExam(exam);
+            setCurrentQuestionIndex(0);
         } catch (err: any) {
             showToast(err.message || 'Failed to load results', 'error');
         }
@@ -1888,10 +1891,10 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, navigat
                         <div className="space-y-4">
                             {completedExams.map((exam: Exam) => {
                                 const attempt = (exam as any).attemptForUser;
-                                const score = attempt?.score || 0;
-                                const correctCount = Array.isArray(attempt?.answers)
+                                const score = attempt?.percentage || attempt?.score || 0;
+                                const correctCount = attempt?.correctCount || (Array.isArray(attempt?.answers)
                                     ? attempt.answers.filter((a: any) => a?.isCorrect === true).length
-                                    : 0;
+                                    : 0);
                                 const totalQuestions = Array.isArray(attempt?.answers)
                                     ? attempt.answers.length
                                     : (exam as any)?.questions?.length ?? 0;
@@ -1958,14 +1961,16 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, navigat
                         </div>
 
                         <h3 className="text-xl font-bold text-white mb-4">Question Breakdown</h3>
-                        <div className="space-y-3">
-                            {resultAttempt.perQuestion && resultAttempt.perQuestion.map((q: any, idx: number) => (
+                        {resultAttempt.perQuestion && resultAttempt.perQuestion.length > 0 && (() => {
+                            const q = resultAttempt.perQuestion[currentQuestionIndex];
+                            const idx = currentQuestionIndex;
+                            const totalQuestions = resultAttempt.perQuestion.length;
+                            return (
                                 <div key={idx}>
                                     <div 
-                                        onClick={() => setExpandedQuestion(expandedQuestion === idx ? null : idx)}
                                         className={cn(
-                                            'p-4 rounded-lg border cursor-pointer transition-all hover:scale-[1.01]',
-                                            q.correct ? 'bg-green-900/20 border-green-600/50 hover:border-green-500' : 'bg-red-900/20 border-red-600/50 hover:border-red-500'
+                                            'p-4 rounded-lg border',
+                                            q.correct ? 'bg-green-900/20 border-green-600/50' : 'bg-red-900/20 border-red-600/50'
                                         )}
                                     >
                                         <div className="flex items-start justify-between">
@@ -1987,13 +1992,11 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, navigat
                                             </div>
                                         </div>
                                     </div>
-                                    {expandedQuestion === idx && (
-                                        <motion.div
-                                            initial={{ opacity: 0, height: 0 }}
-                                            animate={{ opacity: 1, height: 'auto' }}
-                                            exit={{ opacity: 0, height: 0 }}
-                                            className="mt-2 p-4 bg-slate-800 rounded-lg border border-slate-700 space-y-3"
-                                        >
+                                    <motion.div
+                                        initial={{ opacity: 0 }}
+                                        animate={{ opacity: 1 }}
+                                        className="mt-2 p-4 bg-slate-800 rounded-lg border border-slate-700 space-y-3"
+                                    >
                                             <div>
                                                 <p className="text-sm font-semibold text-slate-300 mb-2">Question:</p>
                                                 <p className="text-white">{q.question}</p>
@@ -2036,11 +2039,33 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, navigat
                                                 <span className="text-sm text-slate-400">Marks: <span className={q.correct ? 'text-green-400' : 'text-red-400'}>{q.correct ? q.marks : 0}</span> / {q.marks}</span>
                                                 <span className={cn('text-sm font-semibold', q.correct ? 'text-green-400' : 'text-red-400')}>{q.correct ? '✓ Correct' : '✗ Incorrect'}</span>
                                             </div>
-                                        </motion.div>
-                                    )}
+                                    </motion.div>
+
+                                    {/* Navigation Buttons */
+                                    <div className="flex items-center justify-between mt-6 bg-slate-800 rounded-lg p-4 border border-slate-700">
+                                        <button
+                                            onClick={() => setCurrentQuestionIndex(Math.max(0, currentQuestionIndex - 1))}
+                                            disabled={currentQuestionIndex === 0}
+                                            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-700 disabled:cursor-not-allowed rounded-lg font-medium transition-colors flex items-center gap-2"
+                                        >
+                                            <ChevronLeft className="h-5 w-5" />
+                                            Previous
+                                        </button>
+                                        <span className="text-sm font-semibold text-white">
+                                            Question {currentQuestionIndex + 1} of {totalQuestions}
+                                        </span>
+                                        <button
+                                            onClick={() => setCurrentQuestionIndex(Math.min(totalQuestions - 1, currentQuestionIndex + 1))}
+                                            disabled={currentQuestionIndex === totalQuestions - 1}
+                                            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-700 disabled:cursor-not-allowed rounded-lg font-medium transition-colors flex items-center gap-2"
+                                        >
+                                            Next
+                                            <ChevronLeft className="h-5 w-5 rotate-180" />
+                                        </button>
+                                    </div>
                                 </div>
-                            ))}
-                        </div>
+                            );
+                        })()}
                     </Card>
                 )}
             </div>
