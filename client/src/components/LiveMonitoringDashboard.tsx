@@ -59,22 +59,23 @@ const Progress = ({ value, className = '' }: { value: number; className?: string
     </div>
 );
 
-// Violation Clip Player - loops through saved frames when violations detected
+// Violation Clip Player - paused with play button for manual control
 const ViolationClipPlayer = ({ userId, clips, liveFrame }: { userId: string; clips: string[]; liveFrame?: string }) => {
     const [currentFrame, setCurrentFrame] = useState(0);
+    const [isPlaying, setIsPlaying] = useState(false);
 
     useEffect(() => {
-        if (!clips || clips.length === 0) return;
+        if (!clips || clips.length === 0 || !isPlaying) return;
         
-        // Loop through clips at ~10 FPS
+        // Loop through clips at ~10 FPS when playing
         const interval = setInterval(() => {
             setCurrentFrame(prev => (prev + 1) % clips.length);
         }, 100);
 
         return () => clearInterval(interval);
-    }, [clips]);
+    }, [clips, isPlaying]);
 
-    // If we have violation clips, loop them; otherwise show live frame
+    // If we have violation clips, show with play button; otherwise show live frame
     if (clips && clips.length > 0) {
         return (
             <div className="absolute inset-0 w-full h-full">
@@ -84,8 +85,19 @@ const ViolationClipPlayer = ({ userId, clips, liveFrame }: { userId: string; cli
                     className="w-full h-full object-cover"
                 />
                 <div className="absolute bottom-3 left-3 bg-black/80 backdrop-blur-sm px-3 py-1 rounded-md z-10 text-xs text-red-400 font-bold">
-                    REPLAYING VIOLATION
+                    VIOLATION RECORDED
                 </div>
+                {/* Play/Pause Button */}
+                <button
+                    onClick={() => setIsPlaying(!isPlaying)}
+                    className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-black/70 hover:bg-black/90 backdrop-blur-sm rounded-full p-6 transition-all hover:scale-110 z-20"
+                >
+                    {isPlaying ? (
+                        <Pause className="h-10 w-10 text-white" />
+                    ) : (
+                        <Play className="h-10 w-10 text-white ml-1" />
+                    )}
+                </button>
             </div>
         );
     }

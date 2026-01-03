@@ -3403,6 +3403,36 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                         console.error('[STREAMING] Error:', data.message);
                     });
 
+                    // Listen for proctor decisions (pause/stop/allow)
+                    socket.on('student_paused', (data: any) => {
+                        console.log('[PROCTOR] Received proctor decision:', data);
+                        if (data.userId === user._id && data.examId === exam._id) {
+                            const status = data.status || 'active';
+                            setProctorDecision({
+                                status: status as 'active' | 'paused' | 'terminated',
+                                reason: data.reason,
+                                updatedAt: data.timestamp
+                            });
+                            
+                            if (status === 'paused') {
+                                setProctorPauseOpen(true);
+                                pauseReasonRef.current = data.reason || 'Lecturer has paused your exam';
+                            } else if (status === 'terminated') {
+                                alert('Your exam has been stopped by the lecturer: ' + (data.reason || 'Violation detected'));
+                                handleSubmit();
+                            } else if (status === 'active') {
+                                setProctorPauseOpen(false);
+                                showToast('You may continue the exam', 'success');
+                            }
+                        }
+                    });
+
+                    // Join student-specific room for targeted proctor decisions
+                    socket.emit('join_student', {
+                        examId: exam._id,
+                        userId: user._id
+                    });
+
                     proctoringSocketRef.current = socket;
 
                     // Start streaming video frames to lecturer (every 2 seconds for low bandwidth)
@@ -3437,8 +3467,8 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                         }
                     };
 
-                    // Stream video every 2 seconds
-                    videoStreamTimerRef.current = window.setInterval(streamVideo, 2000);
+                    // Stream video every 500ms for smoother feed (2 FPS)
+                    videoStreamTimerRef.current = window.setInterval(streamVideo, 500);
 
                     // Also start screen capture and streaming
                     try {
