@@ -2710,6 +2710,13 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
     // const audioChunksRef = useRef<Blob[]>([]);
 
     const lockRef = useRef<any>(null);
+    
+    // Optimized rendering pipeline refs (30 FPS UI, 4 FPS AI)
+    const renderCanvasRef = useRef<HTMLCanvasElement | null>(null);
+    const renderContextRef = useRef<CanvasRenderingContext2D | null>(null);
+    const renderAnimationFrameRef = useRef<number | null>(null);
+    const aiProcessingIntervalRef = useRef<number | null>(null);
+    const lastAIProcessTimeRef = useRef<number>(0);
 
     // Proctor decision / pause state (lecturer can pause/terminate)
     const [proctorDecision, setProctorDecision] = useState<{ status: 'active' | 'paused' | 'terminated'; reason?: string | null; updatedAt?: string }>(
@@ -3472,7 +3479,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                     };
 
                     // Stream video every 500ms for smoother feed (2 FPS)
-                    videoStreamTimerRef.current = window.setInterval(streamVideo, 500);
+                    videoStreamTimerRef.current = window.setInterval(streamVideo, 50);
 
                     // Also start screen capture and streaming
                     try {
@@ -3570,177 +3577,271 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                     } catch { /* ignore */ }
                 };
 
-                // Start adaptive scheduler (instead of fixed setInterval)
-                const tick = async () => {
-                    if (abortSignal.aborted) return;
-
-                    const now = Date.now();
-                    const paused = document.hidden || securityModalOpenRef.current;
-                    const cameraOk = isCameraHealthy();
-                    setProctorStats(s => ({ ...s, paused, cameraOk, backoff: now < backoffUntilRef.current }));
-
-                    // Ensure recorder is running with 1s timeslice for continuous small chunks
-                    try {
-                        if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'inactive' && !abortSignal.aborted) {
-                            mediaRecorderRef.current.start(1000);
-                        }
-                    } catch {}
-
-                    // If we're backing off or paused, schedule next tick and skip sending.
-                    if (now < backoffUntilRef.current || paused || !cameraOk) {
-                        const interval = withJitter(computeNextInterval());
-                        proctorSchedulerRef.current = window.setTimeout(tick, interval);
-                        return;
-                    }
-
-                    // Backpressure: only one in-flight frame upload at a time.
-                    if (proctorInFlightRef.current) {
-                        const interval = withJitter(computeNextInterval());
-                        proctorSchedulerRef.current = window.setTimeout(tick, interval);
-                        return;
-                    }
-
-                    const imageDataUrl = captureFrame();
-                    if (!imageDataUrl) {
-                        // camera might be warming up; try later
-                        const interval = withJitter(computeNextInterval());
-                        proctorSchedulerRef.current = window.setTimeout(tick, interval);
-                        return;
-                    }
-
-                    // Strict rule: covered/dark camera detection (client-side)
-                    const bright = computeFrameBrightness(imageDataUrl);
-                    const isDark = typeof bright === 'number' ? bright < 35 : false; // threshold tuned for JPEG baseline
-                    if (isDark) {
-                        if (!darkSinceRef.current) darkSinceRef.current = Date.now();
-                    } else {
-                        darkSinceRef.current = null;
-                    }
-                    if (darkSinceRef.current && Date.now() - darkSinceRef.current >= proctorPolicy.darkGraceMs) {
-                        if (canLogViolation('camera_dark')) {
-                            logProctorEvent('camera_dark_or_covered', {
-                                message: 'Camera feed appears dark/covered for an extended period.',
-                                brightness: bright,
-                                graceMs: proctorPolicy.darkGraceMs,
-                                frameEvidence: imageDataUrl,
-                                severity: 'high'
-                            });
-
-                            // High severity: pause immediately until lecturer decides
-                            requestPauseFromClient('Camera appears covered/dark for too long. Waiting for invigilator approval.');
-                        }
-                    }
-
-                    proctorInFlightRef.current = true;
-                    lastFrameAtRef.current = now;
-                    setProctorStats(s => ({ ...s, lastFrameAt: now }));
-
-                    const t0 = performance.now();
-                    try {
-                        const res = await fetch(`${API_URL}/proctor`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                imageDataUrl,
-                                userId: user._id,
-                                examId: exam._id,
-                                examActive: submitStatus === 'idle'
-                            }),
-                            signal: abortSignal
+                // ========================================================================
+                // OPTIMIZED RENDERING & AI PIPELINE (30 FPS Rendering + 4 FPS AI)
+                // ========================================================================
+                
+                console.log('[PROCTORING] Initializing optimized rendering pipeline...');
+                console.log('[RENDERING] Target: 30 FPS for smooth UI');
+                console.log('[AI] Target: 4 FPS (~250ms) for detection accuracy');
+                
+                // Initialize rendering canvas (reused for both rendering and AI capture)
+                const initRenderCanvas = () => {
+                    if (!renderCanvasRef.current) {
+                        const canvas = document.createElement('canvas');
+                        canvas.width = 640;  // Rendering resolution for UI (downscaled for performance)
+                        canvas.height = 360;
+                        renderCanvasRef.current = canvas;
+                        renderContextRef.current = canvas.getContext('2d', { 
+                            alpha: false,  // No transparency needed (performance boost)
+                            desynchronized: true  // Allow async rendering (better performance)
                         });
-
-                        const t1 = performance.now();
-                        const uploadMs = Math.round(t1 - t0);
-                        setProctorStats(s => ({ ...s, lastUploadMs: uploadMs }));
-
-                        // Adaptive encoding: if uploads are slow, reduce size/quality; if fast, slowly recover.
-                        if (uploadMs > 1200) {
-                            encodeQualityRef.current = Math.max(0.45, +(encodeQualityRef.current - 0.05).toFixed(2));
-                            encodeWidthRef.current = Math.max(240, encodeWidthRef.current - 40);
-                        } else if (uploadMs < 450) {
-                            encodeQualityRef.current = Math.min(0.8, +(encodeQualityRef.current + 0.02).toFixed(2));
-                            encodeWidthRef.current = Math.min(360, encodeWidthRef.current + 20);
-                        }
-
-                        if (!res.ok) {
-                            backoffUntilRef.current = Date.now() + backoffMs();
-                            setProctorStats(s => ({ ...s, uploadErrors: s.uploadErrors + 1, backoff: true }));
-                            proctorInFlightRef.current = false;
-                            const interval = maxIntervalMs;
-                            proctorSchedulerRef.current = window.setTimeout(tick, interval);
-                            return;
-                        }
-
-                        const data = await res.json();
-                        if (abortSignal.aborted) return;
-
-                        setProctorStats(s => ({ ...s, framesSent: s.framesSent + 1 }));
-
-                        if (data && data.error) {
-                            console.error('Proctoring error:', data.error);
-                        } else {
-                            // Strict rule: face missing escalation using server output
-                            const faceCount = typeof data?.faceCount === 'number' ? data.faceCount : null;
-                            if (faceCount === 0) {
-                                if (!faceMissingSinceRef.current) faceMissingSinceRef.current = Date.now();
-                            } else {
-                                faceMissingSinceRef.current = null;
-                            }
-
-                            if (faceMissingSinceRef.current && Date.now() - faceMissingSinceRef.current >= proctorPolicy.faceMissingGraceMs) {
-                                if (canLogViolation('face_missing')) {
-                                    logProctorEvent('face_missing', {
-                                        message: 'No face detected for an extended period.',
-                                        graceMs: proctorPolicy.faceMissingGraceMs,
-                                        faceCount,
-                                        frameEvidence: imageDataUrl,
-                                        severity: 'high'
-                                    });
-
-                                    // High severity: pause immediately until lecturer decides
-                                    requestPauseFromClient('Face not detected for too long. Exam is paused pending invigilator decision.');
-                                }
-                            }
-
-                            // Strict: multiple faces (client reinforces server detection)
-                            if (typeof faceCount === 'number' && faceCount > 1) {
-                                if (canLogViolation('multiple_faces')) {
-                                    logProctorEvent('multiple_faces_detected', {
-                                        message: `Multiple faces detected (${faceCount}).`,
-                                        faceCount,
-                                        frameEvidence: imageDataUrl,
-                                        severity: 'high'
-                                    });
-
-                                    // High severity: pause immediately until lecturer decides
-                                    requestPauseFromClient('Multiple faces detected. Exam is paused pending invigilator decision.');
-                                }
-                            }
-                        }
-                    } catch (err: any) {
-                        if (err?.name !== 'AbortError') {
-                            console.error('Image proctoring error:', err);
-                            backoffUntilRef.current = Date.now() + backoffMs();
-                            setProctorStats(s => ({ ...s, uploadErrors: s.uploadErrors + 1, backoff: true }));
-
-                            // When in backoff, drop quality aggressively to recover quickly.
-                            encodeQualityRef.current = Math.max(0.4, +(encodeQualityRef.current - 0.08).toFixed(2));
-                            encodeWidthRef.current = Math.max(220, encodeWidthRef.current - 60);
-                        }
-                    } finally {
-                        proctorInFlightRef.current = false;
-                        if (!abortSignal.aborted) {
-                            const interval = withJitter(computeNextInterval());
-                            proctorSchedulerRef.current = window.setTimeout(tick, interval);
-                        }
+                        console.log('[RENDERING] Canvas initialized: 640x360 for UI rendering');
                     }
                 };
-
-                // Kick off first tick
-                clearProctorScheduler();
-                proctorSchedulerRef.current = window.setTimeout(tick, withJitter(computeNextInterval()));
-
-                console.log('[PROCTORING] Proctoring started successfully - adaptive scheduler running');
+                
+                initRenderCanvas();
+                
+                // ========================================================================
+                // 1. RENDERING LOOP (30 FPS - UI Only, RAF-based)
+                // ========================================================================
+                const startRenderingLoop = () => {
+                    const video = videoRef.current;
+                    const canvas = renderCanvasRef.current;
+                    const ctx = renderContextRef.current;
+                    
+                    if (!video || !canvas || !ctx) return;
+                    
+                    const render = () => {
+                        // Check if rendering should continue
+                        if (abortSignal.aborted) {
+                            console.log('[RENDERING] RAF loop stopped - proctoring ended');
+                            return;
+                        }
+                        
+                        // Only render if video is ready
+                        if (video.readyState >= 2 && video.videoWidth > 0) {
+                            try {
+                                // Draw video frame to canvas (downscaled for performance)
+                                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                            } catch (err) {
+                                // Ignore rare drawing errors (e.g., canvas context lost)
+                            }
+                        }
+                        
+                        // Schedule next frame (maintains smooth 30 FPS)
+                        renderAnimationFrameRef.current = requestAnimationFrame(render);
+                    };
+                    
+                    // Start rendering loop
+                    renderAnimationFrameRef.current = requestAnimationFrame(render);
+                    console.log('[RENDERING] RAF loop started - targeting 30 FPS');
+                };
+                
+                // ========================================================================
+                // 2. AI PROCESSING LOOP (4 FPS - Backend Analysis, Interval-based)
+                // ========================================================================
+                const startAIProcessingLoop = () => {
+                    const AI_INTERVAL_MS = 250; // 4 FPS (250ms between frames)
+                    
+                    const processAIFrame = async () => {
+                        // Throttle check (prevent drift if processing takes longer than interval)
+                        const now = Date.now();
+                        if (now - lastAIProcessTimeRef.current < AI_INTERVAL_MS - 10) {
+                            return; // Skip if called too soon
+                        }
+                        lastAIProcessTimeRef.current = now;
+                        
+                        // Safety checks
+                        if (abortSignal.aborted) return;
+                        const paused = document.hidden || securityModalOpenRef.current;
+                        const cameraOk = isCameraHealthy();
+                        
+                        // Update stats (minimal state updates)
+                        setProctorStats(s => ({ 
+                            ...s, 
+                            paused, 
+                            cameraOk, 
+                            backoff: now < backoffUntilRef.current 
+                        }));
+                        
+                        // Skip AI processing if conditions aren't met
+                        if (now < backoffUntilRef.current || paused || !cameraOk) {
+                            return;
+                        }
+                        
+                        // Backpressure: only one AI request in-flight at a time
+                        if (proctorInFlightRef.current) {
+                            return;
+                        }
+                        
+                        // Capture AI frame (higher resolution for facial landmark detection)
+                        const aiFrame = captureAIFrame();
+                        if (!aiFrame) {
+                            return; // Camera warming up or failed
+                        }
+                        
+                        // Dark/covered camera detection (client-side pre-check)
+                        const brightness = computeFrameBrightness(aiFrame);
+                        const isDark = typeof brightness === 'number' ? brightness < 35 : false;
+                        
+                        if (isDark) {
+                            if (!darkSinceRef.current) darkSinceRef.current = Date.now();
+                        } else {
+                            darkSinceRef.current = null;
+                        }
+                        
+                        if (darkSinceRef.current && Date.now() - darkSinceRef.current >= proctorPolicy.darkGraceMs) {
+                            if (canLogViolation('camera_dark')) {
+                                logProctorEvent('camera_dark_or_covered', {
+                                    message: 'Camera feed appears dark/covered for an extended period.',
+                                    brightness,
+                                    graceMs: proctorPolicy.darkGraceMs,
+                                    frameEvidence: aiFrame,
+                                    severity: 'high'
+                                });
+                                requestPauseFromClient('Camera appears covered/dark for too long. Waiting for invigilator approval.');
+                            }
+                        }
+                        
+                        // Send frame to AI backend for analysis
+                        proctorInFlightRef.current = true;
+                        lastFrameAtRef.current = now;
+                        setProctorStats(s => ({ ...s, lastFrameAt: now }));
+                        
+                        const t0 = performance.now();
+                        try {
+                            const res = await fetch(`${API_URL}/proctor`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    imageDataUrl: aiFrame,
+                                    userId: user._id,
+                                    examId: exam._id,
+                                    examActive: submitStatus === 'idle'
+                                }),
+                                signal: abortSignal
+                            });
+                            
+                            const t1 = performance.now();
+                            const uploadMs = Math.round(t1 - t0);
+                            setProctorStats(s => ({ ...s, lastUploadMs: uploadMs }));
+                            
+                            // Adaptive quality (reduce if slow, increase if fast)
+                            if (uploadMs > 1200) {
+                                encodeQualityRef.current = Math.max(0.45, +(encodeQualityRef.current - 0.05).toFixed(2));
+                                encodeWidthRef.current = Math.max(240, encodeWidthRef.current - 40);
+                            } else if (uploadMs < 450) {
+                                encodeQualityRef.current = Math.min(0.8, +(encodeQualityRef.current + 0.02).toFixed(2));
+                                encodeWidthRef.current = Math.min(400, encodeWidthRef.current + 20);
+                            }
+                            
+                            if (!res.ok) {
+                                backoffUntilRef.current = Date.now() + backoffMs();
+                                setProctorStats(s => ({ ...s, uploadErrors: s.uploadErrors + 1, backoff: true }));
+                                proctorInFlightRef.current = false;
+                                return;
+                            }
+                            
+                            const data = await res.json();
+                            if (abortSignal.aborted) return;
+                            
+                            setProctorStats(s => ({ ...s, framesSent: s.framesSent + 1 }));
+                            
+                            if (data && data.error) {
+                                console.error('[AI] Proctoring error:', data.error);
+                            } else {
+                                // Process AI detection results
+                                const faceCount = typeof data?.faceCount === 'number' ? data.faceCount : null;
+                                
+                                // Face missing detection
+                                if (faceCount === 0) {
+                                    if (!faceMissingSinceRef.current) faceMissingSinceRef.current = Date.now();
+                                } else {
+                                    faceMissingSinceRef.current = null;
+                                }
+                                
+                                if (faceMissingSinceRef.current && Date.now() - faceMissingSinceRef.current >= proctorPolicy.faceMissingGraceMs) {
+                                    if (canLogViolation('face_missing')) {
+                                        logProctorEvent('face_missing', {
+                                            message: 'No face detected for an extended period.',
+                                            graceMs: proctorPolicy.faceMissingGraceMs,
+                                            faceCount,
+                                            frameEvidence: aiFrame,
+                                            severity: 'high'
+                                        });
+                                        requestPauseFromClient('Face not detected for too long. Exam is paused pending invigilator decision.');
+                                    }
+                                }
+                                
+                                // Multiple faces detection
+                                if (typeof faceCount === 'number' && faceCount > 1) {
+                                    if (canLogViolation('multiple_faces')) {
+                                        logProctorEvent('multiple_faces_detected', {
+                                            message: `Multiple faces detected (${faceCount}).`,
+                                            faceCount,
+                                            frameEvidence: aiFrame,
+                                            severity: 'high'
+                                        });
+                                        requestPauseFromClient('Multiple faces detected. Exam is paused pending invigilator decision.');
+                                    }
+                                }
+                            }
+                        } catch (err: any) {
+                            if (err?.name !== 'AbortError') {
+                                console.error('[AI] Processing error:', err);
+                                backoffUntilRef.current = Date.now() + backoffMs();
+                                setProctorStats(s => ({ ...s, uploadErrors: s.uploadErrors + 1, backoff: true }));
+                                // Reduce quality aggressively on errors
+                                encodeQualityRef.current = Math.max(0.4, +(encodeQualityRef.current - 0.08).toFixed(2));
+                                encodeWidthRef.current = Math.max(220, encodeWidthRef.current - 60);
+                            }
+                        } finally {
+                            proctorInFlightRef.current = false;
+                        }
+                    };
+                    
+                    // Start AI processing interval (4 FPS)
+                    aiProcessingIntervalRef.current = window.setInterval(processAIFrame, AI_INTERVAL_MS);
+                    console.log('[AI] Processing loop started - 4 FPS (every 250ms)');
+                };
+                
+                // Helper: Capture AI frame (separate from rendering, optimized for ML)
+                const captureAIFrame = (): string | null => {
+                    const video = videoRef.current;
+                    if (!video || video.readyState < 3) return null;
+                    
+                    // Use adaptive resolution (higher than rendering for better AI accuracy)
+                    const srcW = video.videoWidth || 640;
+                    const srcH = video.videoHeight || 480;
+                    const targetW = encodeWidthRef.current; // Adaptive (240-400px)
+                    const scale = targetW / srcW;
+                    const targetH = Math.max(1, Math.round(srcH * scale));
+                    
+                    // Create temporary canvas for AI capture (don't interfere with rendering)
+                    const aiCanvas = document.createElement('canvas');
+                    aiCanvas.width = targetW;
+                    aiCanvas.height = targetH;
+                    const ctx = aiCanvas.getContext('2d');
+                    
+                    try {
+                        ctx?.drawImage(video, 0, 0, targetW, targetH);
+                        // Return JPEG with adaptive quality for AI processing
+                        return aiCanvas.toDataURL('image/jpeg', encodeQualityRef.current);
+                    } catch (e) {
+                        return null;
+                    }
+                };
+                
+                // ========================================================================
+                // START BOTH LOOPS
+                // ========================================================================
+                startRenderingLoop();
+                startAIProcessingLoop();
+                console.log('[PROCTORING] Optimized pipeline started successfully');
+                console.log('[ARCHITECTURE] Rendering (30 FPS RAF) + AI (4 FPS interval) running independently');
+                
+                console.log('[PROCTORING] Proctoring started successfully - optimized pipeline running');
             } catch (error) {
                 console.error("[PROCTORING] Failed to start proctoring streams:", error);
                 showToast("Could not start camera or microphone for proctoring.", "error");
@@ -3752,6 +3853,20 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
         // Cleanup function
         return () => {
             console.log('[PROCTORING] Cleanup: stopping all proctoring activities');
+
+            // Stop rendering loop (RAF)
+            if (renderAnimationFrameRef.current) {
+                cancelAnimationFrame(renderAnimationFrameRef.current);
+                renderAnimationFrameRef.current = null;
+                console.log('[RENDERING] RAF loop stopped');
+            }
+            
+            // Stop AI processing loop
+            if (aiProcessingIntervalRef.current) {
+                clearInterval(aiProcessingIntervalRef.current);
+                aiProcessingIntervalRef.current = null;
+                console.log('[AI] Processing loop stopped');
+            }
 
             clearProctorScheduler();
             proctorInFlightRef.current = false;
@@ -3772,6 +3887,8 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
             if (mediaRecorderRef.current && mediaRecorderRef.current.stream) {
                 mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
             }
+            
+            console.log('[PROCTORING] All loops cleaned up successfully');
         };
     }, [clearProctorScheduler, exam._id, isCameraHealthy, proctorDecision.status, requestPauseFromClient, secureModeEnabled, showToast, submitStatus, user._id, proctoringKey]);
 
