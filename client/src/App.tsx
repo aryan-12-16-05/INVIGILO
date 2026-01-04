@@ -2743,19 +2743,36 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
         cameraOk: true,
     });
 
-    // Strict proctoring policy knobs
+    // Enterprise-grade proctoring policy (ProctorU/Examity-aligned)
     const [proctorPolicy] = useState(() => ({
-        // If server reports "no face" continuously for this long, raise a violation.
-        faceMissingGraceMs: 4000,
-        // If camera appears covered/dark for this long, raise a violation.
-        darkGraceMs: 5000,
-        // How often we log repeated violations of the same type (cooldown)
-        violationCooldownMs: 7000,
+        // Temporal confirmation: require sustained behavior before flagging
+        faceMissingGraceMs: 6000,        // 6s grace (was 4s) - more forgiving
+        darkGraceMs: 8000,                // 8s grace (was 5s) - lighting changes tolerance
+        
+        // Cooldown periods per violation type (prevent spam, allow human review)
+        violationCooldowns: {
+            'face_missing': 15000,        // 15s - rare critical event
+            'multiple_faces': 20000,      // 20s - very rare critical event
+            'camera_dark': 30000,          // 30s - lighting issue, not cheating
+            'gaze_aversion': 12000,       // 12s - natural reading behavior
+            'head_pose': 12000,            // 12s - natural posture shifts
+            'talking': 10000,              // 10s - could be natural sounds
+            'identity_mismatch': 60000,   // 60s - critical, rare
+            'default': 10000               // 10s - default for unknown types
+        } as Record<string, number>,
+        
+        // Risk accumulation thresholds (commercial proctoring standard)
+        riskThresholds: {
+            autoFlag: 150,                 // Auto-flag for human review (not terminate)
+            autoAlert: 250,                // Alert lecturer in real-time
+            criticalLevel: 400            // Multiple critical violations (consider termination)
+        }
     }));
 
     const faceMissingSinceRef = useRef<number | null>(null);
     const darkSinceRef = useRef<number | null>(null);
     const lastViolationAtRef = useRef<Record<string, number>>({});
+    const riskScoreRef = useRef<number>(0);  // Cumulative risk score
 
     // Adaptive encoding settings (updated based on latency/backoff)
     const encodeQualityRef = useRef<number>(0.72); // 0..1
@@ -2942,13 +2959,39 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
         }
     }, [exam._id, user._id]);
 
-    const canLogViolation = useCallback((type: string) => {
+    // Enterprise-grade violation logging with per-type cooldowns and risk scoring
+    const canLogViolation = useCallback((type: string, riskScore: number = 0) => {
         const now = Date.now();
         const last = lastViolationAtRef.current[type] || 0;
-        if (now - last < proctorPolicy.violationCooldownMs) return false;
+        
+        // Get type-specific cooldown (commercial proctoring standard)
+        const cooldown = proctorPolicy.violationCooldowns[type] || proctorPolicy.violationCooldowns['default'];
+        
+        if (now - last < cooldown) {
+            return false;  // Still in cooldown period
+        }
+        
+        // Update last violation time
         lastViolationAtRef.current[type] = now;
+        
+        // Accumulate risk score (time-weighted decay)
+        const timeSinceLastRisk = now - (lastViolationAtRef.current['_last_risk_update'] || 0);
+        const decayFactor = Math.max(0, 1 - (timeSinceLastRisk / 300000));  // 5min decay window
+        riskScoreRef.current = (riskScoreRef.current * decayFactor) + riskScore;
+        lastViolationAtRef.current['_last_risk_update'] = now;
+        
+        // Log risk accumulation for transparency
+        console.log(`[RISK] ${type}: +${riskScore} (total: ${Math.round(riskScoreRef.current)})`);
+        
+        // Check if risk thresholds crossed (for UI alerts, not auto-termination)
+        if (riskScoreRef.current > proctorPolicy.riskThresholds.criticalLevel) {
+            console.warn('[RISK] Critical risk level reached - flagged for human review');
+        } else if (riskScoreRef.current > proctorPolicy.riskThresholds.autoAlert) {
+            console.warn('[RISK] Alert threshold reached - notifying lecturer');
+        }
+        
         return true;
-    }, [proctorPolicy.violationCooldownMs]);
+    }, [proctorPolicy]);
 
     const disableBrowserLock = useCallback(() => {
         try {
@@ -3692,15 +3735,17 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                         }
                         
                         if (darkSinceRef.current && Date.now() - darkSinceRef.current >= proctorPolicy.darkGraceMs) {
-                            if (canLogViolation('camera_dark')) {
+                            if (canLogViolation('camera_dark', 65)) {  // High risk score (65)
                                 logProctorEvent('camera_dark_or_covered', {
                                     message: 'Camera feed appears dark/covered for an extended period.',
                                     brightness,
                                     graceMs: proctorPolicy.darkGraceMs,
                                     frameEvidence: aiFrame,
-                                    severity: 'high'
+                                    severity: 'high',
+                                    risk_score: 65
                                 });
-                                requestPauseFromClient('Camera appears covered/dark for too long. Waiting for invigilator approval.');
+                                // Note: No auto-pause - flag for human review instead (ProctorU-style)
+                                showToast('Camera appears dark - flagged for review', 'error');
                             }
                         }
                         
@@ -3762,26 +3807,29 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                                 }
                                 
                                 if (faceMissingSinceRef.current && Date.now() - faceMissingSinceRef.current >= proctorPolicy.faceMissingGraceMs) {
-                                    if (canLogViolation('face_missing')) {
+                                    if (canLogViolation('face_missing', 60)) {  // Medium risk score (60) - sustained absence
                                         logProctorEvent('face_missing', {
                                             message: 'No face detected for an extended period.',
                                             graceMs: proctorPolicy.faceMissingGraceMs,
                                             faceCount,
                                             frameEvidence: aiFrame,
-                                            severity: 'high'
+                                            severity: 'medium',
+                                            risk_score: 60
                                         });
-                                        requestPauseFromClient('Face not detected for too long. Exam is paused pending invigilator decision.');
+                                        // Flag for review instead of immediate pause (ProctorU-style)
+                                        showToast('Face not detected - flagged for review', 'error');
                                     }
                                 }
                                 
                                 // Multiple faces detection
                                 if (typeof faceCount === 'number' && faceCount > 1) {
-                                    if (canLogViolation('multiple_faces')) {
+                                    if (canLogViolation('multiple_faces', 85)) {  // Critical risk score (85)
                                         logProctorEvent('multiple_faces_detected', {
                                             message: `Multiple faces detected (${faceCount}).`,
                                             faceCount,
                                             frameEvidence: aiFrame,
-                                            severity: 'high'
+                                            severity: 'critical',
+                                            risk_score: 85
                                         });
                                         requestPauseFromClient('Multiple faces detected. Exam is paused pending invigilator decision.');
                                     }

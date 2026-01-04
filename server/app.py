@@ -1156,65 +1156,121 @@ def proctor_activity():
                 print(f"[PROCTOR-EVENT] {ev_type} ({severity}) for user {user_id} in exam {exam_id}")
 
 
-            # IMMEDIATE EVENT DETECTION - Record all suspicious activity
+            # ============================================================================
+            # RISK-BASED DETECTION SYSTEM (ProctorU/Examity-style)
+            # ============================================================================
+            # Commercial proctoring systems use temporal confirmation + risk scoring
+            # instead of single-frame immediate violations. This prevents false positives
+            # from natural movements like reading, blinking, posture adjustments.
             
-            # 1. IDENTITY VERIFICATION - High severity
+            # Initialize temporal tracking buffers
+            if 'temporal_buffer' not in st:
+                st['temporal_buffer'] = {
+                    'gaze_away': [],      # Last N gaze detections
+                    'head_turned': [],    # Last N head pose detections
+                    'mouth_open': [],     # Last N mouth detections
+                    'face_missing': [],   # Last N face detection results
+                    'buffer_size': 3      # Require 3/4 consecutive frames (temporal confirmation)
+                }
+            
+            # Helper: Add to temporal buffer with sliding window
+            def add_to_buffer(buffer_name, value):
+                buffer = st['temporal_buffer'][buffer_name]
+                buffer.append(value)
+                max_size = st['temporal_buffer']['buffer_size']
+                if len(buffer) > max_size:
+                    buffer.pop(0)
+                return buffer
+            
+            # Helper: Check if behavior is sustained (2+ out of last 3 frames)
+            def is_sustained(buffer_name, check_value=True):
+                buffer = st['temporal_buffer'][buffer_name]
+                if len(buffer) < 2:  # Need at least 2 frames
+                    return False
+                return buffer.count(check_value) >= 2
+            
+            # ============================================================================
+            # TEMPORAL DETECTION WITH RISK SCORING
+            # ============================================================================
+            
+            # 1. IDENTITY VERIFICATION - Critical (immediate, no temporal needed)
             if not identity_verified and similarity_score is not None:
                 emit('identity_mismatch', {
                     'similarity': float(similarity_score),
-                    'message': 'Face does not match registered student'
-                }, 'high')
+                    'message': 'Face does not match registered student',
+                    'risk_score': 90  # Critical risk
+                }, 'critical')
             
-            # 2. MULTIPLE FACES - High severity (immediate detection)
+            # 2. MULTIPLE FACES - Critical (immediate, no temporal needed)
             if face_count and face_count > 1:
                 emit('multiple_faces', {
                     'count': face_count,
-                    'message': f'{face_count} people detected in frame'
-                }, 'high')
+                    'message': f'{face_count} people detected in frame',
+                    'risk_score': 85  # Critical risk
+                }, 'critical')
             
-            # 3. NO FACE DETECTED - Medium severity
-            if face_count == 0:
+            # 3. FACE MISSING - Medium severity (temporal confirmation required)
+            face_detected = face_count > 0
+            add_to_buffer('face_missing', not face_detected)
+            if is_sustained('face_missing', True):  # 2+ frames with no face
                 emit('face_missing', {
-                    'message': 'No face detected in frame'
+                    'message': 'No face detected (sustained)',
+                    'frames': len([x for x in st['temporal_buffer']['face_missing'] if x]),
+                    'risk_score': 60  # Medium risk
                 }, 'medium')
             
-            # 4. HEAD POSE - Low severity (looking away)
+            # 4. HEAD POSE - Low severity (temporal confirmation required)
             head_pose = results.get('headPose')
-            if head_pose and str(head_pose).lower() not in ('forward', 'center', 'normal'):
-                severity = 'medium' if str(head_pose).lower() in ('down', 'extreme_left', 'extreme_right') else 'low'
+            head_turned = head_pose and str(head_pose).lower() not in ('forward', 'center', 'normal')
+            add_to_buffer('head_turned', head_turned)
+            if is_sustained('head_turned', True):  # 2+ frames turned away
+                severity = 'medium' if str(head_pose).lower() in ('down',) else 'low'
+                risk_score = 40 if severity == 'medium' else 25
                 emit('head_pose', {
                     'pose': head_pose,
-                    'message': f'Head turned {head_pose}'
+                    'message': f'Head turned {head_pose} (sustained)',
+                    'frames': len([x for x in st['temporal_buffer']['head_turned'] if x]),
+                    'risk_score': risk_score
                 }, severity)
             
-            # 5. GAZE DIRECTION - Low severity (eyes looking away)
+            # 5. GAZE DIRECTION - Low severity (temporal confirmation required)
             gaze = results.get('gazeDirection')
-            if gaze and str(gaze).lower() not in ('center', 'normal', 'forward'):
+            gaze_away = gaze and str(gaze).lower() not in ('center', 'normal', 'forward')
+            add_to_buffer('gaze_away', gaze_away)
+            if is_sustained('gaze_away', True):  # 2+ frames looking away
                 emit('gaze_aversion', {
                     'direction': gaze,
-                    'message': f'Eyes looking {gaze}'
+                    'message': f'Eyes looking {gaze} (sustained)',
+                    'frames': len([x for x in st['temporal_buffer']['gaze_away'] if x]),
+                    'risk_score': 30  # Low risk (natural reading behavior)
                 }, 'low')
             
-            # 6. MOUTH STATUS - Medium severity (talking detected)
+            # 6. MOUTH MOVEMENT - Low severity (temporal confirmation required)
             mouth = results.get('mouthStatus')
-            if mouth and str(mouth).lower() in ('open', 'talking', 'speaking'):
+            mouth_open = mouth and str(mouth).lower() in ('open', 'talking', 'speaking')
+            add_to_buffer('mouth_open', mouth_open)
+            if is_sustained('mouth_open', True):  # 2+ frames with mouth open
                 emit('talking', {
                     'status': mouth,
-                    'message': 'Mouth movement detected'
-                }, 'medium')
+                    'message': 'Sustained mouth movement detected',
+                    'frames': len([x for x in st['temporal_buffer']['mouth_open'] if x]),
+                    'risk_score': 35  # Low-medium risk (could be talking to someone)
+                }, 'low')
             
-            # 7. BACKGROUND CHANGE - High severity (detects hands, objects, people)
+            # 7. BACKGROUND CHANGE - High severity (immediate, but with higher threshold)
             if st['reference_background'] is not None and frame is not None:
                 try:
                     current_small = cv2.resize(frame, (160, 120))
                     diff = cv2.absdiff(st['reference_background'], current_small)
                     diff_score = np.mean(diff)
                     
-                    BACKGROUND_THRESHOLD = 20.0  # Detect significant background changes
+                    # Increased threshold to reduce false positives from lighting changes
+                    BACKGROUND_THRESHOLD = 30.0  # More tolerant (was 20.0)
                     if diff_score > BACKGROUND_THRESHOLD:
                         emit('background_change', {
                             'change_score': float(diff_score),
-                            'message': 'Background changed - possible external assistance'
+                            'message': 'Significant background change detected',
+                            'risk_score': 70  # High risk
                         }, 'high')
                 except Exception as e:
                     print(f"[PROCTOR] Error in background detection: {e}")
@@ -1332,34 +1388,33 @@ def log_suspicious_activity():
         if not activity_type:
             return jsonify({"error": "activityType is required"}), 400
         
-        # 2. Determine severity based on activity type
+        # 2. Determine severity and risk score based on activity type (ProctorU-style)
+        # Risk scoring aligns with commercial proctoring platforms:
+        # - Critical (80-100): Definitive cheating indicators
+        # - High (60-79): Strong suspicious behavior
+        # - Medium (40-59): Moderate concern, needs review
+        # - Low (20-39): Minor infractions, natural behavior
         severity_map = {
-            'fullscreen_exit': 'critical',
-            'tab_switch': 'high',
-            'tab_unfocused': 'high',
-            'window_blur': 'medium',
-            'dev_tools_opened': 'critical',
-            'dev_tools_attempt': 'high',
-            'right_click': 'low',
-            'copy_attempted': 'medium',
-            'paste_attempted': 'medium',
-            'print_screen': 'high',
-            'screenshot_attempt': 'high',
-            'multiple_monitors': 'medium',
-            'browser_resize': 'low'
+            'fullscreen_exit': ('critical', 85),
+            'tab_switch': ('high', 70),
+            'tab_unfocused': ('high', 65),
+            'window_blur': ('medium', 50),
+            'dev_tools_opened': ('critical', 95),
+            'dev_tools_attempt': ('high', 75),
+            'right_click': ('low', 25),
+            'copy_attempted': ('medium', 45),
+            'paste_attempted': ('medium', 45),
+            'print_screen': ('high', 70),
+            'screenshot_attempt': ('high', 70),
+            'multiple_monitors': ('medium', 55),
+            'browser_resize': ('low', 20)
         }
         
-        severity = severity_map.get(activity_type, 'medium')
+        severity, risk_score = severity_map.get(activity_type, ('medium', 40))
         
-        # 3. Calculate violation score
-        score_map = {
-            'critical': 50,
-            'high': 30,
-            'medium': 15,
-            'low': 5
-        }
-        
-        score = score_map.get(severity, 10)
+        # 3. Store risk score in details for aggregation
+        details['risk_score'] = risk_score
+        details['severity'] = severity
         
         # 4. Create activity record
         activity_record = {

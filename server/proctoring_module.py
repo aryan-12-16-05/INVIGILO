@@ -21,37 +21,38 @@ BLINK_THRESHOLD = 3.6
 # Higher value = more extreme eye movement required (stricter)
 # Lower value = detects even small eye movements (more sensitive)
 # Typical range: 1.0 - 1.5
-# Setting to 1.3 for fair and strong detection
-GAZE_RATIO_THRESHOLD = 1.3
+# Setting to 1.5 for natural reading and 4 FPS temporal confirmation
+GAZE_RATIO_THRESHOLD = 1.5
 
 # Threshold value for binary eye segmentation
 # Lower value = more sensitive to darker pixels (pupil/iris)
 # Higher value = requires stronger contrast
 # Typical range: 40 - 70
-# Setting to 45 for better pupil detection in various lighting
-GAZE_THRESHOLD_VALUE = 45
+# Setting to 42 for better pupil detection with reduced false positives
+GAZE_THRESHOLD_VALUE = 42
 
 # === MOUTH DETECTION THRESHOLDS ===
 # Distance in pixels between outer top and bottom lip
 # Higher value = mouth must open wider to register
 # Typical range: 15 - 30 pixels (depends on camera distance)
-MOUTH_OPEN_THRESHOLD = 23
+# Setting to 28 to avoid false positives from breathing, yawning (requires clear talking)
+MOUTH_OPEN_THRESHOLD = 28
 
 # === HEAD POSE DETECTION THRESHOLDS ===
 # Angle in degrees for vertical head movement (up/down)
 # Higher value = more head tilt required (less strict)
 # Lower value = detects smaller head movements (more strict)
 # Typical range: 20 - 40 degrees
-# Setting to 25 for fair and strong detection
-HEAD_VERTICAL_ANGLE_THRESHOLD = 25
+# Setting to 35 for natural reading angles and posture shifts (ProctorU-style)
+HEAD_VERTICAL_ANGLE_THRESHOLD = 35
 
 # Horizontal offset in pixels for lateral head movement (left/right)
 # Distance nose must be from eye center line
 # Higher value = more head turn required (less strict)
 # Lower value = detects smaller head turns (more strict)
 # Typical range: 5 - 15 pixels (depends on camera distance)
-# Setting to 8 for fair and strong detection
-HEAD_HORIZONTAL_OFFSET_THRESHOLD = 8
+# Setting to 12 for natural movement tolerance (Examity-style)
+HEAD_HORIZONTAL_OFFSET_THRESHOLD = 12
 
 # === AUDIO DETECTION THRESHOLDS ===
 # Amplitude range for human voice detection
