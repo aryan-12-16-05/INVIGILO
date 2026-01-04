@@ -575,8 +575,8 @@ export default function App() {
             case 'results-analysis': return currentUser && <ResultsAnalysisPage key="results-analysis" user={currentUser} exams={exams} onLogout={handleLogout} onBack={() => navigateTo('student-dashboard')} showToast={showToast} navigateTo={navigateTo} />;
                 case 'lecturer-dashboard': return currentUser && <LecturerDashboard key="lecturer-dashboard" user={currentUser} exams={exams} onLogout={handleLogout} onBack={() => navigateTo('landing')} onExamChange={fetchExams} showToast={showToast} navigateTo={navigateTo} setSelectedExamIdForProctoring={setSelectedExamIdForProctoring} />;
             case 'lecturer-live-exams': return currentUser && <LecturerLiveExamsList key="lecturer-live-exams" lecturerId={currentUser._id} onBack={() => navigateTo('lecturer-dashboard')} onSelectExam={(examId, examTitle) => { setSelectedExamIdForProctoring(examId); setSelectedExamTitle(examTitle); navigateTo('lecturer-live-monitor'); }} />;
-            case 'lecturer-live-monitor': return currentUser && selectedExamIdForProctoring && <LiveMonitoringDashboard key="lecturer-live-monitor" examId={selectedExamIdForProctoring} examTitle={selectedExamTitle} onBack={() => navigateTo('lecturer-live-exams')} />;
-            case 'lecturer-proctor': return currentUser && selectedExamIdForProctoring && <LecturerProctoringMonitor key="lecturer-proctor" examId={selectedExamIdForProctoring} onBack={() => navigateTo('lecturer-live-exams')} showToast={showToast} />;
+            case 'lecturer-live-monitor': return currentUser && selectedExamIdForProctoring && <LiveMonitoringDashboard key="lecturer-live-monitor" examId={selectedExamIdForProctoring} examTitle={selectedExamTitle} onBack={() => navigateTo('lecturer-dashboard')} />;
+            case 'lecturer-proctor': return currentUser && selectedExamIdForProctoring && <LecturerProctoringMonitor key="lecturer-proctor" examId={selectedExamIdForProctoring} onBack={() => navigateTo('lecturer-dashboard')} showToast={showToast} />;
             case 'lecturer-report': return currentUser && selectedExamIdForProctoring && <LecturerExamReport key="lecturer-report" examId={selectedExamIdForProctoring} onBack={() => navigateTo('lecturer-dashboard')} showToast={showToast} />;
             case 'live-proctoring': return currentUser && <LiveProctoring key="live-proctoring" user={currentUser} onBack={() => navigateTo(currentUser?.role === 'student' ? 'student-dashboard' : 'lecturer-dashboard')} />;
             case 'help': return <HelpPage key="help" onBack={() => navigateTo(currentUser?.role === 'student' ? 'student-dashboard' : 'lecturer-dashboard')} />;
@@ -3859,10 +3859,13 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                     const video = videoRef.current;
                     if (!video || video.readyState < 3) return null;
                     
-                    // Use adaptive resolution (higher than rendering for better AI accuracy)
+                    // CRITICAL FIX: Use higher resolution for AI detection (640x480 minimum)
+                    // Previous adaptive scaling was over-downscaling frames, causing detection failures
                     const srcW = video.videoWidth || 640;
                     const srcH = video.videoHeight || 480;
-                    const targetW = encodeWidthRef.current; // Adaptive (240-400px)
+                    
+                    // Use 640x480 for AI (ensures facial landmarks are clearly visible)
+                    const targetW = 640;
                     const scale = targetW / srcW;
                     const targetH = Math.max(1, Math.round(srcH * scale));
                     
@@ -3874,8 +3877,9 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                     
                     try {
                         ctx?.drawImage(video, 0, 0, targetW, targetH);
-                        // Return JPEG with adaptive quality for AI processing
-                        return aiCanvas.toDataURL('image/jpeg', encodeQualityRef.current);
+                        // CRITICAL FIX: Use higher quality (0.85) for AI - prevents JPEG artifacts
+                        // that interfere with facial landmark detection
+                        return aiCanvas.toDataURL('image/jpeg', 0.85);
                     } catch (e) {
                         return null;
                     }
@@ -4357,14 +4361,19 @@ const ResultScreen = ({ result, onDone }: { result: ExamResult, onDone: () => vo
     const correctCount = (result.perQuestion ?? []).filter(q => q.correct).length;
     const wrongCount = Math.max(0, totalQuestions - correctCount);
 
-    const score = Number.isFinite(Number(result.score)) ? Number(result.score) : 0;
-    const scoreTone = score >= 85 ? 'emerald' : score >= 60 ? 'sky' : 'amber';
-    const scoreRing = scoreTone === 'emerald'
+    // Check if exam was terminated by proctor
+    const isTerminated = (result as any).terminated === true;
+    
+    const score = isTerminated ? 0 : (Number.isFinite(Number(result.score)) ? Number(result.score) : 0);
+    const scoreTone = isTerminated ? 'red' : (score >= 85 ? 'emerald' : score >= 60 ? 'sky' : 'amber');
+    const scoreRing = scoreTone === 'red'
+        ? 'from-red-400/30 via-red-400/10 to-transparent'
+        : scoreTone === 'emerald'
         ? 'from-emerald-400/30 via-emerald-400/10 to-transparent'
         : scoreTone === 'sky'
             ? 'from-sky-400/30 via-sky-400/10 to-transparent'
             : 'from-amber-400/30 via-amber-400/10 to-transparent';
-    const scoreText = scoreTone === 'emerald' ? 'text-emerald-300' : scoreTone === 'sky' ? 'text-sky-300' : 'text-amber-300';
+    const scoreText = scoreTone === 'red' ? 'text-red-300' : (scoreTone === 'emerald' ? 'text-emerald-300' : scoreTone === 'sky' ? 'text-sky-300' : 'text-amber-300');
 
     return (
         <motion.div
@@ -4403,13 +4412,15 @@ const ResultScreen = ({ result, onDone }: { result: ExamResult, onDone: () => vo
                                     <div className="text-slate-400 text-sm mt-1">You’ve completed the exam successfully.</div>
                                 </div>
                                 <div className={cn('px-3 py-1 rounded-full text-xs font-semibold border',
-                                    scoreTone === 'emerald'
+                                    isTerminated
+                                        ? 'bg-red-500/10 text-red-200 border-red-500/20'
+                                        : scoreTone === 'emerald'
                                         ? 'bg-emerald-500/10 text-emerald-200 border-emerald-500/20'
                                         : scoreTone === 'sky'
                                             ? 'bg-sky-500/10 text-sky-200 border-sky-500/20'
                                             : 'bg-amber-500/10 text-amber-200 border-amber-500/20'
                                 )}>
-                                    Final Score
+                                    {isTerminated ? 'Terminated' : 'Final Score'}
                                 </div>
                             </div>
 
@@ -4419,6 +4430,14 @@ const ResultScreen = ({ result, onDone }: { result: ExamResult, onDone: () => vo
                                 </div>
                                 <div className="pb-2 text-slate-300 font-semibold text-xl">%</div>
                             </div>
+                            
+                            {isTerminated && (
+                                <div className="mt-4 p-3 rounded-lg bg-red-500/10 border border-red-500/20">
+                                    <p className="text-red-200 text-sm font-semibold">
+                                        Score: 0 (Exam terminated by invigilator)
+                                    </p>
+                                </div>
+                            )}
 
                             <div className="mt-6 grid grid-cols-3 gap-3">
                                 <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">

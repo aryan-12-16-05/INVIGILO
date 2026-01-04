@@ -1143,6 +1143,7 @@ def proctor_activity():
                         print(f"[PROCTOR] Error encoding frame: {e}")
                         return  # Don't record event if frame capture fails
                 
+                # CRITICAL FIX: Store in database
                 proctor_events_collection.insert_one({
                     'examId': str(exam_id),
                     'userId': str(user_id),
@@ -1152,6 +1153,22 @@ def proctor_activity():
                     'timestamp': now,
                     'frameEvidence': frame_evidence  # Store captured frame
                 })
+                
+                # CRITICAL FIX: Emit Socket.IO event to lecturer dashboard for live monitoring
+                try:
+                    socketio.emit(ev_type, {
+                        'examId': str(exam_id),
+                        'userId': str(user_id),
+                        'eventType': ev_type,
+                        'details': details,
+                        'severity': severity,
+                        'timestamp': now.isoformat() + 'Z',
+                        'message': details.get('message', ev_type)
+                    }, room=str(exam_id), namespace='/proctor')
+                    print(f"[PROCTOR-SOCKET] Emitted {ev_type} to room {exam_id}")
+                except Exception as e:
+                    print(f"[PROCTOR-SOCKET] Error emitting {ev_type}: {e}")
+                
                 st['last_emit'][ev_type] = now
                 print(f"[PROCTOR-EVENT] {ev_type} ({severity}) for user {user_id} in exam {exam_id}")
 
@@ -1170,7 +1187,9 @@ def proctor_activity():
                     'head_turned': [],    # Last N head pose detections
                     'mouth_open': [],     # Last N mouth detections
                     'face_missing': [],   # Last N face detection results
-                    'buffer_size': 3      # Require 3/4 consecutive frames (temporal confirmation)
+                    'identity_checks': [],  # Last N identity verification results
+                    'buffer_size': 3,     # Require 2/3 consecutive frames (temporal confirmation)
+                    'last_identity_check': 0  # Timestamp of last identity verification
                 }
             
             # Helper: Add to temporal buffer with sliding window
@@ -1193,13 +1212,27 @@ def proctor_activity():
             # TEMPORAL DETECTION WITH RISK SCORING
             # ============================================================================
             
-            # 1. IDENTITY VERIFICATION - Critical (immediate, no temporal needed)
-            if not identity_verified and similarity_score is not None:
-                emit('identity_mismatch', {
-                    'similarity': float(similarity_score),
-                    'message': 'Face does not match registered student',
-                    'risk_score': 90  # Critical risk
-                }, 'critical')
+            # 1. CONTINUOUS IDENTITY VERIFICATION - Critical (re-verify every 2-3 seconds)
+            # CRITICAL FIX: Re-verify identity periodically, not just once at start
+            current_time = datetime.datetime.utcnow().timestamp()
+            time_since_last_check = current_time - st['temporal_buffer']['last_identity_check']
+            
+            # Re-verify every 2.5 seconds (10 frames at 4 FPS)
+            if time_since_last_check >= 2.5:
+                st['temporal_buffer']['last_identity_check'] = current_time
+                
+                # Add current identity verification result to buffer
+                identity_failed = not identity_verified and similarity_score is not None
+                add_to_buffer('identity_checks', identity_failed)
+                
+                # Trigger violation if identity fails consistently (2+ out of last 3 checks)
+                if is_sustained('identity_checks', True):
+                    emit('identity_mismatch', {
+                        'similarity': float(similarity_score) if similarity_score is not None else 0.0,
+                        'message': 'Face does not match registered student (sustained)',
+                        'checks_failed': len([x for x in st['temporal_buffer']['identity_checks'] if x]),
+                        'risk_score': 90  # Critical risk
+                    }, 'critical')
             
             # 2. MULTIPLE FACES - Critical (immediate, no temporal needed)
             if face_count and face_count > 1:
@@ -2069,6 +2102,24 @@ def submit_exam(exam_id):
 
         if not user_id or not answers:
             return jsonify({"error": "User ID and answers are required"}), 400
+        
+        # CRITICAL: Check if exam was terminated by proctor - enforce zero score
+        existing_attempt = exam_attempts_collection.find_one({
+            'exam_id': exam_id,
+            'user_id': user_id
+        })
+        
+        if existing_attempt and existing_attempt.get('status') == 'terminated_by_proctor':
+            app.logger.warning(f'[SUBMIT] Student {user_id} attempted to submit terminated exam - enforcing zero score')
+            return jsonify({
+                'score': 0,
+                'totalMarks': existing_attempt.get('total_marks', 0),
+                'percentage': 0,
+                'correctCount': 0,
+                'terminated': True,
+                'message': 'Score: 0 (Exam terminated by invigilator)',
+                'perQuestion': []
+            }), 200
         
         exam = exams_collection.find_one({'_id': ObjectId(exam_id)})
             
@@ -4218,10 +4269,11 @@ def handle_pause_student(data):
 
 @socketio.on('stop_student', namespace='/proctor')
 def handle_stop_student(data):
-    """Lecturer stops/terminates a student's exam."""
+    """Lecturer stops/terminates a student's exam - ENFORCES ZERO SCORE."""
     try:
         exam_id = data.get('examId')
         user_id = data.get('userId')
+        reason = data.get('reason', 'Removed due to suspicious behavior')
         
         if not exam_id or not user_id:
             emit('error', {'message': 'examId and userId are required'})
@@ -4234,9 +4286,35 @@ def handle_stop_student(data):
             exam_id=exam_id,
             user_id=user_id,
             status='terminated',
-            reason='Removed due to suspicious behavior',
+            reason=reason,
             actor_id=None
         )
+        
+        # CRITICAL: Force final score to ZERO in attempt record
+        try:
+            exam_attempts_collection.update_one(
+                {
+                    'exam_id': exam_id,
+                    'user_id': user_id
+                },
+                {
+                    '$set': {
+                        'status': 'terminated_by_proctor',
+                        'score': 0,
+                        'percentage': 0,
+                        'correct_count': 0,
+                        'final_score': 0,
+                        'score_overridden': True,
+                        'override_reason': reason,
+                        'terminated_at': datetime.datetime.utcnow(),
+                        'terminated_by': 'lecturer'
+                    }
+                },
+                upsert=True
+            )
+            app.logger.info(f'[PROCTOR] Forced zero score for terminated student {user_id}')
+        except Exception as e:
+            app.logger.error(f'[PROCTOR] Error setting zero score: {e}')
         
         # Immediately notify the student via their personal room
         student_room = f"{exam_id}:{user_id}"
@@ -4244,7 +4322,7 @@ def handle_stop_student(data):
             'examId': exam_id,
             'userId': user_id,
             'status': 'terminated',
-            'reason': 'Removed due to suspicious behavior',
+            'reason': reason,
             'timestamp': datetime.datetime.utcnow().isoformat() + 'Z'
         }, room=student_room, namespace='/proctor')
         
