@@ -31,6 +31,25 @@ interface LiveStudent {
     screenStreamUrl?: string;
 }
 
+// Violation Queue Item - each violation is a separate queue entry
+interface ViolationQueueItem {
+    id: string; // Unique ID for this violation (timestamp + userId + violationType)
+    userId: string;
+    studentId: string;
+    name: string;
+    violationType: string; // e.g., "face_missing", "identity_mismatch", "multiple_faces"
+    severity: 'critical' | 'suspicious';
+    timestamp: number;
+    status: 'normal' | 'warning' | 'suspicious' | 'critical';
+    faceDetected: boolean;
+    gaze: string;
+    headPose: string;
+    violations: number;
+    riskScore: number;
+    frameEvidence?: string; // Video frame at time of violation
+    details?: any; // Additional violation details
+}
+
 const Button = ({ children, variant = 'default', size = 'default', className = '', onClick, disabled }: any) => (
     <button
         onClick={onClick}
@@ -222,9 +241,18 @@ export default function LiveMonitoringDashboard({
     const [currentPage, setCurrentPage] = useState(0);
     const [currentViolationIndex, setCurrentViolationIndex] = useState(0);
     const [selectedStudent, setSelectedStudent] = useState<LiveStudent | null>(null);
-    const socketRef = useRef<Socket | null>(null);    const videoFramesRef = useRef<Record<string, string>>({});
+    
+    // QUEUE-BASED VIOLATION REVIEW SYSTEM
+    const [violationQueue, setViolationQueue] = useState<ViolationQueueItem[]>([]);
+    const processedViolationsRef = useRef<Set<string>>(new Set()); // Track processed violation IDs
+    const lastViolationCountRef = useRef<Map<string, number>>(new Map()); // Track violation count per user
+    
+    const socketRef = useRef<Socket | null>(null);
+    const videoFramesRef = useRef<Record<string, string>>({});
     const screenFramesRef = useRef<Record<string, string>>({});
-    const violationClipsRef = useRef<Record<string, string[]>>({});    const [stats, setStats] = useState({
+    const violationClipsRef = useRef<Record<string, string[]>>({});
+    
+    const [stats, setStats] = useState({
         activeExams: 1,
         studentsOnline: 0,
         activeViolations: 0
@@ -291,7 +319,84 @@ export default function LiveMonitoringDashboard({
         };
     }, [examId]);
 
-    // Get violations for review panel - only critical and suspicious cases
+    // QUEUE MANAGEMENT: Add violations to queue when detected
+    useEffect(() => {
+        students.forEach(student => {
+            const lastCount = lastViolationCountRef.current.get(student.userId) || 0;
+            const currentCount = student.violations;
+            
+            // New violation detected (count increased)
+            if (currentCount > lastCount && (student.status === 'critical' || student.status === 'suspicious')) {
+                const newViolationsCount = currentCount - lastCount;
+                
+                // Add each new violation as a separate queue item
+                for (let i = 0; i < newViolationsCount; i++) {
+                    const violationId = `${student.userId}-${Date.now()}-${i}`;
+                    
+                    // Avoid duplicate queue entries
+                    if (!processedViolationsRef.current.has(violationId)) {
+                        const queueItem: ViolationQueueItem = {
+                            id: violationId,
+                            userId: student.userId,
+                            studentId: student.studentId,
+                            name: student.name,
+                            violationType: student.latestViolation || 'unknown',
+                            severity: student.status as 'critical' | 'suspicious',
+                            timestamp: Date.now(),
+                            status: student.status,
+                            faceDetected: student.faceDetected,
+                            gaze: student.gaze,
+                            headPose: student.headPose,
+                            violations: currentCount,
+                            riskScore: Math.min(100, currentCount * 15),
+                            frameEvidence: videoFramesRef.current[student.userId],
+                            details: {
+                                violationTime: student.violationTime,
+                                latestViolation: student.latestViolation
+                            }
+                        };
+                        
+                        // Add to queue (FIFO - push to end)
+                        setViolationQueue(prev => [...prev, queueItem]);
+                        processedViolationsRef.current.add(violationId);
+                        
+                        console.log(`[QUEUE] Added violation ${violationId} to queue (${student.name} - ${student.latestViolation})`);
+                    }
+                }
+            }
+            
+            // Update last known violation count
+            lastViolationCountRef.current.set(student.userId, currentCount);
+        });
+    }, [students]);
+
+    // Get current violation from queue (FIFO)
+    const currentViolation = violationQueue[currentViolationIndex];
+
+    // Handle queue navigation
+    const handleNext = () => {
+        if (currentViolationIndex < violationQueue.length - 1) {
+            setCurrentViolationIndex(prev => prev + 1);
+        }
+    };
+
+    const handlePrevious = () => {
+        if (currentViolationIndex > 0) {
+            setCurrentViolationIndex(prev => prev - 1);
+        }
+    };
+
+    // Remove violation from queue after action (Approve/Dismiss/Flag)
+    const removeFromQueue = (violationId: string) => {
+        setViolationQueue(prev => prev.filter(v => v.id !== violationId));
+        // Adjust index if needed
+        if (currentViolationIndex >= violationQueue.length - 1) {
+            setCurrentViolationIndex(Math.max(0, violationQueue.length - 2));
+        }
+    };
+
+    // Get violations for review panel - DEPRECATED (now using queue)
+    // Keep for backward compatibility but queue takes priority
     const violationReviews = students
         .filter(s => {
             // Only show in review panel if status is critical or suspicious (high-risk violations)
@@ -302,8 +407,6 @@ export default function LiveMonitoringDashboard({
             const severityOrder = { critical: 4, suspicious: 3, warning: 2, normal: 1 };
             return severityOrder[b.status] - severityOrder[a.status];
         });
-
-    const currentViolation = violationReviews[currentViolationIndex];
 
     // Polling for real-time data
     useEffect(() => {
@@ -656,29 +759,49 @@ export default function LiveMonitoringDashboard({
                     )}
                 </div>
 
-                {/* Active Review Panel - 25% width - Focused Review */}
+                {/* Active Review Panel - 25% width - Queue-Based Review */}
                 <div className="flex-[0.25]">
                     <div className="bg-slate-900/80 backdrop-blur-xl border-2 border-white/20 rounded-2xl p-5 sticky top-32 shadow-2xl">
-                        <div className="flex items-center gap-2 mb-5">
-                            <AlertTriangle className="h-6 w-6 text-red-400" />
-                            <h3 className="text-xl font-bold text-white">Active Review</h3>
+                        <div className="flex items-center justify-between mb-5">
+                            <div className="flex items-center gap-2">
+                                <AlertTriangle className="h-6 w-6 text-red-400" />
+                                <h3 className="text-xl font-bold text-white">Action Review Queue</h3>
+                            </div>
+                            {violationQueue.length > 0 && (
+                                <div className="bg-red-600 text-white px-3 py-1 rounded-full text-xs font-bold">
+                                    {violationQueue.length} in queue
+                                </div>
+                            )}
                         </div>
 
-                        {violationReviews.length === 0 ? (
+                        {violationQueue.length === 0 ? (
                             <div className="text-center py-16">
                                 <CheckCircle className="h-20 w-20 text-green-400 mx-auto mb-4" />
                                 <p className="text-green-400 font-bold text-lg mb-2">All Clear!</p>
-                                <p className="text-sm text-gray-400">No violations detected</p>
+                                <p className="text-sm text-gray-400">No violations in queue</p>
                             </div>
                         ) : (
                             <AnimatePresence mode="wait">
                                 <motion.div
-                                    key={currentViolationIndex}
+                                    key={currentViolation?.id}
                                     initial={{ opacity: 0, y: 10 }}
                                     animate={{ opacity: 1, y: 0 }}
                                     exit={{ opacity: 0, y: -10 }}
                                     className="space-y-4"
                                 >
+                                    {/* Queue Position Indicator */}
+                                    <div className="bg-blue-500/20 border border-blue-500/30 rounded-xl p-3">
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-xs font-semibold text-blue-300 uppercase">Queue Position</span>
+                                            <span className="text-sm font-bold text-blue-400">
+                                                {currentViolationIndex + 1} of {violationQueue.length}
+                                            </span>
+                                        </div>
+                                        <div className="mt-2 text-xs text-gray-400">
+                                            {violationQueue.length - currentViolationIndex - 1} waiting behind
+                                        </div>
+                                    </div>
+
                                     {/* Primary Feed with Thick Red Border */}
                                     <div className="relative">
                                         <div className="aspect-[4/3] bg-black rounded-xl border-4 border-red-500 relative overflow-hidden shadow-xl shadow-red-500/30">
@@ -688,17 +811,29 @@ export default function LiveMonitoringDashboard({
                                                 REVIEWING
                                             </div>
 
-                                            {/* Violations Alert */}
+                                            {/* Risk Score Badge */}
                                             <div className="absolute top-3 right-3 bg-red-600 text-white px-4 py-2 rounded-lg z-20 font-bold text-sm">
-                                                {currentViolation.violations} VIOLATIONS
+                                                RISK: {currentViolation?.riskScore}%
                                             </div>
 
-                                            {/* Looping Violation Clip */}
-                                            <ViolationClipPlayer 
-                                                userId={currentViolation.userId}
-                                                clips={violationClipsRef.current[currentViolation.userId] || []}
-                                                liveFrame={videoFramesRef.current[currentViolation.userId]}
-                                            />
+                                            {/* Live Frame or Captured Evidence */}
+                                            {currentViolation?.frameEvidence ? (
+                                                <img 
+                                                    src={currentViolation.frameEvidence} 
+                                                    alt="Violation Evidence"
+                                                    className="w-full h-full object-cover"
+                                                />
+                                            ) : videoFramesRef.current[currentViolation?.userId] ? (
+                                                <img 
+                                                    src={videoFramesRef.current[currentViolation.userId]} 
+                                                    alt="Live Feed"
+                                                    className="w-full h-full object-cover"
+                                                />
+                                            ) : (
+                                                <div className="absolute inset-0 flex items-center justify-center">
+                                                    <Camera className="h-12 w-12 text-slate-600" />
+                                                </div>
+                                            )}
                                         </div>
                                     </div>
 
@@ -707,13 +842,13 @@ export default function LiveMonitoringDashboard({
                                         <div className="flex items-center justify-between mb-3">
                                             <span className="text-sm font-semibold text-gray-300">Risk Score</span>
                                             <span className="text-2xl font-bold text-red-400">
-                                                {Math.min(100, currentViolation.violations * 15)}%
+                                                {currentViolation?.riskScore}%
                                             </span>
                                         </div>
                                         <div className="w-full bg-white/10 rounded-full h-3 overflow-hidden">
                                             <div
                                                 className="h-full bg-gradient-to-r from-red-600 to-red-400 transition-all duration-500"
-                                                style={{ width: `${Math.min(100, currentViolation.violations * 15)}%` }}
+                                                style={{ width: `${currentViolation?.riskScore}%` }}
                                             />
                                         </div>
                                     </div>
@@ -722,83 +857,102 @@ export default function LiveMonitoringDashboard({
                                     <div className="bg-white/5 backdrop-blur-sm border border-white/10 rounded-xl p-4">
                                         <div className="flex items-start justify-between mb-2">
                                             <div>
-                                                <p className="text-white font-bold text-lg">{currentViolation.name}</p>
-                                                <p className="text-sm text-gray-400">{currentViolation.studentId}</p>
+                                                <p className="text-white font-bold text-lg">{currentViolation?.name}</p>
+                                                <p className="text-sm text-gray-400">{currentViolation?.studentId}</p>
                                             </div>
                                             <span className={cn(
                                                 'px-3 py-1 rounded-lg text-xs font-bold uppercase',
-                                                currentViolation.status === 'critical' && 'bg-red-500 text-white',
-                                                currentViolation.status === 'suspicious' && 'bg-orange-500 text-white',
-                                                currentViolation.status === 'warning' && 'bg-yellow-500 text-black'
+                                                currentViolation?.severity === 'critical' && 'bg-red-500 text-white',
+                                                currentViolation?.severity === 'suspicious' && 'bg-orange-500 text-white'
                                             )}>
-                                                {currentViolation.status}
+                                                {currentViolation?.severity}
                                             </span>
+                                        </div>
+                                        <div className="mt-2 text-xs text-gray-500">
+                                            Violation ID: {currentViolation?.id.slice(-8)}
                                         </div>
                                     </div>
 
                                     {/* Specific Triggers */}
                                     <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4">
-                                        <p className="text-xs font-semibold text-red-300 mb-3 uppercase">Critical Violations Detected</p>
+                                        <p className="text-xs font-semibold text-red-300 mb-3 uppercase">Violation Details</p>
                                         <div className="space-y-2">
-                                            {currentViolation.latestViolation && (
+                                            <div className="flex items-start gap-2 text-sm">
+                                                <AlertTriangle className="h-4 w-4 text-red-400 mt-0.5 flex-shrink-0" />
+                                                <div>
+                                                    <span className="text-gray-300 font-semibold">{currentViolation?.violationType}</span>
+                                                    <p className="text-xs text-gray-500 mt-1">
+                                                        {new Date(currentViolation?.timestamp || 0).toLocaleTimeString()}
+                                                    </p>
+                                                </div>
+                                            </div>
+                                            {currentViolation?.details?.latestViolation && (
                                                 <div className="flex items-start gap-2 text-sm">
                                                     <AlertTriangle className="h-4 w-4 text-red-400 mt-0.5 flex-shrink-0" />
-                                                    <span className="text-gray-300">{currentViolation.latestViolation}</span>
+                                                    <span className="text-gray-300">{currentViolation.details.latestViolation}</span>
                                                 </div>
                                             )}
-                                            {!currentViolation.faceDetected && (
+                                            )}
+                                            {!currentViolation?.faceDetected && (
                                                 <div className="flex items-start gap-2 text-sm">
                                                     <XCircle className="h-4 w-4 text-red-400 mt-0.5 flex-shrink-0" />
                                                     <span className="text-gray-300">Face not detected</span>
                                                 </div>
                                             )}
-                                            {currentViolation.gaze !== 'forward' && (
+                                            {currentViolation?.gaze !== 'forward' && (
                                                 <div className="flex items-start gap-2 text-sm">
                                                     <Eye className="h-4 w-4 text-orange-400 mt-0.5 flex-shrink-0" />
-                                                    <span className="text-gray-300">Suspicious gaze direction</span>
+                                                    <span className="text-gray-300">Gaze: {currentViolation?.gaze}</span>
                                                 </div>
                                             )}
-                                            {currentViolation.headPose !== 'normal' && (
+                                            {currentViolation?.headPose !== 'normal' && (
                                                 <div className="flex items-start gap-2 text-sm">
                                                     <Activity className="h-4 w-4 text-orange-400 mt-0.5 flex-shrink-0" />
-                                                    <span className="text-gray-300">Abnormal head pose</span>
+                                                    <span className="text-gray-300">Head: {currentViolation?.headPose}</span>
                                                 </div>
                                             )}
                                         </div>
-                                        {currentViolation.violationTime && (
-                                            <p className="text-xs text-gray-500 mt-3">{currentViolation.violationTime}</p>
-                                        )}
                                     </div>
 
-                                    {/* Review Navigation - Prominent */}
+                                    {/* Queue Navigation - Prominent */}
                                     <div className="flex items-center justify-between bg-gradient-to-r from-slate-800 to-slate-700 rounded-xl p-3 border border-white/20">
                                         <button
                                             onClick={handlePrevious}
                                             className="p-2 hover:bg-white/10 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                                            disabled={violationReviews.length <= 1}
+                                            disabled={currentViolationIndex === 0}
+                                            title="Previous in queue"
                                         >
                                             <ChevronLeft className="h-6 w-6 text-white" />
                                         </button>
                                         <div className="text-center">
                                             <p className="text-sm font-bold text-white">
-                                                Review {currentViolationIndex + 1} of {violationReviews.length}
+                                                Processing {currentViolationIndex + 1} of {violationQueue.length}
                                             </p>
-                                            <p className="text-xs text-gray-400">Navigate between flagged students</p>
+                                            <p className="text-xs text-gray-400">FIFO Queue System</p>
                                         </div>
                                         <button
                                             onClick={handleNext}
                                             className="p-2 hover:bg-white/10 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                                            disabled={violationReviews.length <= 1}
+                                            disabled={currentViolationIndex >= violationQueue.length - 1}
+                                            title="Next in queue"
                                         >
                                             <ChevronRight className="h-6 w-6 text-white" />
                                         </button>
                                     </div>
 
-                                    {/* Action Buttons - 3 Large Buttons */}
+                                    {/* Action Buttons - 3 Large Buttons with Queue Integration */}
                                     <div className="grid grid-cols-3 gap-2">
                                         <button
                                             onClick={() => {
-                                                alert(`Flagged ${currentViolation.name} for review`);
+                                                if (currentViolation) {
+                                                    alert(`Flagged ${currentViolation.name} for manual review\nViolation: ${currentViolation.violationType}\nID: ${currentViolation.id}`);
+                                                    // Keep in queue but mark as flagged
+                                                    console.log('[QUEUE] Flagged violation:', currentViolation.id);
+                                                    // Move to next violation in queue
+                                                    if (currentViolationIndex < violationQueue.length - 1) {
+                                                        handleNext();
+                                                    }
+                                                }
                                             }}
                                             className="bg-yellow-500 hover:bg-yellow-600 text-black font-bold py-4 rounded-xl transition-all duration-200 hover:scale-105 flex flex-col items-center justify-center gap-1 shadow-lg"
                                         >
@@ -808,25 +962,49 @@ export default function LiveMonitoringDashboard({
 
                                         <button
                                             onClick={() => {
-                                                if (confirm(`Dismiss ${currentViolation.name}'s session?`)) {
-                                                    alert(`Dismissed ${currentViolation.name}`);
+                                                if (currentViolation && confirm(`Terminate ${currentViolation.name}'s exam?\n\nThis will:\n- Remove student from exam\n- Set final score to 0\n- Cannot be undone\n\nViolation: ${currentViolation.violationType}`)) {
+                                                    // Remove from queue and terminate student
+                                                    removeFromQueue(currentViolation.id);
+                                                    alert(`Terminated ${currentViolation.name}'s exam\nFinal score set to 0`);
+                                                    console.log('[QUEUE] Removed from queue (terminated):', currentViolation.id);
+                                                    // TODO: Call backend API to terminate student exam
                                                 }
                                             }}
                                             className="bg-red-600 hover:bg-red-700 text-white font-bold py-4 rounded-xl transition-all duration-200 hover:scale-105 flex flex-col items-center justify-center gap-1 shadow-lg"
                                         >
                                             <XCircle className="h-5 w-5" />
-                                            <span className="text-xs">Dismiss</span>
+                                            <span className="text-xs">Terminate</span>
                                         </button>
 
                                         <button
                                             onClick={() => {
-                                                alert(`Approved ${currentViolation.name} to continue`);
+                                                if (currentViolation) {
+                                                    // Remove from queue and approve student
+                                                    removeFromQueue(currentViolation.id);
+                                                    alert(`Approved ${currentViolation.name} to continue\nViolation cleared: ${currentViolation.violationType}`);
+                                                    console.log('[QUEUE] Removed from queue (approved):', currentViolation.id);
+                                                }
                                             }}
                                             className="bg-green-600 hover:bg-green-700 text-white font-bold py-4 rounded-xl transition-all duration-200 hover:scale-105 flex flex-col items-center justify-center gap-1 shadow-lg"
                                         >
                                             <CheckCircle className="h-5 w-5" />
                                             <span className="text-xs">Approve</span>
                                         </button>
+                                    </div>
+
+                                    {/* Queue Statistics */}
+                                    <div className="bg-blue-500/10 border border-blue-500/30 rounded-xl p-3">
+                                        <p className="text-xs font-semibold text-blue-300 mb-2 uppercase">Queue Info</p>
+                                        <div className="grid grid-cols-2 gap-2 text-xs">
+                                            <div>
+                                                <span className="text-gray-400">Total in Queue:</span>
+                                                <span className="text-white font-bold ml-1">{violationQueue.length}</span>
+                                            </div>
+                                            <div>
+                                                <span className="text-gray-400">Remaining:</span>
+                                                <span className="text-white font-bold ml-1">{violationQueue.length - currentViolationIndex - 1}</span>
+                                            </div>
+                                        </div>
                                     </div>
                                 </motion.div>
                             </AnimatePresence>
