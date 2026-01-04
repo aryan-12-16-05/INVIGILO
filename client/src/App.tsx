@@ -2732,7 +2732,6 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
     const proctorInFlightRef = useRef(false);
     const lastFrameAtRef = useRef<number>(0);
     const backoffUntilRef = useRef<number>(0);
-    const jitterSeedRef = useRef<number>(Math.floor(Math.random() * 100000));
     const [proctorStats, setProctorStats] = useState({
         framesSent: 0,
         uploadErrors: 0,
@@ -3353,28 +3352,9 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
         console.log('[PROCTORING] Initializing proctoring for exam:', exam._id);
         setProctoringStopped(false);
         
-        // Simple network backoff to avoid spamming server if unreachable
-        const minIntervalMs = 2500; // faster than before, but adaptive
-        const maxIntervalMs = 6000;
+        // Network backoff function to handle server errors
         const backoffMs = () => 10000; // 10s backoff on network failure
-        const computeNextInterval = () => {
-            // If a warning modal is open, pause uploads to reduce noise and avoid multiple violations.
-            if (securityModalOpenRef.current) return maxIntervalMs;
-            // If page isn't visible, slow down (still logs server-side, but reduce bandwidth)
-            if (document.hidden) return maxIntervalMs;
-            // If camera looks unhealthy, slow down.
-            if (!isCameraHealthy()) return maxIntervalMs;
-            // Normal operation
-            return minIntervalMs;
-        };
-
-        const withJitter = (ms: number) => {
-            // Add jitter so multiple clients don't synchronize (reduces burst load)
-            jitterSeedRef.current = (jitterSeedRef.current * 9301 + 49297) % 233280;
-            const jitter = (jitterSeedRef.current / 233280) * 400; // 0..400ms
-            return Math.max(400, Math.floor(ms + jitter));
-        };
-
+        
         const startProctoring = async () => {
             if (submitStatus !== 'idle') {
                 return;
@@ -4026,29 +4006,6 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
             }
         };
     }, [disableBrowserLock, exam._id, handleSubmit, proctoringStopped, showToast, stopProctoring, submitStatus, user._id]);
-
-    const captureFrame = (): string | null => {
-        const video = videoRef.current;
-        if (!video || video.readyState < 3) return null;
-        // Downscale to reduce bandwidth and backend load, keep aspect ratio
-        const srcW = video.videoWidth || 640;
-        const srcH = video.videoHeight || 480;
-        const targetW = encodeWidthRef.current; // adaptive width
-        const scale = targetW / srcW;
-        const targetH = Math.max(1, Math.round(srcH * scale));
-
-        const canvas = document.createElement('canvas');
-        canvas.width = targetW;
-        canvas.height = targetH;
-        const ctx = canvas.getContext('2d');
-        try {
-            ctx?.drawImage(video, 0, 0, targetW, targetH);
-            // Adaptive quality reduces payload when network is slow
-            return canvas.toDataURL('image/jpeg', encodeQualityRef.current);
-        } catch (e) {
-            return null;
-        }
-    };
 
     // Timer logic
     useEffect(() => {

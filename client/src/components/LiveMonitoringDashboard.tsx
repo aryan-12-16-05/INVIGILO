@@ -2,8 +2,8 @@ import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
     Camera, Eye, Activity, ScanFace, AlertTriangle, XCircle, CheckCircle,
-    Radio, ChevronLeft, ChevronRight, TrendingUp, Settings, Download,
-    Filter, Bell, Plus, FileText, Users as UsersIcon, ArrowLeft, Play, Pause, X, Monitor
+    Radio, ChevronLeft, ChevronRight, TrendingUp, Download,
+    Filter, FileText, ArrowLeft, Pause, X, Monitor
 } from 'lucide-react';
 import { io, type Socket } from 'socket.io-client';
 
@@ -69,17 +69,19 @@ const Button = ({ children, variant = 'default', size = 'default', className = '
     </button>
 );
 
-const Progress = ({ value, className = '' }: { value: number; className?: string }) => (
-    <div className={cn('w-full bg-white/10 rounded-full overflow-hidden h-2', className)}>
-        <div
-            className="h-full bg-gradient-to-r from-green-500 to-emerald-500 transition-all duration-300"
-            style={{ width: `${value}%` }}
-        />
-    </div>
-);
+// Progress component - reserved for future use
+// const Progress = ({ value, className = '' }: { value: number; className?: string }) => (
+//     <div className={cn('w-full bg-white/10 rounded-full overflow-hidden h-2', className)}>
+//         <div
+//             className="h-full bg-gradient-to-r from-green-500 to-emerald-500 transition-all duration-300"
+//             style={{ width: `${value}%` }}
+//         />
+//     </div>
+// );
 
-// Optimized Violation Clip Player - smooth 60 FPS playback with RAF
-const ViolationClipPlayer = ({ userId, clips, liveFrame }: { userId: string; clips: string[]; liveFrame?: string }) => {
+// ViolationClipPlayer component - reserved for future use
+/*
+const ViolationClipPlayer = ({ clips, liveFrame }: { clips: string[]; liveFrame?: string }) => {
     const [isPlaying, setIsPlaying] = useState(false);
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const currentFrameRef = useRef(0);
@@ -92,7 +94,7 @@ const ViolationClipPlayer = ({ userId, clips, liveFrame }: { userId: string; cli
         if (!clips || clips.length === 0) return;
 
         // Preload all frames as Image objects (avoid repeated base64 decode)
-        clips.forEach((src, idx) => {
+        clips.forEach((src) => {
             if (!frameImagesRef.current.has(src)) {
                 const img = new Image();
                 img.src = src;
@@ -193,7 +195,6 @@ const ViolationClipPlayer = ({ userId, clips, liveFrame }: { userId: string; cli
                 <div className="absolute bottom-3 left-3 bg-black/80 backdrop-blur-sm px-3 py-1 rounded-md z-10 text-xs text-red-400 font-bold">
                     VIOLATION RECORDED
                 </div>
-                {/* Compact Play/Pause Button - bottom-right overlay */}
                 <button
                     onClick={handlePlayPause}
                     className="absolute bottom-3 right-3 bg-black/60 hover:bg-black/80 backdrop-blur-sm rounded-full p-2 transition-all hover:scale-105 z-20"
@@ -226,6 +227,7 @@ const ViolationClipPlayer = ({ userId, clips, liveFrame }: { userId: string; cli
         </div>
     );
 };
+*/
 
 export default function LiveMonitoringDashboard({
     examId,
@@ -237,7 +239,7 @@ export default function LiveMonitoringDashboard({
     onBack: () => void;
 }) {
     const [students, setStudents] = useState<LiveStudent[]>([]);
-    const [isMonitoring, setIsMonitoring] = useState(true);
+    const [isMonitoring] = useState(true);
     const [currentPage, setCurrentPage] = useState(0);
     const [currentViolationIndex, setCurrentViolationIndex] = useState(0);
     const [selectedStudent, setSelectedStudent] = useState<LiveStudent | null>(null);
@@ -246,6 +248,7 @@ export default function LiveMonitoringDashboard({
     const [violationQueue, setViolationQueue] = useState<ViolationQueueItem[]>([]);
     const processedViolationsRef = useRef<Set<string>>(new Set()); // Track processed violation IDs
     const lastViolationCountRef = useRef<Map<string, number>>(new Map()); // Track violation count per user
+    const fetchDataFuncRef = useRef<(() => Promise<void>) | null>(null); // Store fetchData function
     
     const socketRef = useRef<Socket | null>(null);
     const videoFramesRef = useRef<Record<string, string>>({});
@@ -301,16 +304,8 @@ export default function LiveMonitoringDashboard({
             forceUpdate(prev => prev + 1);
         });
 
-        // Listen for students joining the exam in real-time
-        newSocket.on('student-joined', (data: { examId: string; userId: string; studentId: string; name: string; timestamp: string }) => {
-            console.log('[DASHBOARD] Student joined:', data);
-            // Trigger immediate data refresh when a new student joins
-            setIsMonitoring(prev => {
-                // Force a re-fetch by toggling and immediately setting back
-                setTimeout(() => setIsMonitoring(true), 0);
-                return prev;
-            });
-        });
+        // Note: 'student-joined' listener is handled in the polling effect below
+        // to trigger immediate data refresh
 
         socketRef.current = newSocket;
 
@@ -452,26 +447,34 @@ export default function LiveMonitoringDashboard({
             }
         };
 
+        // Store fetchData in ref so it can be called from Socket.IO listener with latest closure
+        fetchDataFuncRef.current = fetchData;
+
+        // Initial fetch
         fetchData();
+        
+        // Set up Socket.IO listener to trigger immediate refresh when student joins
+        if (socketRef.current) {
+            socketRef.current.off('student-joined'); // Remove old listener to avoid duplicates
+            socketRef.current.on('student-joined', (data: { examId: string; userId: string; studentId: string; name: string; timestamp: string }) => {
+                console.log('[DASHBOARD] Student joined:', data);
+                // Call the latest fetchData function
+                if (fetchDataFuncRef.current) {
+                    fetchDataFuncRef.current();
+                }
+            });
+        }
+        
+        // Regular polling every 3 seconds
         const interval = setInterval(fetchData, 3000);
         return () => clearInterval(interval);
-    }, [examId, isMonitoring, students]);
+    }, [examId, isMonitoring]);
 
     const formatTime = (seconds: number) => {
         const h = Math.floor(seconds / 3600);
         const m = Math.floor((seconds % 3600) / 60);
         const s = seconds % 60;
         return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-    };
-
-    const getSeverityColor = (severity: string) => {
-        switch (severity) {
-            case 'normal': return 'text-green-400';
-            case 'warning': return 'text-yellow-400';
-            case 'suspicious': return 'text-orange-400';
-            case 'critical': return 'text-red-400';
-            default: return 'text-gray-400';
-        }
     };
 
     const getSeverityBg = (severity: string) => {
@@ -484,34 +487,9 @@ export default function LiveMonitoringDashboard({
         }
     };
 
-    const getBorderColor = (severity: string) => {
-        switch (severity) {
-            case 'normal': return 'border-green-500/30 hover:border-green-500/60';
-            case 'warning': return 'border-yellow-500/30 hover:border-yellow-500/60';
-            case 'suspicious': return 'border-orange-500/30 hover:border-orange-500/60';
-            case 'critical': return 'border-red-500/50 hover:border-red-500/80 animate-pulse';
-            default: return 'border-gray-500/30';
-        }
-    };
-
-    const handleNext = () => {
-        setCurrentViolationIndex((prev) => (prev + 1) % violationReviews.length);
-    };
-
-    const handlePrevious = () => {
-        setCurrentViolationIndex((prev) => (prev - 1 + violationReviews.length) % violationReviews.length);
-    };
-
     const complianceRate = students.length > 0
         ? Math.round(((students.length - violationReviews.length) / students.length) * 100)
         : 100;
-
-    const statusCounts = {
-        normal: students.filter(s => s.status === 'normal').length,
-        warning: students.filter(s => s.status === 'warning').length,
-        suspicious: students.filter(s => s.status === 'suspicious').length,
-        critical: students.filter(s => s.status === 'critical').length
-    };
 
     // Calculate additional stats
     const averageRisk = students.length > 0
@@ -891,7 +869,6 @@ export default function LiveMonitoringDashboard({
                                                     <AlertTriangle className="h-4 w-4 text-red-400 mt-0.5 flex-shrink-0" />
                                                     <span className="text-gray-300">{currentViolation.details.latestViolation}</span>
                                                 </div>
-                                            )}
                                             )}
                                             {!currentViolation?.faceDetected && (
                                                 <div className="flex items-start gap-2 text-sm">

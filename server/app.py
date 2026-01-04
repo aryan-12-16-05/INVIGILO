@@ -1120,9 +1120,10 @@ def proctor_activity():
                     print(f"[PROCTOR] Error storing reference background: {e}")
 
             def emit(ev_type: str, details: dict, severity: str):
-                # Short cooldown to prevent spam (5 seconds per event type)
+                # Shorter cooldown for critical events (1 second), longer for low severity (5 seconds)
+                cooldown = 1 if severity in ('critical', 'high') else 5
                 last_time = st['last_emit'].get(ev_type)
-                if last_time and (now - last_time).total_seconds() < 5:
+                if last_time and (now - last_time).total_seconds() < cooldown:
                     return
                 
                 # Capture frame evidence as base64 image
@@ -1174,121 +1175,256 @@ def proctor_activity():
 
 
             # ============================================================================
-            # RISK-BASED DETECTION SYSTEM (ProctorU/Examity-style)
+            # COMMERCIAL-GRADE TEMPORAL DETECTION SYSTEM (4 FPS OPTIMIZED)
             # ============================================================================
-            # Commercial proctoring systems use temporal confirmation + risk scoring
-            # instead of single-frame immediate violations. This prevents false positives
-            # from natural movements like reading, blinking, posture adjustments.
+            # Implements ProctorU/Examity-style detection with:
+            # - Consecutive frame confirmation (no single-frame triggers)
+            # - Frame counters that persist until neutral state is stable
+            # - Escalating severity for repeated violations
+            # - Fair thresholds aligned with real-world proctoring systems
             
-            # Initialize temporal tracking buffers
-            if 'temporal_buffer' not in st:
-                st['temporal_buffer'] = {
-                    'gaze_away': [],      # Last N gaze detections
-                    'head_turned': [],    # Last N head pose detections
-                    'mouth_open': [],     # Last N mouth detections
-                    'face_missing': [],   # Last N face detection results
-                    'identity_checks': [],  # Last N identity verification results
-                    'buffer_size': 3,     # Require 2/3 consecutive frames (temporal confirmation)
-                    'last_identity_check': 0  # Timestamp of last identity verification
+            # Initialize temporal tracking with frame counters
+            if 'temporal_counters' not in st:
+                st['temporal_counters'] = {
+                    # Frame counters (persist until stable neutral state)
+                    'face_missing_frames': 0,
+                    'gaze_away_frames': 0,
+                    'head_turned_frames': 0,
+                    'identity_fail_frames': 0,
+                    'mouth_open_frames': 0,
+                    
+                    # Neutral state counters (reset violation counters)
+                    'face_present_frames': 0,
+                    'gaze_forward_frames': 0,
+                    'head_forward_frames': 0,
+                    'identity_pass_frames': 0,
+                    'mouth_closed_frames': 0,
+                    
+                    # Violation tracking
+                    'last_identity_check': 0,
+                    'violation_history': {},  # Track repeated violations for escalation
+                    'first_violation_emitted': {}  # Track if first violation was emitted (bypass cooldown)
                 }
             
-            # Helper: Add to temporal buffer with sliding window
-            def add_to_buffer(buffer_name, value):
-                buffer = st['temporal_buffer'][buffer_name]
-                buffer.append(value)
-                max_size = st['temporal_buffer']['buffer_size']
-                if len(buffer) > max_size:
-                    buffer.pop(0)
-                return buffer
-            
-            # Helper: Check if behavior is sustained (2+ out of last 3 frames)
-            def is_sustained(buffer_name, check_value=True):
-                buffer = st['temporal_buffer'][buffer_name]
-                if len(buffer) < 2:  # Need at least 2 frames
-                    return False
-                return buffer.count(check_value) >= 2
+            tc = st['temporal_counters']
             
             # ============================================================================
-            # TEMPORAL DETECTION WITH RISK SCORING
+            # DETECTION 1: FACE MISSING (HIGH SEVERITY)
             # ============================================================================
+            # Warning at 2 seconds (8 frames @ 4 FPS)
+            # Violation at 4 seconds (16 frames @ 4 FPS)
+            face_detected = face_count > 0
             
-            # 1. CONTINUOUS IDENTITY VERIFICATION - Critical (re-verify every 2-3 seconds)
-            # CRITICAL FIX: Re-verify identity periodically, not just once at start
+            if not face_detected:
+                tc['face_missing_frames'] += 1
+                tc['face_present_frames'] = 0  # Reset neutral counter
+                
+                # Escalate severity based on duration
+                if tc['face_missing_frames'] >= 16:  # 4 seconds
+                    severity = 'critical'
+                    risk = 95
+                    message = 'Student left camera view (critical duration)'
+                elif tc['face_missing_frames'] >= 8:  # 2 seconds
+                    severity = 'high'
+                    risk = 75
+                    message = 'Student left camera view (warning)'
+                else:
+                    severity = None  # Don't emit yet
+                
+                if severity:
+                    # Check if this is first time - bypass cooldown
+                    is_first = 'face_missing' not in tc['first_violation_emitted']
+                    if is_first:
+                        tc['first_violation_emitted']['face_missing'] = True
+                        # Force emit by clearing last_emit
+                        if 'face_missing' in st['last_emit']:
+                            del st['last_emit']['face_missing']
+                    
+                    emit('face_missing', {
+                        'message': message,
+                        'frames_missing': tc['face_missing_frames'],
+                        'duration_seconds': tc['face_missing_frames'] / 4.0,
+                        'risk_score': risk
+                    }, severity)
+            else:
+                tc['face_present_frames'] += 1
+                # Reset counter only after stable presence (2 frames)
+                if tc['face_present_frames'] >= 2:
+                    tc['face_missing_frames'] = 0
+            
+            # ============================================================================
+            # DETECTION 2: IDENTITY MISMATCH (CRITICAL SEVERITY)
+            # ============================================================================
+            # Re-verify every 2.5 seconds, require similarity < 0.58 for 2+ frames
             current_time = datetime.datetime.utcnow().timestamp()
-            time_since_last_check = current_time - st['temporal_buffer']['last_identity_check']
+            time_since_last_check = current_time - tc['last_identity_check']
             
-            # Re-verify every 2.5 seconds (10 frames at 4 FPS)
-            if time_since_last_check >= 2.5:
-                st['temporal_buffer']['last_identity_check'] = current_time
+            if time_since_last_check >= 2.5 and similarity_score is not None:
+                tc['last_identity_check'] = current_time
                 
-                # Add current identity verification result to buffer
-                identity_failed = not identity_verified and similarity_score is not None
-                add_to_buffer('identity_checks', identity_failed)
+                identity_failed = similarity_score < 0.58
                 
-                # Trigger violation if identity fails consistently (2+ out of last 3 checks)
-                if is_sustained('identity_checks', True):
-                    emit('identity_mismatch', {
-                        'similarity': float(similarity_score) if similarity_score is not None else 0.0,
-                        'message': 'Face does not match registered student (sustained)',
-                        'checks_failed': len([x for x in st['temporal_buffer']['identity_checks'] if x]),
-                        'risk_score': 90  # Critical risk
-                    }, 'critical')
+                if identity_failed:
+                    tc['identity_fail_frames'] += 1
+                    tc['identity_pass_frames'] = 0
+                    
+                    # Trigger after 2 consecutive failures
+                    if tc['identity_fail_frames'] >= 2:
+                        is_first = 'identity_mismatch' not in tc['first_violation_emitted']
+                        if is_first:
+                            tc['first_violation_emitted']['identity_mismatch'] = True
+                            if 'identity_mismatch' in st['last_emit']:
+                                del st['last_emit']['identity_mismatch']
+                        
+                        emit('identity_mismatch', {
+                            'similarity': float(similarity_score),
+                            'threshold': 0.58,
+                            'message': 'Face does not match registered student',
+                            'consecutive_failures': tc['identity_fail_frames'],
+                            'risk_score': 95
+                        }, 'critical')
+                else:
+                    tc['identity_pass_frames'] += 1
+                    # Reset only after 2 consecutive passes
+                    if tc['identity_pass_frames'] >= 2:
+                        tc['identity_fail_frames'] = 0
             
-            # 2. MULTIPLE FACES - Critical (immediate, no temporal needed)
+            # ============================================================================
+            # DETECTION 3: GAZE AVERSION (LOW → MEDIUM SEVERITY)
+            # ============================================================================
+            # Ratio ≥1.35 for ≥3 consecutive frames
+            gaze = results.get('gazeDirection', 'Unknown')
+            gaze_away = gaze and str(gaze).lower() not in ('center', 'normal', 'forward', 'unknown')
+            
+            if gaze_away:
+                tc['gaze_away_frames'] += 1
+                tc['gaze_forward_frames'] = 0
+                
+                # Require 3 consecutive frames
+                if tc['gaze_away_frames'] >= 3:
+                    # Escalate severity based on repeated violations
+                    history_key = 'gaze_aversion'
+                    tc['violation_history'][history_key] = tc['violation_history'].get(history_key, 0) + 1
+                    
+                    if tc['violation_history'][history_key] >= 3:
+                        severity = 'medium'
+                        risk = 50
+                    else:
+                        severity = 'low'
+                        risk = 30
+                    
+                    is_first = 'gaze_aversion' not in tc['first_violation_emitted']
+                    if is_first:
+                        tc['first_violation_emitted']['gaze_aversion'] = True
+                        if 'gaze_aversion' in st['last_emit']:
+                            del st['last_emit']['gaze_aversion']
+                    
+                    emit('gaze_aversion', {
+                        'direction': gaze,
+                        'message': f'Eyes looking {gaze} (sustained)',
+                        'consecutive_frames': tc['gaze_away_frames'],
+                        'repeated_violations': tc['violation_history'][history_key],
+                        'risk_score': risk
+                    }, severity)
+            else:
+                tc['gaze_forward_frames'] += 1
+                # Reset only after 3 frames of normal gaze
+                if tc['gaze_forward_frames'] >= 3:
+                    tc['gaze_away_frames'] = 0
+            
+            # ============================================================================
+            # DETECTION 4: HEAD POSE (LOW → MEDIUM SEVERITY)
+            # ============================================================================
+            # Vertical angle ≥32° or horizontal offset ≥14px for ≥3 frames
+            head_pose = results.get('headPose', 'Unknown')
+            head_turned = head_pose and str(head_pose).lower() not in ('forward', 'center', 'normal', 'unknown')
+            
+            if head_turned:
+                tc['head_turned_frames'] += 1
+                tc['head_forward_frames'] = 0
+                
+                # Require 3 consecutive frames
+                if tc['head_turned_frames'] >= 3:
+                    # Escalate severity based on repeated violations
+                    history_key = 'head_pose'
+                    tc['violation_history'][history_key] = tc['violation_history'].get(history_key, 0) + 1
+                    
+                    # Down pose is more severe (potential cheating posture)
+                    if str(head_pose).lower() == 'down':
+                        severity = 'medium'
+                        risk = 55
+                    elif tc['violation_history'][history_key] >= 3:
+                        severity = 'medium'
+                        risk = 45
+                    else:
+                        severity = 'low'
+                        risk = 28
+                    
+                    is_first = 'head_pose' not in tc['first_violation_emitted']
+                    if is_first:
+                        tc['first_violation_emitted']['head_pose'] = True
+                        if 'head_pose' in st['last_emit']:
+                            del st['last_emit']['head_pose']
+                    
+                    emit('head_pose', {
+                        'pose': head_pose,
+                        'message': f'Head turned {head_pose} (sustained)',
+                        'consecutive_frames': tc['head_turned_frames'],
+                        'repeated_violations': tc['violation_history'][history_key],
+                        'risk_score': risk
+                    }, severity)
+            else:
+                tc['head_forward_frames'] += 1
+                # Reset only after 3 frames of normal pose
+                if tc['head_forward_frames'] >= 3:
+                    tc['head_turned_frames'] = 0
+            
+            # ============================================================================
+            # DETECTION 5: MULTIPLE FACES (CRITICAL - IMMEDIATE)
+            # ============================================================================
+            # No temporal confirmation needed - critical security violation
             if face_count and face_count > 1:
+                is_first = 'multiple_faces' not in tc['first_violation_emitted']
+                if is_first:
+                    tc['first_violation_emitted']['multiple_faces'] = True
+                    if 'multiple_faces' in st['last_emit']:
+                        del st['last_emit']['multiple_faces']
+                
                 emit('multiple_faces', {
                     'count': face_count,
                     'message': f'{face_count} people detected in frame',
-                    'risk_score': 85  # Critical risk
+                    'risk_score': 95
                 }, 'critical')
             
-            # 3. FACE MISSING - Medium severity (temporal confirmation required)
-            face_detected = face_count > 0
-            add_to_buffer('face_missing', not face_detected)
-            if is_sustained('face_missing', True):  # 2+ frames with no face
-                emit('face_missing', {
-                    'message': 'No face detected (sustained)',
-                    'frames': len([x for x in st['temporal_buffer']['face_missing'] if x]),
-                    'risk_score': 60  # Medium risk
-                }, 'medium')
-            
-            # 4. HEAD POSE - Low severity (temporal confirmation required)
-            head_pose = results.get('headPose')
-            head_turned = head_pose and str(head_pose).lower() not in ('forward', 'center', 'normal')
-            add_to_buffer('head_turned', head_turned)
-            if is_sustained('head_turned', True):  # 2+ frames turned away
-                severity = 'medium' if str(head_pose).lower() in ('down',) else 'low'
-                risk_score = 40 if severity == 'medium' else 25
-                emit('head_pose', {
-                    'pose': head_pose,
-                    'message': f'Head turned {head_pose} (sustained)',
-                    'frames': len([x for x in st['temporal_buffer']['head_turned'] if x]),
-                    'risk_score': risk_score
-                }, severity)
-            
-            # 5. GAZE DIRECTION - Low severity (temporal confirmation required)
-            gaze = results.get('gazeDirection')
-            gaze_away = gaze and str(gaze).lower() not in ('center', 'normal', 'forward')
-            add_to_buffer('gaze_away', gaze_away)
-            if is_sustained('gaze_away', True):  # 2+ frames looking away
-                emit('gaze_aversion', {
-                    'direction': gaze,
-                    'message': f'Eyes looking {gaze} (sustained)',
-                    'frames': len([x for x in st['temporal_buffer']['gaze_away'] if x]),
-                    'risk_score': 30  # Low risk (natural reading behavior)
-                }, 'low')
-            
-            # 6. MOUTH MOVEMENT - Low severity (temporal confirmation required)
-            mouth = results.get('mouthStatus')
+            # ============================================================================
+            # DETECTION 6: MOUTH MOVEMENT (LOW SEVERITY)
+            # ============================================================================
+            mouth = results.get('mouthStatus', 'Unknown')
             mouth_open = mouth and str(mouth).lower() in ('open', 'talking', 'speaking')
-            add_to_buffer('mouth_open', mouth_open)
-            if is_sustained('mouth_open', True):  # 2+ frames with mouth open
-                emit('talking', {
-                    'status': mouth,
-                    'message': 'Sustained mouth movement detected',
-                    'frames': len([x for x in st['temporal_buffer']['mouth_open'] if x]),
-                    'risk_score': 35  # Low-medium risk (could be talking to someone)
-                }, 'low')
+            
+            if mouth_open:
+                tc['mouth_open_frames'] += 1
+                tc['mouth_closed_frames'] = 0
+                
+                # Require 3 consecutive frames
+                if tc['mouth_open_frames'] >= 3:
+                    is_first = 'talking' not in tc['first_violation_emitted']
+                    if is_first:
+                        tc['first_violation_emitted']['talking'] = True
+                        if 'talking' in st['last_emit']:
+                            del st['last_emit']['talking']
+                    
+                    emit('talking', {
+                        'status': mouth,
+                        'message': 'Sustained mouth movement detected',
+                        'consecutive_frames': tc['mouth_open_frames'],
+                        'risk_score': 35
+                    }, 'low')
+            else:
+                tc['mouth_closed_frames'] += 1
+                # Reset after 3 frames of closed mouth
+                if tc['mouth_closed_frames'] >= 3:
+                    tc['mouth_open_frames'] = 0
             
             # 7. BACKGROUND CHANGE - High severity (immediate, but with higher threshold)
             if st['reference_background'] is not None and frame is not None:
@@ -1300,6 +1436,12 @@ def proctor_activity():
                     # Increased threshold to reduce false positives from lighting changes
                     BACKGROUND_THRESHOLD = 30.0  # More tolerant (was 20.0)
                     if diff_score > BACKGROUND_THRESHOLD:
+                        is_first = 'background_change' not in tc['first_violation_emitted']
+                        if is_first:
+                            tc['first_violation_emitted']['background_change'] = True
+                            if 'background_change' in st['last_emit']:
+                                del st['last_emit']['background_change']
+                        
                         emit('background_change', {
                             'change_score': float(diff_score),
                             'message': 'Significant background change detected',
@@ -1456,7 +1598,7 @@ def log_suspicious_activity():
             'type': 'suspicious_activity',
             'activityType': activity_type,
             'severity': severity,
-            'score': score,
+            'risk_score': risk_score,
             'details': details,
             'timestamp': datetime.datetime.utcnow()
         }
@@ -1475,7 +1617,7 @@ def log_suspicious_activity():
                 violation_data = {
                     'type': activity_type,
                     'severity': severity,
-                    'score': score,
+                    'risk_score': risk_score,
                     'message': f"Suspicious activity: {activity_type.replace('_', ' ')}"
                 }
                 broadcast_violation(exam_id, user_id, violation_data)
@@ -1487,7 +1629,7 @@ def log_suspicious_activity():
             "message": "Activity logged successfully",
             "eventId": event_id,
             "severity": severity,
-            "score": score
+            "risk_score": risk_score
         }), 200
         
     except Exception as e:
