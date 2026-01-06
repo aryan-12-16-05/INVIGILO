@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { ArrowLeft, Download, FileText, BarChart3, Users, AlertTriangle, CheckCircle, TrendingUp, Clock } from 'lucide-react';
 
@@ -34,6 +34,7 @@ interface ExamReport {
 }
 
 interface StudentReportData {
+    userId?: string;
     studentId: string;
     name: string;
     score: number;
@@ -44,11 +45,40 @@ interface StudentReportData {
     status: 'completed' | 'disqualified' | 'abandoned';
 }
 
+interface StudentAttemptDetails {
+    attempt?: {
+        userId: string;
+        score?: number;
+        totalMarks?: number;
+        percentage?: number;
+        completedAt?: string;
+        perQuestion?: Array<{
+            questionId: string;
+            question: string;
+            given: any;
+            expected: any;
+            marks: number;
+            correct: boolean;
+        }>;
+    } | null;
+}
+
+interface StudentProctorEvent {
+    _id: string;
+    timestamp?: string;
+    eventType?: string;
+    severity?: string;
+    details?: any;
+    frameEvidence?: string;
+}
+
 export default function LecturerExamReport({ 
+    user,
     examId, 
     onBack, 
     showToast 
 }: { 
+    user: { _id: string };
     examId: string; 
     onBack: () => void;
     showToast: (msg: string, type: 'success' | 'error') => void;
@@ -57,6 +87,13 @@ export default function LecturerExamReport({
     const [isLoading, setIsLoading] = useState(true);
     const [sortBy, setSortBy] = useState<'name' | 'score' | 'risk'>('score');
     const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
+
+    const [selectedStudent, setSelectedStudent] = useState<StudentReportData | null>(null);
+    const [studentAttempt, setStudentAttempt] = useState<StudentAttemptDetails['attempt'] | null>(null);
+    const [studentEvents, setStudentEvents] = useState<StudentProctorEvent[]>([]);
+    const [studentViolations, setStudentViolations] = useState<any[]>([]);
+    const [studentDetailLoading, setStudentDetailLoading] = useState(false);
+    const [studentDetailError, setStudentDetailError] = useState<string | null>(null);
 
     useEffect(() => {
         const fetchReport = async () => {
@@ -85,6 +122,63 @@ export default function LecturerExamReport({
 
         fetchReport();
     }, [examId, showToast]);
+
+    useEffect(() => {
+        const fetchStudentDetail = async () => {
+            if (!selectedStudent) return;
+
+            const userId = (selectedStudent as any).userId;
+            if (!userId) {
+                setStudentDetailError('Missing userId for this student.');
+                return;
+            }
+
+            try {
+                setStudentDetailLoading(true);
+                setStudentDetailError(null);
+                setStudentAttempt(null);
+                setStudentEvents([]);
+                setStudentViolations([]);
+
+                const headers: Record<string, string> = {
+                    'Content-Type': 'application/json',
+                    'X-User-Id': String(user._id)
+                };
+
+                const [attemptRes, eventsRes, violationsRes] = await Promise.all([
+                    fetch(`${API_URL}/exams/${examId}/attempt?userId=${encodeURIComponent(String(userId))}`, { headers }),
+                    fetch(`${API_URL}/exams/${examId}/proctoring/${encodeURIComponent(String(userId))}`, { headers }),
+                    fetch(`${API_URL}/exams/${examId}/students/${encodeURIComponent(String(userId))}/violations`, { headers })
+                ]);
+
+                if (attemptRes.ok) {
+                    const attemptJson = await attemptRes.json();
+                    setStudentAttempt(attemptJson?.attempt ?? null);
+                }
+
+                if (eventsRes.ok) {
+                    const eventsJson = await eventsRes.json();
+                    setStudentEvents(Array.isArray(eventsJson?.events) ? eventsJson.events : []);
+                }
+
+                if (violationsRes.ok) {
+                    const vJson = await violationsRes.json();
+                    setStudentViolations(Array.isArray(vJson?.violations) ? vJson.violations : []);
+                }
+
+                if (!attemptRes.ok && !eventsRes.ok && !violationsRes.ok) {
+                    setStudentDetailError('Failed to load student details.');
+                }
+            } catch (e) {
+                console.error('[REPORT] Student detail fetch error:', e);
+                setStudentDetailError('Failed to load student details.');
+            } finally {
+                setStudentDetailLoading(false);
+            }
+        };
+
+        fetchStudentDetail();
+    }, [selectedStudent, examId, user._id]);
 
     const handleExport = (format: 'pdf' | 'csv') => {
         showToast(`Exporting report as ${format.toUpperCase()}...`, 'success');
@@ -340,7 +434,8 @@ export default function LecturerExamReport({
                                         initial={{ opacity: 0, y: 20 }}
                                         animate={{ opacity: 1, y: 0 }}
                                         transition={{ delay: idx * 0.05 }}
-                                        className="border-b border-slate-800 hover:bg-slate-800/50 transition-colors"
+                                        className="border-b border-slate-800 hover:bg-slate-800/50 transition-colors cursor-pointer"
+                                        onClick={() => setSelectedStudent(student)}
                                     >
                                         <td className="py-3 px-4 text-white font-mono text-sm">{student.studentId}</td>
                                         <td className="py-3 px-4 text-white">{student.name}</td>
@@ -482,6 +577,163 @@ export default function LecturerExamReport({
                 </>
                 )}
             </div>
+
+            {/* Student Detail Modal */}
+            {selectedStudent && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70">
+                    <div className="w-full max-w-5xl bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+                        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800">
+                            <div>
+                                <h3 className="text-lg font-bold text-white">{selectedStudent.name}</h3>
+                                <p className="text-sm text-slate-400">{selectedStudent.studentId}</p>
+                            </div>
+                            <button
+                                onClick={() => {
+                                    setSelectedStudent(null);
+                                    setStudentAttempt(null);
+                                    setStudentEvents([]);
+                                    setStudentViolations([]);
+                                    setStudentDetailError(null);
+                                }}
+                                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-sm"
+                            >
+                                Close
+                            </button>
+                        </div>
+
+                        <div className="p-6 space-y-6 max-h-[80vh] overflow-y-auto">
+                            {studentDetailLoading && (
+                                <div className="text-slate-400">Loading student details…</div>
+                            )}
+                            {studentDetailError && (
+                                <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-lg text-red-300 text-sm">
+                                    {studentDetailError}
+                                </div>
+                            )}
+
+                            {/* Question-wise results */}
+                            <div className="bg-slate-950/40 border border-slate-800 rounded-lg p-4">
+                                <div className="flex items-center gap-2 mb-3">
+                                    <Clock className="h-4 w-4 text-indigo-400" />
+                                    <h4 className="font-semibold">Question-wise Results</h4>
+                                </div>
+
+                                {studentAttempt?.perQuestion && studentAttempt.perQuestion.length > 0 ? (
+                                    <div className="space-y-3">
+                                        <div className="text-sm text-slate-300">
+                                            Score: <span className="font-semibold">{studentAttempt.score ?? selectedStudent.score}</span> / <span className="font-semibold">{studentAttempt.totalMarks ?? '-'}</span>
+                                            {' '}• Percentage: <span className="font-semibold">{studentAttempt.percentage ?? selectedStudent.percentage}%</span>
+                                        </div>
+                                        <div className="space-y-2">
+                                            {studentAttempt.perQuestion.map((q, i) => (
+                                                <div key={q.questionId || i} className="p-3 rounded-lg border border-slate-800 bg-slate-900/40">
+                                                    <div className="flex items-start justify-between gap-3">
+                                                        <div>
+                                                            <div className="text-sm text-white font-medium">Q{i + 1}. {q.question}</div>
+                                                            <div className="text-xs text-slate-400 mt-1">Marks: {q.marks}</div>
+                                                        </div>
+                                                        <span className={cn(
+                                                            'text-xs px-2 py-1 rounded border',
+                                                            q.correct ? 'bg-green-500/10 text-green-300 border-green-500/20' : 'bg-red-500/10 text-red-300 border-red-500/20'
+                                                        )}>
+                                                            {q.correct ? 'Correct' : 'Wrong'}
+                                                        </span>
+                                                    </div>
+                                                    <div className="grid md:grid-cols-2 gap-3 mt-3 text-sm">
+                                                        <div className="bg-slate-950/40 border border-slate-800 rounded p-2">
+                                                            <div className="text-xs text-slate-400">Your answer</div>
+                                                            <div className="text-slate-200 break-words">{String(q.given ?? '—')}</div>
+                                                        </div>
+                                                        <div className="bg-slate-950/40 border border-slate-800 rounded p-2">
+                                                            <div className="text-xs text-slate-400">Correct answer</div>
+                                                            <div className="text-slate-200 break-words">{String(q.expected ?? '—')}</div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div className="text-slate-400 text-sm">No per-question results found for this student.</div>
+                                )}
+                            </div>
+
+                            {/* Proctoring events timeline */}
+                            <div className="bg-slate-950/40 border border-slate-800 rounded-lg p-4">
+                                <div className="flex items-center gap-2 mb-3">
+                                    <AlertTriangle className="h-4 w-4 text-orange-400" />
+                                    <h4 className="font-semibold">Proctoring Timeline</h4>
+                                </div>
+
+                                {(studentViolations?.length ?? 0) === 0 && (studentEvents?.length ?? 0) === 0 ? (
+                                    <div className="text-slate-400 text-sm">No proctoring events recorded for this student.</div>
+                                ) : (
+                                    <div className="space-y-3">
+                                        {studentViolations?.length > 0 && (
+                                            <div>
+                                                <div className="text-sm text-slate-300 mb-2">Captured Violations</div>
+                                                <div className="space-y-2">
+                                                    {studentViolations.map((v: any) => (
+                                                        <div key={v._id} className="p-3 rounded-lg border border-slate-800 bg-slate-900/40">
+                                                            <div className="flex items-start justify-between gap-3">
+                                                                <div>
+                                                                    <div className="text-sm text-white font-medium">{String(v.eventType || 'violation')}</div>
+                                                                    <div className="text-xs text-slate-400 mt-1">{v.timestamp ? new Date(v.timestamp).toLocaleString() : ''}</div>
+                                                                </div>
+                                                                <span className="text-xs px-2 py-1 rounded border bg-orange-500/10 text-orange-300 border-orange-500/20">
+                                                                    {String(v.severity || 'unknown').toUpperCase()}
+                                                                </span>
+                                                            </div>
+                                                            {v.frameEvidence && (
+                                                                <div className="mt-3 rounded-lg overflow-hidden border border-slate-800 bg-slate-950/40">
+                                                                    <img src={v.frameEvidence} alt="Evidence" className="w-full max-h-72 object-cover" />
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {studentEvents?.length > 0 && (
+                                            <div>
+                                                <div className="text-sm text-slate-300 mb-2">All Proctor Events</div>
+                                                <div className="space-y-2">
+                                                    {studentEvents.slice(0, 100).map((ev) => (
+                                                        <div key={ev._id} className="p-3 rounded-lg border border-slate-800 bg-slate-900/40">
+                                                            <div className="flex items-start justify-between gap-3">
+                                                                <div>
+                                                                    <div className="text-sm text-white font-medium">{String(ev.eventType || 'event')}</div>
+                                                                    <div className="text-xs text-slate-400 mt-1">{ev.timestamp ? new Date(ev.timestamp).toLocaleString() : ''}</div>
+                                                                </div>
+                                                                {ev.severity && (
+                                                                    <span className="text-xs px-2 py-1 rounded border bg-slate-800 text-slate-200 border-slate-700">
+                                                                        {String(ev.severity).toUpperCase()}
+                                                                    </span>
+                                                                )}
+                                                            </div>
+
+                                                            {ev.details?.message && (
+                                                                <div className="text-xs text-slate-300 mt-2">{String(ev.details.message)}</div>
+                                                            )}
+
+                                                            {ev.frameEvidence && (
+                                                                <div className="mt-3 rounded-lg overflow-hidden border border-slate-800 bg-slate-950/40">
+                                                                    <img src={ev.frameEvidence} alt="Evidence" className="w-full max-h-72 object-cover" />
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

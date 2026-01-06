@@ -2302,6 +2302,7 @@ def get_exam_report(exam_id):
                 high_risk_count += 1
             
             students_data.append({
+                'userId': user_id,
                 'studentId': user.get('studentId', user.get('email', '')),
                 'name': user.get('name', 'Unknown'),
                 'score': score,
@@ -4252,9 +4253,6 @@ def handle_ping():
         - 'pong': Response to ping
     """
     emit('pong', {'timestamp': datetime.datetime.utcnow().isoformat() + 'Z'})
-
-
-@socketio.on('student-video-frame', namespace='/proctor')
 
 
 @app.route('/api/exams/<exam_id>/students/<user_id>/violations', methods=['GET'])

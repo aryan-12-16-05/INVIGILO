@@ -314,6 +314,45 @@ interface ExamResult {
     perQuestion?: any[];
 }
 
+const _toFiniteNumber = (v: unknown): number | null => {
+    const n = typeof v === 'number' ? v : (typeof v === 'string' ? Number(v) : NaN);
+    return Number.isFinite(n) ? n : null;
+};
+
+// Normalizes MCQ answers to a 0-based option index.
+// Backend stores MCQ as 1..N; some UI code uses 0..N-1.
+const _normalizeOptionIndex = (answer: unknown, options?: unknown): number | null => {
+    if (!Array.isArray(options) || options.length === 0) return null;
+
+    if (typeof answer === 'string') {
+        const idxByText = options.findIndex((o) => String(o) === answer);
+        if (idxByText >= 0) return idxByText;
+
+        const s = answer.trim().toUpperCase();
+        if (s.length === 1) {
+            const idx = s.charCodeAt(0) - 65;
+            if (idx >= 0 && idx < options.length) return idx;
+        }
+    }
+
+    const n = _toFiniteNumber(answer);
+    if (n === null) return null;
+    if (n >= 0 && n < options.length) return n; // 0-based
+    if (n >= 1 && n <= options.length) return n - 1; // 1-based
+    return null;
+};
+
+const _formatAnswerWithOptions = (answer: unknown, options?: unknown): string => {
+    if (answer === null || answer === undefined || String(answer).trim() === '') return 'No answer';
+    if (Array.isArray(options) && options.length > 0) {
+        const idx = _normalizeOptionIndex(answer, options);
+        if (idx !== null) {
+            return `${String.fromCharCode(65 + idx)}. ${String(options[idx])}`;
+        }
+    }
+    return String(answer);
+};
+
 // --- UI COMPONENTS (ShadCN UI Inspired, Enhanced) ---
 const Select = React.forwardRef<HTMLSelectElement, { className?: string; children: React.ReactNode; [key: string]: any }>(({ className, children, ...props }, ref) => {
     return <select className={cn("flex h-10 w-full items-center justify-between rounded-md border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500", className)} ref={ref} {...props}>{children}</select>;
@@ -577,7 +616,7 @@ export default function App() {
             case 'lecturer-live-exams': return currentUser && <LecturerLiveExamsList key="lecturer-live-exams" lecturerId={currentUser._id} onBack={() => navigateTo('lecturer-dashboard')} onSelectExam={(examId, examTitle) => { setSelectedExamIdForProctoring(examId); setSelectedExamTitle(examTitle); navigateTo('lecturer-live-monitor'); }} />;
             case 'lecturer-live-monitor': return currentUser && selectedExamIdForProctoring && <LiveMonitoringDashboard key="lecturer-live-monitor" examId={selectedExamIdForProctoring} examTitle={selectedExamTitle} onBack={() => navigateTo('lecturer-dashboard')} />;
             case 'lecturer-proctor': return currentUser && selectedExamIdForProctoring && <LecturerProctoringMonitor key="lecturer-proctor" examId={selectedExamIdForProctoring} onBack={() => navigateTo('lecturer-dashboard')} showToast={showToast} />;
-            case 'lecturer-report': return currentUser && selectedExamIdForProctoring && <LecturerExamReport key="lecturer-report" examId={selectedExamIdForProctoring} onBack={() => navigateTo('lecturer-dashboard')} showToast={showToast} />;
+            case 'lecturer-report': return currentUser && selectedExamIdForProctoring && <LecturerExamReport key="lecturer-report" user={currentUser} examId={selectedExamIdForProctoring} onBack={() => navigateTo('lecturer-dashboard')} showToast={showToast} />;
             case 'live-proctoring': return currentUser && <LiveProctoring key="live-proctoring" user={currentUser} onBack={() => navigateTo(currentUser?.role === 'student' ? 'student-dashboard' : 'lecturer-dashboard')} />;
             case 'help': return <HelpPage key="help" onBack={() => navigateTo(currentUser?.role === 'student' ? 'student-dashboard' : 'lecturer-dashboard')} />;
             case 'profile': return currentUser && <ProfilePage key="profile" user={currentUser} onLogout={handleLogout} onBack={() => navigateTo(currentUser?.role === 'student' ? 'student-dashboard' : 'lecturer-dashboard')} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} />;
@@ -1855,7 +1894,22 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, navigat
                 showToast('No results found for this exam.', 'error');
                 return;
             }
-            setResultAttempt(data.attempt);
+            const attempt = data.attempt;
+            const enriched = {
+                ...attempt,
+                perQuestion: Array.isArray(attempt?.perQuestion)
+                    ? attempt.perQuestion.map((pq: any) => {
+                        const q = exam.questions.find((qq) => String(qq._id) === String(pq?.questionId));
+                        return {
+                            ...pq,
+                            type: q?.type,
+                            options: q?.options,
+                            correctAnswer: q?.correctAnswer,
+                        };
+                    })
+                    : attempt?.perQuestion,
+            };
+            setResultAttempt(enriched);
             setSelectedExam(exam);
             setCurrentQuestionIndex(0);
         } catch (err: any) {
@@ -1900,7 +1954,7 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, navigat
                             <div>
                                 <p className="text-slate-400 text-sm">Best Score</p>
                                 <p className="text-4xl font-bold text-white mt-2">
-                                    {completedExams.length > 0 ? Math.max(...completedExams.map(e => (e as any).attemptForUser?.score || 0)) : 0}%
+                                    {completedExams.length > 0 ? Math.max(...completedExams.map(e => (e as any).attemptForUser?.percentage ?? (e as any).attemptForUser?.score ?? 0)) : 0}%
                                 </p>
                             </div>
                             <Monitor className="h-12 w-12 text-yellow-400" />
@@ -1976,7 +2030,7 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, navigat
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
                             <div className="p-4 bg-slate-800 rounded-lg">
                                 <p className="text-slate-400 text-sm mb-1">Final Score</p>
-                                <p className="text-3xl font-bold text-white">{resultAttempt.score}%</p>
+                                <p className="text-3xl font-bold text-white">{Number.isFinite(Number(resultAttempt.percentage)) ? Number(resultAttempt.percentage) : (Number.isFinite(Number(resultAttempt.score)) ? Number(resultAttempt.score) : 0)}%</p>
                             </div>
                             <div className="p-4 bg-slate-800 rounded-lg">
                                 <p className="text-slate-400 text-sm mb-1">Completed At</p>
@@ -2030,19 +2084,21 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, navigat
                                             <div>
                                                 <p className="text-sm font-semibold text-slate-300 mb-2">Options:</p>
                                                 <div className="space-y-2">{q.options.map((opt: string, optIdx: number) => {
-                                                            const userAns = q.given !== undefined ? q.given : q.userAnswer;
-                                                            const correctAns = q.expected !== undefined ? q.expected : q.correctAnswer;
+                                                            const userAnsRaw = q.given !== undefined ? q.given : q.userAnswer;
+                                                            const correctAnsRaw = q.expected !== undefined ? q.expected : q.correctAnswer;
+                                                            const userIdx = _normalizeOptionIndex(userAnsRaw, q.options);
+                                                            const correctIdx = _normalizeOptionIndex(correctAnsRaw, q.options);
                                                             return (
                                                                 <div key={optIdx} className={cn(
                                                                     'p-2 rounded border',
-                                                                    userAns === optIdx ? (q.correct ? 'border-green-500 bg-green-900/20' : 'border-red-500 bg-red-900/20') :
-                                                                    correctAns === optIdx ? 'border-green-500 bg-green-900/10' : 'border-slate-700'
+                                                                    userIdx === optIdx ? (q.correct ? 'border-green-500 bg-green-900/20' : 'border-red-500 bg-red-900/20') :
+                                                                    correctIdx === optIdx ? 'border-green-500 bg-green-900/10' : 'border-slate-700'
                                                                 )}>
                                                                     <div className="flex items-center justify-between">
                                                                         <span className="text-slate-200">{String.fromCharCode(65 + optIdx)}. {opt}</span>
                                                                         <div className="flex gap-2">
-                                                                            {userAns === optIdx && <span className="text-xs text-blue-400 font-medium">Your Answer</span>}
-                                                                            {correctAns === optIdx && <span className="text-xs text-green-400 font-medium">✓ Correct</span>}
+                                                                            {userIdx === optIdx && <span className="text-xs text-blue-400 font-medium">Your Answer</span>}
+                                                                            {correctIdx === optIdx && <span className="text-xs text-green-400 font-medium">✓ Correct</span>}
                                                                         </div>
                                                                     </div>
                                                                 </div>
@@ -2054,9 +2110,9 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, navigat
                                         {!q.options && (
                                             <div>
                                                 <p className="text-sm font-semibold text-slate-300 mb-1">Your Answer:</p>
-                                                <p className="text-white mb-3">{String(q.given || q.userAnswer || 'No answer')}</p>
+                                                <p className="text-white mb-3">{String((q.given ?? q.userAnswer) ?? 'No answer')}</p>
                                                 <p className="text-sm font-semibold text-slate-300 mb-1">Correct Answer:</p>
-                                                <p className="text-green-400">{String(q.expected || q.correctAnswer)}</p>
+                                                <p className="text-green-400">{String((q.expected ?? q.correctAnswer) ?? '')}</p>
                                             </div>
                                         )}
                                         <div className="flex items-center justify-between pt-3 border-t border-slate-700">
@@ -2155,7 +2211,22 @@ const MyExamsPage = ({ user, exams, onLogout, onStartExam, showToast, navigateTo
                 showToast('No results found for this exam yet.', 'error');
                 return;
             }
-            setResultAttempt(data.attempt);
+            const attempt = data.attempt;
+            const enriched = {
+                ...attempt,
+                perQuestion: Array.isArray(attempt?.perQuestion)
+                    ? attempt.perQuestion.map((pq: any) => {
+                        const q = exam.questions.find((qq) => String(qq._id) === String(pq?.questionId));
+                        return {
+                            ...pq,
+                            type: q?.type,
+                            options: q?.options,
+                            correctAnswer: q?.correctAnswer,
+                        };
+                    })
+                    : attempt?.perQuestion,
+            };
+            setResultAttempt(enriched);
             setSelectedExam(exam);
             setResultsOpen(true);
         } catch (err: any) {
@@ -2253,7 +2324,7 @@ const MyExamsPage = ({ user, exams, onLogout, onStartExam, showToast, navigateTo
                                             </div>
                                             <p className="text-sm text-slate-400 mb-1">{exam.courseCode} | {exam.description}</p>
                                             <p className="text-sm text-slate-400">Completed: {new Date((exam as any).attemptForUser?.completedAt || Date.now()).toLocaleDateString()}</p>
-                                            <p className="text-sm text-green-400 mt-1 font-semibold">Score: {(exam as any).attemptForUser?.score || exam.attempt?.score || 0}%</p>
+                                            <p className="text-sm text-green-400 mt-1 font-semibold">Score: {(exam as any).attemptForUser?.percentage ?? (exam as any).attemptForUser?.score ?? exam.attempt?.score ?? 0}%</p>
                                         </div>
                                         <div className="flex space-x-2">
                                             <Button onClick={() => openResults(exam)}>See Results</Button>
@@ -2505,7 +2576,9 @@ const StudentDashboard = ({ user, exams, onLogout, onStartExam, onBack, showToas
                                         <p className="text-xs text-slate-500">{(exam as any).attemptForUser?.completedAt || exam.attempt?.completedAt}</p>
                                     </div>
                                     <div className="flex items-center space-x-2">
-                                        <Badge variant={((exam as any).attemptForUser?.score || exam.attempt?.score || 0) >= 80 ? 'success' : 'warning'}>{(exam as any).attemptForUser?.score ?? exam.attempt?.score}%</Badge>
+                                        <Badge variant={(((exam as any).attemptForUser?.percentage ?? (exam as any).attemptForUser?.score ?? exam.attempt?.score ?? 0) as number) >= 80 ? 'success' : 'warning'}>
+                                            {(exam as any).attemptForUser?.percentage ?? (exam as any).attemptForUser?.score ?? exam.attempt?.score ?? 0}%
+                                        </Badge>
                                         <Button variant="outline" onClick={() => openResults(exam)}>See Results</Button>
                                     </div>
                                 </div>
@@ -2524,13 +2597,13 @@ const StudentDashboard = ({ user, exams, onLogout, onStartExam, onBack, showToas
                     <div className="space-y-2 max-h-[70vh] overflow-y-auto pr-2">
                         <div className="flex justify-between items-center p-2 bg-slate-800 rounded">
                             <span className="text-slate-300">Score</span>
-                            <span className="text-white font-bold">{resultAttempt.score}%</span>
+                            <span className="text-white font-bold">{Number.isFinite(Number(resultAttempt?.percentage)) ? Number(resultAttempt.percentage) : (Number.isFinite(Number(resultAttempt?.score)) ? Number(resultAttempt.score) : 0)}%</span>
                         </div>
                         {resultAttempt.perQuestion && resultAttempt.perQuestion.map((pq: any, idx: number) => (
                             <div key={idx} className={cn('p-2 rounded border', pq.correct ? 'border-green-600 bg-green-900/10' : 'border-red-600 bg-red-900/10')}>
                                 <div className="text-sm text-white font-medium">{idx + 1}. {pq.question}</div>
-                                <div className="text-xs text-slate-300">Your answer: {String(pq.given)}</div>
-                                <div className="text-xs text-slate-300">Correct answer: {String(pq.expected)}</div>
+                                <div className="text-xs text-slate-300">Your answer: {_formatAnswerWithOptions(pq.given ?? pq.userAnswer, pq.options)}</div>
+                                <div className="text-xs text-slate-300">Correct answer: {_formatAnswerWithOptions(pq.expected ?? pq.correctAnswer, pq.options)}</div>
                                 <div className="text-xs text-slate-300">Marks: {pq.marks} — {pq.correct ? 'Correct' : 'Incorrect'}</div>
                             </div>
                         ))}
@@ -3180,7 +3253,25 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
 
             showToast('Exam submitted successfully!', 'success');
             setShowSubmitConfirm(false);
-            onExit({ score: data.score, totalMarks: data.totalMarks, examTitle: exam.title, perQuestion: data.perQuestion });
+            const enrichedPerQuestion = Array.isArray(data?.perQuestion)
+                ? data.perQuestion.map((pq: any) => {
+                    const q = exam.questions.find((qq) => String(qq._id) === String(pq?.questionId));
+                    return {
+                        ...pq,
+                        type: q?.type,
+                        options: q?.options,
+                        correctAnswer: q?.correctAnswer,
+                    };
+                })
+                : data?.perQuestion;
+
+            onExit({
+                score: Number.isFinite(Number(data?.percentage)) ? Number(data.percentage) : 0,
+                totalMarks: Number.isFinite(Number(data?.totalMarks)) ? Number(data.totalMarks) : 0,
+                examTitle: exam.title,
+                perQuestion: enrichedPerQuestion,
+                terminated: data?.terminated === true,
+            } as any);
 
         } catch (error: any) {
             console.error('[SUBMIT] Exam submission error:', error);
@@ -4550,11 +4641,11 @@ const ResultScreen = ({ result, onDone }: { result: ExamResult, onDone: () => vo
                                                     <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
                                                         <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-2">
                                                             <div className="text-slate-400">Your answer</div>
-                                                            <div className="text-slate-200 mt-0.5 break-words">{String(q.given)}</div>
+                                                            <div className="text-slate-200 mt-0.5 break-words">{_formatAnswerWithOptions(q.given ?? q.userAnswer, q.options)}</div>
                                                         </div>
                                                         <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-2">
                                                             <div className="text-slate-400">Correct answer</div>
-                                                            <div className="text-slate-200 mt-0.5 break-words">{String(q.expected)}</div>
+                                                            <div className="text-slate-200 mt-0.5 break-words">{_formatAnswerWithOptions(q.expected ?? q.correctAnswer, q.options)}</div>
                                                         </div>
                                                     </div>
                                                     <div className="mt-2 text-xs text-slate-400">Marks: {q.marks}</div>
@@ -4736,7 +4827,18 @@ const CreateExamDialog = ({ open, onOpenChange, lecturer, onExamCreated, showToa
                     <div className="space-y-2 max-h-48 overflow-y-auto p-2 border border-slate-700 rounded-md">
                         {questions.map((q, index) => (
                             <div key={index} className="bg-slate-800 p-2 rounded-md flex justify-between items-center">
-                                <p className="text-sm truncate flex-1">{index + 1}. {q.question}</p>
+                                <div className="flex-1 min-w-0">
+                                    <p className="text-sm truncate">{index + 1}. {q.question}</p>
+                                    {q.type === 'multiple-choice' && Array.isArray(q.options) && q.options.length > 0 && (
+                                        <div className="mt-1 text-xs text-slate-400 space-y-0.5">
+                                            <div className="truncate">Options: {q.options.map((o, i) => `${String.fromCharCode(65 + i)}. ${o}`).join('  |  ')}</div>
+                                            <div className="truncate">Correct: {_formatAnswerWithOptions(q.correctAnswer, q.options)}</div>
+                                        </div>
+                                    )}
+                                    {q.type === 'true-false' && (
+                                        <div className="mt-1 text-xs text-slate-400 truncate">Correct: {String(q.correctAnswer)}</div>
+                                    )}
+                                </div>
                                 <Button type="button" variant="ghost" size="sm" onClick={() => handleRemoveQuestion(index)}><Trash2 className="h-4 w-4 text-red-500"/></Button>
                             </div>
                         ))}
@@ -4939,7 +5041,7 @@ const AIGenerateQuestionsDialog = ({ open, onOpenChange, onAddQuestions, showToa
                          {generatedQuestions.map((q, index) => (
                             <div key={index} className="bg-slate-800 p-2 rounded-md">
                                 <p className="text-sm font-medium">{index + 1}. {q.question}</p>
-                                <p className="text-xs text-green-400 mt-1">Correct Answer: {String(q.correctAnswer)}</p>
+                                <p className="text-xs text-green-400 mt-1">Correct Answer: {_formatAnswerWithOptions(q.correctAnswer, (q as any).options)}</p>
                             </div>
                         ))}
                     </div>
