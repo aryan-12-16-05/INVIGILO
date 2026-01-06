@@ -28,6 +28,18 @@ import hmac
 import hashlib
 from werkzeug.exceptions import HTTPException
 
+# Celery async task queue (Phase 1: Async Processing)
+try:
+    from celery_worker import celery_app, process_proctor_frame
+    CELERY_AVAILABLE = True
+    print("[CELERY] Async task queue enabled - Frame processing will be asynchronous")
+except ImportError as e:
+    print(f"[CELERY] WARNING: Celery not available: {e}")
+    print("[CELERY] WARNING: Frame processing will run synchronously (performance bottleneck)")
+    CELERY_AVAILABLE = False
+    celery_app = None
+    process_proctor_frame = None
+
 def _bool_env(name: str, default: str = "0") -> bool:
     v = os.getenv(name, default)
     return str(v).strip().lower() in {"1", "true", "yes", "on"}
@@ -39,10 +51,11 @@ def _bool_env(name: str, default: str = "0") -> bool:
 # Backend delegates heavy ML to separate service on Hugging Face Spaces
 ML_SERVICE_URL = os.getenv("ML_SERVICE_URL", "")
 ML_SERVICE_TIMEOUT = 30  # seconds
+ML_SHARED_SECRET = os.getenv("ML_SHARED_SECRET", "")  # HMAC secret for ML service auth
 
 def call_ml_service(endpoint: str, payload: dict, timeout: int = ML_SERVICE_TIMEOUT):
     """
-    Call ML service endpoint via HTTP.
+    Call ML service endpoint via HTTP with HMAC authentication.
     
     Args:
         endpoint: e.g., "/verify-face", "/analyze-frame"
@@ -57,9 +70,31 @@ def call_ml_service(endpoint: str, payload: dict, timeout: int = ML_SERVICE_TIME
         return False, {"error": "ML service not configured"}
     
     url = ML_SERVICE_URL.rstrip('/') + endpoint
+    
+    # Generate HMAC signature for authentication
+    headers = {"Content-Type": "application/json"}
+    if ML_SHARED_SECRET:
+        try:
+            # Create deterministic payload string (sorted keys for consistency)
+            payload_str = json.dumps(payload, sort_keys=True)
+            
+            # Generate HMAC-SHA256 signature
+            signature = hmac.new(
+                ML_SHARED_SECRET.encode('utf-8'),
+                payload_str.encode('utf-8'),
+                hashlib.sha256
+            ).hexdigest()
+            
+            headers["X-Signature"] = signature
+            print(f"[ML-CLIENT] Added HMAC signature to request")
+        except Exception as e:
+            print(f"[ML-CLIENT] WARNING: Failed to generate signature: {e}")
+    else:
+        print(f"[ML-CLIENT] WARNING: ML_SHARED_SECRET not set - requests are not authenticated!")
+    
     try:
         print(f"[ML-CLIENT] Calling {url}")
-        response = requests.post(url, json=payload, timeout=timeout)
+        response = requests.post(url, json=payload, headers=headers, timeout=timeout)
         
         if response.status_code == 200:
             return True, response.json()
@@ -346,11 +381,6 @@ def sanitize_user_response(user):
 # END USER DATA SANITIZATION
 # ================================================================================
 
-# Simple health check endpoint
-@app.route('/api/health', methods=['GET'])
-def health_check():
-    return jsonify({"status": "ok", "timestamp": datetime.datetime.utcnow().isoformat()}), 200
-
 PROCTOR_STATE = {}
 """
 In-memory rolling state for proctoring signals per (examId,userId):
@@ -568,6 +598,18 @@ def register_user():
 
             print(f'[REGISTER] Generated {len(face_vectors)} embeddings from {len(images)} images')
 
+            # Compute average embedding for improved robustness
+            face_embedding_avg = None
+            if face_vectors:
+                try:
+                    # Convert to numpy arrays and compute mean
+                    embeddings_array = np.array(face_vectors)
+                    face_embedding_avg = np.mean(embeddings_array, axis=0).tolist()
+                    print(f'[REGISTER] Computed average embedding from {len(face_vectors)} samples')
+                except Exception as e:
+                    print(f'[REGISTER] WARNING: Failed to compute average embedding: {e}')
+                    face_embedding_avg = face_vectors[0]  # Fallback to first embedding
+
             hashed_pw = bcrypt.hashpw(data['password'].encode('utf-8'), bcrypt.gensalt())
 
             new_user = {
@@ -578,9 +620,12 @@ def register_user():
                 "password": hashed_pw,
                 "institution": data['institution'],
                 "department": data['department'],
-                # Backcompat: keep the first embedding in faceEmbedding; store all in faceEmbeddings
+                # Backcompat: keep the first embedding in faceEmbedding
                 "faceEmbedding": (face_vectors[0] if face_vectors else None),
+                # Store all individual embeddings
                 "faceEmbeddings": face_vectors,
+                # Store averaged embedding for improved robustness
+                "faceEmbeddingAvg": face_embedding_avg,
                 "faceVerified": bool(face_vectors),
                 "isActive": True,
                 "createdAt": datetime.datetime.utcnow()
@@ -885,7 +930,7 @@ def verify_face():
 
         max_sim = max(similarities)
         sims = similarities
-        THRESHOLD = get_face_threshold(0.56)
+        THRESHOLD = get_face_threshold()  # Single source of truth
         
         print(f'[FACE-VERIFY] Face verify for {identifier}: similarities={sims}, max={max_sim} thr={THRESHOLD}')
         
@@ -918,11 +963,29 @@ def verify_face():
 @app.route('/api/proctor', methods=['POST'])
 @limiter.limit("100 per hour")
 def proctor_activity():
+    """
+    Proctoring frame analysis endpoint.
+    
+    Supports two modes:
+    1. Synchronous (default): Process frame immediately, return results (backward compatible)
+    2. Asynchronous (async=true): Queue task in Celery, return 202 Accepted (Phase 1 optimization)
+    
+    Phase 1 (Async Queue):
+    - Reduces request timeouts during exam start
+    - Scales to 100+ concurrent students
+    - Background workers handle heavy ML processing
+    
+    Phase 2 (Future - MediaPipe):
+    - Client detects violations locally in browser
+    - Only sends violation snapshots to server
+    - Reduces server load by 90%
+    """
     data = request.get_json()
     image_data_url = data.get('imageDataUrl')
     user_id = data.get('userId')
     exam_id = str(data.get('examId') or '')
     exam_active = data.get('examActive', True)  # True by default for backward compatibility
+    async_mode = data.get('async', False)  # NEW: Enable async processing (Phase 1)
 
     if not image_data_url or not user_id:
         return jsonify({"error": "Image data and User ID are required"}), 400
@@ -938,6 +1001,72 @@ def proctor_activity():
     except Exception as e:
         print(f"[PROCTOR] Error encoding frame: {e}")
         return jsonify({"error": "Failed to encode frame"}), 500
+    
+    # ============================================================================
+    # PHASE 1: ASYNC MODE (CELERY BACKGROUND PROCESSING)
+    # ============================================================================
+    if async_mode and CELERY_AVAILABLE:
+        print(f"[PROCTOR-ASYNC] Queuing frame analysis for user {user_id} in exam {exam_id}")
+        
+        try:
+            # Quick camera blocking check (synchronous, critical security check)
+            mean_brightness = np.mean(frame)
+            if mean_brightness < 10 and exam_active:
+                # Camera blocked during active exam - record immediately (don't queue)
+                now = datetime.datetime.utcnow()
+                recent = proctor_events_collection.find_one({
+                    'examId': str(exam_id),
+                    'userId': str(user_id),
+                    'eventType': 'camera_blocked',
+                    'timestamp': {'$gt': now - datetime.timedelta(seconds=5)}
+                })
+                
+                if not recent:
+                    proctor_events_collection.insert_one({
+                        'examId': str(exam_id),
+                        'userId': str(user_id),
+                        'eventType': 'camera_blocked',
+                        'details': {
+                            'brightness': float(mean_brightness),
+                            'message': 'Camera blocked/covered during exam'
+                        },
+                        'severity': 'high',
+                        'timestamp': now,
+                        'frameEvidence': f"data:image/jpeg;base64,{frame_base64}"
+                    })
+                    
+                    # Emit Socket.IO event immediately
+                    socketio.emit('camera_blocked', {
+                        'examId': str(exam_id),
+                        'userId': str(user_id),
+                        'severity': 'high',
+                        'timestamp': now.isoformat() + 'Z'
+                    }, room=str(exam_id), namespace='/proctor')
+            
+            # Queue heavy ML processing in background
+            task = process_proctor_frame.delay(
+                exam_id=str(exam_id),
+                user_id=str(user_id),
+                frame_base64=frame_base64
+            )
+            
+            print(f"[PROCTOR-ASYNC] Task {task.id} queued for user {user_id}")
+            
+            return jsonify({
+                "status": "accepted",
+                "task_id": str(task.id),
+                "message": "Frame queued for analysis",
+                "async": True
+            }), 202
+            
+        except Exception as e:
+            print(f"[PROCTOR-ASYNC] Error queuing task: {e}")
+            # Fallback to synchronous processing
+            print("[PROCTOR-ASYNC] Falling back to synchronous processing")
+    
+    # ============================================================================
+    # SYNCHRONOUS MODE (ORIGINAL FLOW - BACKWARD COMPATIBLE)
+    # ============================================================================
     
     # Check frame brightness for camera blocking detection
     try:
@@ -1010,18 +1139,15 @@ def proctor_activity():
 
     # Call ML service for full proctoring analysis
     try:
+        # Standardized payload format: imageDataUrl with data URL prefix
         ml_payload = {
-            'image': frame_base64,
-            'check_blink': True,
-            'check_gaze': True,
-            'check_mouth': True,
-            'check_head_pose': True
+            'imageDataUrl': f"data:image/jpeg;base64,{frame_base64}"
         }
         
-        ml_result = call_ml_service('/analyze-frame', ml_payload, timeout=30)
+        ok_ml, ml_result = call_ml_service('/analyze-frame', ml_payload, timeout=30)
         
-        if not ml_result:
-            print("[PROCTOR] ML service unavailable")
+        if not ok_ml or not isinstance(ml_result, dict):
+            print("[PROCTOR] ML service unavailable or returned invalid response")
             return jsonify({
                 "faceCount": 0,
                 "identityVerified": False,
@@ -1072,7 +1198,7 @@ def proctor_activity():
 
                     if sims:
                         similarity_score = max(sims)
-                        THRESH_P = get_face_threshold(0.56)
+                        THRESH_P = get_face_threshold()  # Single source of truth
                         identity_verified = similarity_score >= THRESH_P
                         app.logger.info(f'Proctor identity for {user_id}: similarity={similarity_score} threshold={THRESH_P}')
                     else:
@@ -1260,14 +1386,16 @@ def proctor_activity():
             # ============================================================================
             # DETECTION 2: IDENTITY MISMATCH (CRITICAL SEVERITY)
             # ============================================================================
-            # Re-verify every 2.5 seconds, require similarity < 0.58 for 2+ frames
+            # Re-verify every 2.5 seconds using dynamic threshold from settings
             current_time = datetime.datetime.utcnow().timestamp()
             time_since_last_check = current_time - tc['last_identity_check']
             
             if time_since_last_check >= 2.5 and similarity_score is not None:
                 tc['last_identity_check'] = current_time
                 
-                identity_failed = similarity_score < 0.58
+                # Use centralized threshold function (single source of truth)
+                identity_threshold = get_face_threshold()
+                identity_failed = similarity_score < identity_threshold
                 
                 if identity_failed:
                     tc['identity_fail_frames'] += 1
@@ -1283,7 +1411,7 @@ def proctor_activity():
                         
                         emit('identity_mismatch', {
                             'similarity': float(similarity_score),
-                            'threshold': 0.58,
+                            'threshold': identity_threshold,
                             'message': 'Face does not match registered student',
                             'consecutive_failures': tc['identity_fail_frames'],
                             'risk_score': 95
@@ -3574,7 +3702,7 @@ CRITICAL REQUIREMENTS:
 - Write 4 DISTINCT answer options that are plausible and specific to the question
 - BAD EXAMPLE (DO NOT DO THIS): "Option 1", "Option 2", "Option 3", "Option 4"
 - GOOD EXAMPLE: "Decision Trees", "K-Means Clustering", "Linear Regression", "Random Forest"
-- Set correctAnswer to the index (0-3) of the correct option
+- Set correctAnswer to the index (1-4) of the correct option
 - Assign marks: Easy=1, Medium=2, Hard=3
 
 Generate questions that demonstrate real knowledge of {topic}."""

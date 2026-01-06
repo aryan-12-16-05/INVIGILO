@@ -14,4 +14,9 @@ python-dotenv
 requests
 numpy
 Pillow
+opencv-python-headless==4.8.1.78
+
+# Async Task Queue (Phase 1: Background Processing)
+celery==5.3.4
+redis==5.0.1
 
