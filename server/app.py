@@ -882,10 +882,14 @@ def verify_face():
         if isinstance(normalized_image_data_url, str) and not normalized_image_data_url.startswith('data:'):
             normalized_image_data_url = f"data:image/jpeg;base64,{normalized_image_data_url}"
         
-        # Get stored embeddings
+        # Get stored embeddings - prioritize averaged embedding if available
         stored_embeddings = []
+        if user.get('faceEmbeddingAvg'):
+            # Use averaged embedding first for better robustness
+            stored_embeddings.append(user.get('faceEmbeddingAvg'))
+            print('[FACE-VERIFY] Using averaged embedding for verification')
         if user.get('faceEmbeddings') and isinstance(user.get('faceEmbeddings'), list):
-            stored_embeddings = [e for e in user['faceEmbeddings'] if isinstance(e, (list, tuple))]
+            stored_embeddings.extend([e for e in user['faceEmbeddings'] if isinstance(e, (list, tuple))])
         if not stored_embeddings and user.get('faceEmbedding'):
             stored_embeddings = [user.get('faceEmbedding')]
         
@@ -893,46 +897,78 @@ def verify_face():
             print('[FACE-VERIFY] ERROR: No stored embeddings found')
             return jsonify({"error": "No face data stored for user"}), 404
         
-        # 1) Generate embedding from current image
+        # 1) Generate embedding from current image with multiple preprocessing variants
+        embeddings_to_try = []
+        
+        # Original image
         ok_verify, verify_result = call_ml_service('/verify-face', {
             'imageDataUrl': normalized_image_data_url
-        }, timeout=8)  # Reduced from 15 to 8 seconds for faster response
+        }, timeout=8)
 
-        if not ok_verify:
+        if ok_verify and isinstance(verify_result, dict) and 'embedding' in verify_result:
+            embeddings_to_try.append(verify_result['embedding'])
+            print('[FACE-VERIFY] Generated embedding from original image')
+        else:
+            # If original fails, try with brightness/contrast adjustment
+            try:
+                # Decode image for preprocessing
+                import base64
+                import io
+                from PIL import Image, ImageEnhance
+                
+                img_data = normalized_image_data_url.split(',')[1] if ',' in normalized_image_data_url else normalized_image_data_url
+                img_bytes = base64.b64decode(img_data)
+                img = Image.open(io.BytesIO(img_bytes))
+                
+                # Try brightness-enhanced variant
+                enhancer = ImageEnhance.Brightness(img)
+                bright_img = enhancer.enhance(1.3)
+                
+                # Convert back to base64
+                buffer = io.BytesIO()
+                bright_img.save(buffer, format='JPEG', quality=95)
+                bright_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                bright_url = f"data:image/jpeg;base64,{bright_b64}"
+                
+                ok_bright, bright_result = call_ml_service('/verify-face', {
+                    'imageDataUrl': bright_url
+                }, timeout=8)
+                
+                if ok_bright and isinstance(bright_result, dict) and 'embedding' in bright_result:
+                    embeddings_to_try.append(bright_result['embedding'])
+                    print('[FACE-VERIFY] Generated embedding from brightness-enhanced image')
+            except Exception as e:
+                print(f'[FACE-VERIFY] Preprocessing failed: {e}')
+
+        if not embeddings_to_try:
             detail = (verify_result or {}).get('error') if isinstance(verify_result, dict) else str(verify_result)
-            print(f'[FACE-VERIFY] ERROR: ML verify-face failed: {detail}')
-            # Return faster error response instead of hanging
+            print(f'[FACE-VERIFY] ERROR: Failed to generate any embeddings: {detail}')
             return jsonify({
-                "error": "Face verification timeout or failed",
-                "detail": detail,
+                "error": "Face verification failed",
+                "detail": "Could not detect face in image",
                 "verified": False
             }), 401
 
-        if not isinstance(verify_result, dict) or 'embedding' not in verify_result:
-            print(f'[FACE-VERIFY] ERROR: ML verify-face returned unexpected payload: {verify_result}')
-            return jsonify({"error": "Failed to process face image"}), 400
+        # 2) Match against all stored embeddings using all generated embeddings
+        all_similarities = []
+        for new_emb in embeddings_to_try:
+            for stored in stored_embeddings:
+                sim = _cosine_similarity(new_emb, stored)
+                if sim is not None:
+                    all_similarities.append(sim)
 
-        new_embedding = verify_result['embedding']
-
-        # 2) Match locally (avoid HF /match-face dependency)
-        similarities = []
-        for stored in stored_embeddings:
-            sim = _cosine_similarity(new_embedding, stored)
-            if sim is not None:
-                similarities.append(sim)
-
-        if not similarities:
+        if not all_similarities:
             print('[FACE-VERIFY] ERROR: No similarities computed (invalid embeddings)')
             return jsonify({
                 "error": "Failed to verify face",
                 "detail": "No valid stored embeddings to compare"
             }), 400
 
-        max_sim = max(similarities)
-        sims = similarities
+        max_sim = max(all_similarities)
+        sims = all_similarities
         THRESHOLD = get_face_threshold()  # Single source of truth
         
-        print(f'[FACE-VERIFY] Face verify for {identifier}: similarities={sims}, max={max_sim} thr={THRESHOLD}')
+        print(f'[FACE-VERIFY] Face verify for {identifier}: {len(embeddings_to_try)} variants, {len(stored_embeddings)} stored, similarities={sims[:5]}..., max={max_sim:.3f} thr={THRESHOLD}')
         
         if max_sim >= THRESHOLD:
             return jsonify({

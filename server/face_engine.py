@@ -110,7 +110,7 @@ class FaceEngine:
         if not sims:
             return False, 0.0, []
         max_sim = max(sims)
-        thr = float(os.getenv('FACE_SIMILARITY_THRESHOLD', '0.56'))
+        thr = float(os.getenv('FACE_SIMILARITY_THRESHOLD', '0.50'))
         return max_sim >= thr, max_sim, sims
 
     def verify_any(self, stored_list: List[np.ndarray], image_bgr: np.ndarray, variants: Optional[List[np.ndarray]] = None) -> tuple[bool, float, List[float]]:
@@ -120,7 +120,7 @@ class FaceEngine:
         all_sims: List[float] = []
         best = 0.0
         verified_any = False
-        thr = float(os.getenv('FACE_SIMILARITY_THRESHOLD', '0.60'))
+        thr = float(os.getenv('FACE_SIMILARITY_THRESHOLD', '0.50'))
         if not stored_list:
             return False, 0.0, []
         for s in stored_list:
