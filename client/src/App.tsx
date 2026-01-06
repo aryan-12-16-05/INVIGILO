@@ -2744,27 +2744,28 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
 
     // Enterprise-grade proctoring policy (ProctorU/Examity-aligned)
     const [proctorPolicy] = useState(() => ({
-        // Temporal confirmation: require sustained behavior before flagging
-        faceMissingGraceMs: 6000,        // 6s grace (was 4s) - more forgiving
-        darkGraceMs: 8000,                // 8s grace (was 5s) - lighting changes tolerance
+        // Client-side grace periods (UX feedback before logging)
+        // Backend enforces temporal confirmation separately
+        faceMissingGraceMs: 4000,         // 4s grace - backend confirms at 2s (warning) / 4s (critical)
+        darkGraceMs: 6000,                // 6s grace - lighting adjustment tolerance
         
         // Cooldown periods per violation type (prevent spam, allow human review)
         violationCooldowns: {
-            'face_missing': 15000,        // 15s - rare critical event
-            'multiple_faces': 20000,      // 20s - very rare critical event
-            'camera_dark': 30000,          // 30s - lighting issue, not cheating
-            'gaze_aversion': 12000,       // 12s - natural reading behavior
-            'head_pose': 12000,            // 12s - natural posture shifts
-            'talking': 10000,              // 10s - could be natural sounds
-            'identity_mismatch': 60000,   // 60s - critical, rare
-            'default': 10000               // 10s - default for unknown types
+            'face_missing': 8000,         // 8s - critical event, but allow re-reporting
+            'multiple_faces': 15000,      // 15s - very rare critical event
+            'identity_mismatch': 20000,   // 20s - critical security violation
+            'camera_dark': 20000,         // 20s - lighting issue tolerance
+            'gaze_aversion': 10000,       // 10s - natural reading behavior
+            'head_pose': 10000,           // 10s - natural posture shifts
+            'talking': 8000,              // 8s - potential communication attempts
+            'default': 10000              // 10s - default for unknown types
         } as Record<string, number>,
         
         // Risk accumulation thresholds (commercial proctoring standard)
         riskThresholds: {
-            autoFlag: 150,                 // Auto-flag for human review (not terminate)
-            autoAlert: 250,                // Alert lecturer in real-time
-            criticalLevel: 400            // Multiple critical violations (consider termination)
+            autoFlag: 120,                // Auto-flag for human review (reduced from 150)
+            autoAlert: 200,               // Alert lecturer in real-time (reduced from 250)
+            criticalLevel: 350            // Critical level requiring immediate attention (reduced from 400)
         }
     }));
 
@@ -3776,10 +3777,31 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                             if (data && data.error) {
                                 console.error('[AI] Proctoring error:', data.error);
                             } else {
-                                // Process AI detection results
-                                const faceCount = typeof data?.faceCount === 'number' ? data.faceCount : null;
+                                // ============================================================================
+                                // COMPREHENSIVE AI DETECTION PROCESSING (CLIENT-SIDE)
+                                // ============================================================================
+                                // Backend already enforces temporal confirmation (frame counters).
+                                // Frontend just logs events for student awareness and evidence capture.
                                 
-                                // Face missing detection
+                                const faceCount = typeof data?.faceCount === 'number' ? data.faceCount : null;
+                                const identityVerified = data?.identityVerified === true;
+                                const similarity = typeof data?.similarity === 'number' ? data.similarity : null;
+                                const gazeDirection = data?.gazeDirection || 'Unknown';
+                                const headPose = data?.headPose || 'Unknown';
+                                const mouthStatus = data?.mouthStatus || 'Unknown';
+                                
+                                console.log('[AI] Detection results:', {
+                                    faceCount,
+                                    identityVerified,
+                                    similarity,
+                                    gazeDirection,
+                                    headPose,
+                                    mouthStatus
+                                });
+                                
+                                // ============================================================================
+                                // 1. FACE MISSING DETECTION (Client-side grace period for UX)
+                                // ============================================================================
                                 if (faceCount === 0) {
                                     if (!faceMissingSinceRef.current) faceMissingSinceRef.current = Date.now();
                                 } else {
@@ -3787,31 +3809,111 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                                 }
                                 
                                 if (faceMissingSinceRef.current && Date.now() - faceMissingSinceRef.current >= proctorPolicy.faceMissingGraceMs) {
-                                    if (canLogViolation('face_missing', 60)) {  // Medium risk score (60) - sustained absence
+                                    if (canLogViolation('face_missing', 75)) {  // High risk (75) - leaving camera view
                                         logProctorEvent('face_missing', {
-                                            message: 'No face detected for an extended period.',
+                                            message: 'Student left camera view for extended period',
                                             graceMs: proctorPolicy.faceMissingGraceMs,
                                             faceCount,
                                             frameEvidence: aiFrame,
-                                            severity: 'medium',
-                                            risk_score: 60
+                                            severity: 'high',
+                                            risk_score: 75
                                         });
-                                        // Flag for review instead of immediate pause (ProctorU-style)
-                                        showToast('Face not detected - flagged for review', 'error');
+                                        showToast('⚠️ Face not detected - stay in camera view', 'error');
                                     }
                                 }
                                 
-                                // Multiple faces detection
+                                // ============================================================================
+                                // 2. MULTIPLE FACES DETECTION (CRITICAL - Immediate Pause)
+                                // ============================================================================
                                 if (typeof faceCount === 'number' && faceCount > 1) {
-                                    if (canLogViolation('multiple_faces', 85)) {  // Critical risk score (85)
+                                    if (canLogViolation('multiple_faces', 95)) {  // Critical risk (95)
                                         logProctorEvent('multiple_faces_detected', {
-                                            message: `Multiple faces detected (${faceCount}).`,
+                                            message: `Multiple people detected in frame (${faceCount} faces)`,
                                             faceCount,
                                             frameEvidence: aiFrame,
                                             severity: 'critical',
-                                            risk_score: 85
+                                            risk_score: 95
                                         });
-                                        requestPauseFromClient('Multiple faces detected. Exam is paused pending invigilator decision.');
+                                        requestPauseFromClient(`Multiple people detected (${faceCount} faces). Exam paused for invigilator review.`);
+                                    }
+                                }
+                                
+                                // ============================================================================
+                                // 3. IDENTITY MISMATCH (CRITICAL - Different Person)
+                                // ============================================================================
+                                if (faceCount === 1 && !identityVerified && similarity !== null && similarity < 0.58) {
+                                    if (canLogViolation('identity_mismatch', 95)) {  // Critical risk (95)
+                                        logProctorEvent('identity_mismatch', {
+                                            message: 'Face does not match registered student',
+                                            similarity: similarity,
+                                            threshold: 0.58,
+                                            frameEvidence: aiFrame,
+                                            severity: 'critical',
+                                            risk_score: 95
+                                        });
+                                        requestPauseFromClient('Identity verification failed. Face does not match registered student. Exam paused.');
+                                    }
+                                }
+                                
+                                // ============================================================================
+                                // 4. GAZE AVERSION (LOW SEVERITY - Natural Reading Behavior)
+                                // ============================================================================
+                                // Backend handles temporal confirmation (3 consecutive frames)
+                                // Client just provides UX feedback
+                                const gazeAway = gazeDirection && !['center', 'forward', 'normal', 'Unknown'].includes(gazeDirection);
+                                if (gazeAway) {
+                                    if (canLogViolation('gaze_aversion', 30)) {  // Low risk (30)
+                                        logProctorEvent('gaze_aversion', {
+                                            message: `Eyes looking away from screen (${gazeDirection})`,
+                                            gazeDirection,
+                                            frameEvidence: aiFrame,
+                                            severity: 'low',
+                                            risk_score: 30
+                                        });
+                                        // Subtle notification (not alarming)
+                                        console.log('[PROCTOR] Gaze aversion detected:', gazeDirection);
+                                    }
+                                }
+                                
+                                // ============================================================================
+                                // 5. HEAD POSE (LOW-MEDIUM SEVERITY - Posture Changes)
+                                // ============================================================================
+                                // Backend handles temporal confirmation (3 consecutive frames)
+                                const headTurned = headPose && !['forward', 'center', 'normal', 'Unknown'].includes(headPose);
+                                if (headTurned) {
+                                    const isDownPose = headPose.toLowerCase() === 'down';
+                                    const riskScore = isDownPose ? 55 : 35;  // Down pose is more suspicious
+                                    const severity = isDownPose ? 'medium' : 'low';
+                                    
+                                    if (canLogViolation('head_pose', riskScore)) {
+                                        logProctorEvent('head_pose_change', {
+                                            message: `Head turned away from screen (${headPose})`,
+                                            headPose,
+                                            frameEvidence: aiFrame,
+                                            severity: severity,
+                                            risk_score: riskScore
+                                        });
+                                        if (isDownPose) {
+                                            showToast('⚠️ Please keep your head up and face the camera', 'error');
+                                        }
+                                    }
+                                }
+                                
+                                // ============================================================================
+                                // 6. MOUTH MOVEMENT (LOW SEVERITY - Potential Talking)
+                                // ============================================================================
+                                // Backend handles temporal confirmation (3 consecutive frames)
+                                const mouthOpen = mouthStatus && ['open', 'talking', 'speaking'].includes(mouthStatus.toLowerCase());
+                                if (mouthOpen) {
+                                    if (canLogViolation('talking', 35)) {  // Low-medium risk (35)
+                                        logProctorEvent('mouth_movement', {
+                                            message: 'Sustained mouth movement detected',
+                                            mouthStatus,
+                                            frameEvidence: aiFrame,
+                                            severity: 'low',
+                                            risk_score: 35
+                                        });
+                                        console.log('[PROCTOR] Mouth movement detected:', mouthStatus);
                                     }
                                 }
                             }

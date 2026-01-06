@@ -229,6 +229,265 @@ const ViolationClipPlayer = ({ clips, liveFrame }: { clips: string[]; liveFrame?
 };
 */
 
+// ViolationImagesPanel component
+interface ViolationItem {
+    _id: string;
+    eventType: string;
+    severity: string;
+    timestamp: string;
+    details: any;
+    frameEvidence: string;
+    reviewStatus: 'pending' | 'allowed' | 'rejected';
+    reviewedBy?: string;
+    reviewedAt?: string;
+    reviewNotes?: string;
+}
+
+const ViolationImagesPanel = ({ 
+    examId, 
+    userId, 
+    studentName,
+    socketRef 
+}: { 
+    examId: string; 
+    userId: string; 
+    studentName: string;
+    socketRef: React.MutableRefObject<Socket | null>;
+}) => {
+    const [violations, setViolations] = useState<ViolationItem[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+    const [processingViolation, setProcessingViolation] = useState<string | null>(null);
+
+    // Fetch violations on mount
+    useEffect(() => {
+        const fetchViolations = async () => {
+            try {
+                setLoading(true);
+                setError(null);
+                const response = await fetch(`${API_URL}/exams/${examId}/students/${userId}/violations`);
+                
+                if (!response.ok) {
+                    throw new Error('Failed to fetch violations');
+                }
+                
+                const data = await response.json();
+                setViolations(data.violations || []);
+            } catch (err) {
+                console.error('Error fetching violations:', err);
+                setError('Failed to load violations');
+            } finally {
+                setLoading(false);
+            }
+        };
+
+        if (examId && userId) {
+            fetchViolations();
+        }
+    }, [examId, userId]);
+
+    // Listen for real-time violation review updates
+    useEffect(() => {
+        if (!socketRef.current) return;
+
+        const handleViolationReviewed = (data: any) => {
+            if (data.userId === userId) {
+                setViolations(prev => 
+                    prev.map(v => 
+                        v._id === data.violationId 
+                            ? { ...v, reviewStatus: data.reviewStatus, reviewedBy: data.reviewedBy, reviewedAt: data.reviewedAt }
+                            : v
+                    )
+                );
+            }
+        };
+
+        socketRef.current.on('violation_reviewed', handleViolationReviewed);
+
+        return () => {
+            if (socketRef.current) {
+                socketRef.current.off('violation_reviewed', handleViolationReviewed);
+            }
+        };
+    }, [socketRef, userId]);
+
+    const handleReview = async (violationId: string, action: 'allowed' | 'rejected') => {
+        try {
+            setProcessingViolation(violationId);
+            const response = await fetch(
+                `${API_URL}/exams/${examId}/students/${userId}/violations/${violationId}/review`,
+                {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ 
+                        action: action === 'allowed' ? 'allow' : 'reject',
+                        reviewerId: 'lecturer-' + Date.now() // TODO: Replace with actual lecturer ID from auth
+                    }),
+                }
+            );
+
+            if (!response.ok) {
+                throw new Error('Failed to review violation');
+            }
+
+            const data = await response.json();
+            
+            // Update local state
+            setViolations(prev => 
+                prev.map(v => 
+                    v._id === violationId 
+                        ? { ...v, reviewStatus: action, reviewedBy: data.reviewedBy, reviewedAt: data.reviewedAt }
+                        : v
+                )
+            );
+        } catch (err) {
+            console.error('Error reviewing violation:', err);
+            alert('Failed to review violation. Please try again.');
+        } finally {
+            setProcessingViolation(null);
+        }
+    };
+
+    if (loading) {
+        return (
+            <div className="flex items-center justify-center p-8">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-500"></div>
+            </div>
+        );
+    }
+
+    if (error) {
+        return (
+            <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-lg">
+                <p className="text-red-400 text-sm">{error}</p>
+            </div>
+        );
+    }
+
+    if (violations.length === 0) {
+        return (
+            <div className="p-6 text-center text-slate-400">
+                <AlertTriangle className="h-12 w-12 mx-auto mb-3 opacity-50" />
+                <p>No violations recorded for {studentName}</p>
+            </div>
+        );
+    }
+
+    const getSeverityColor = (severity: string) => {
+        switch (severity.toLowerCase()) {
+            case 'critical': return 'text-red-400 bg-red-500/10 border-red-500/20';
+            case 'high': return 'text-orange-400 bg-orange-500/10 border-orange-500/20';
+            case 'medium': return 'text-yellow-400 bg-yellow-500/10 border-yellow-500/20';
+            default: return 'text-blue-400 bg-blue-500/10 border-blue-500/20';
+        }
+    };
+
+    const getReviewStatusBadge = (status: string) => {
+        switch (status) {
+            case 'allowed':
+                return <span className="px-2 py-1 rounded text-xs bg-green-500/10 text-green-400 border border-green-500/20">Allowed</span>;
+            case 'rejected':
+                return <span className="px-2 py-1 rounded text-xs bg-red-500/10 text-red-400 border border-red-500/20">Rejected</span>;
+            default:
+                return <span className="px-2 py-1 rounded text-xs bg-yellow-500/10 text-yellow-400 border border-yellow-500/20">Pending</span>;
+        }
+    };
+
+    return (
+        <div className="space-y-4 max-h-[600px] overflow-y-auto">
+            <h3 className="text-sm font-semibold text-white mb-4">Captured Violations ({violations.length})</h3>
+            
+            <div className="grid grid-cols-1 gap-4">
+                {violations.map((violation) => (
+                    <div 
+                        key={violation._id} 
+                        className="bg-slate-800/50 border border-slate-700 rounded-lg p-4 space-y-3"
+                    >
+                        {/* Violation Header */}
+                        <div className="flex items-start justify-between">
+                            <div className="space-y-1">
+                                <div className="flex items-center gap-2">
+                                    <span className={cn(
+                                        'px-2 py-1 rounded text-xs font-medium border',
+                                        getSeverityColor(violation.severity)
+                                    )}>
+                                        {violation.severity.toUpperCase()}
+                                    </span>
+                                    {getReviewStatusBadge(violation.reviewStatus)}
+                                </div>
+                                <p className="text-sm text-slate-300">
+                                    {violation.eventType.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                                </p>
+                                <p className="text-xs text-slate-500">
+                                    {new Date(violation.timestamp).toLocaleString()}
+                                </p>
+                            </div>
+                        </div>
+
+                        {/* Frame Evidence */}
+                        {violation.frameEvidence && (
+                            <div className="relative rounded-lg overflow-hidden bg-slate-900">
+                                <img 
+                                    src={violation.frameEvidence} 
+                                    alt="Violation evidence" 
+                                    className="w-full h-48 object-cover"
+                                />
+                            </div>
+                        )}
+
+                        {/* Violation Details */}
+                        {violation.details && (
+                            <div className="text-xs text-slate-400 space-y-1">
+                                {violation.details.description && (
+                                    <p>{violation.details.description}</p>
+                                )}
+                                {violation.details.riskScore !== undefined && (
+                                    <p>Risk Score: <span className="text-orange-400">{violation.details.riskScore}</span></p>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Review Actions */}
+                        {violation.reviewStatus === 'pending' && (
+                            <div className="flex gap-2 pt-2">
+                                <Button
+                                    variant="default"
+                                    size="sm"
+                                    className="flex-1 bg-green-600 hover:bg-green-700"
+                                    onClick={() => handleReview(violation._id, 'allowed')}
+                                    disabled={processingViolation === violation._id}
+                                >
+                                    <CheckCircle className="h-4 w-4" />
+                                    Allow
+                                </Button>
+                                <Button
+                                    variant="default"
+                                    size="sm"
+                                    className="flex-1 bg-red-600 hover:bg-red-700"
+                                    onClick={() => handleReview(violation._id, 'rejected')}
+                                    disabled={processingViolation === violation._id}
+                                >
+                                    <XCircle className="h-4 w-4" />
+                                    Reject
+                                </Button>
+                            </div>
+                        )}
+
+                        {/* Review Info */}
+                        {violation.reviewStatus !== 'pending' && violation.reviewedBy && (
+                            <div className="text-xs text-slate-500 pt-2 border-t border-slate-700">
+                                Reviewed by {violation.reviewedBy} at {new Date(violation.reviewedAt!).toLocaleString()}
+                            </div>
+                        )}
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+};
+
 export default function LiveMonitoringDashboard({
     examId,
     examTitle,
@@ -1167,7 +1426,7 @@ export default function LiveMonitoringDashboard({
 
                         {/* Violation History */}
                         {selectedStudent.latestViolation && (
-                            <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4">
+                            <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 mb-4">
                                 <div className="flex items-start gap-3">
                                     <AlertTriangle className="h-5 w-5 text-red-400 mt-0.5" />
                                     <div className="flex-1">
@@ -1178,6 +1437,14 @@ export default function LiveMonitoringDashboard({
                                 </div>
                             </div>
                         )}
+
+                        {/* Violation Images Section */}
+                        <ViolationImagesPanel 
+                            examId={examId} 
+                            userId={selectedStudent.userId}
+                            studentName={selectedStudent.name}
+                            socketRef={socketRef}
+                        />
 
                         {/* Action Buttons */}
                         <div className="flex gap-3 mt-6">

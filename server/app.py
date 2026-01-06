@@ -1203,7 +1203,12 @@ def proctor_activity():
                     # Violation tracking
                     'last_identity_check': 0,
                     'violation_history': {},  # Track repeated violations for escalation
-                    'first_violation_emitted': {}  # Track if first violation was emitted (bypass cooldown)
+                    'first_violation_emitted': {},  # Track if first violation was emitted (bypass cooldown)
+                    
+                    # ENHANCED: Dual gaze tracking (frequency + distance)
+                    'gaze_frequency_count': 0,  # Count of gaze away incidents
+                    'gaze_frequency_window_start': 0,  # Timestamp for 30-second window
+                    'gaze_extreme_detected': False,  # Flag for extreme head turn
                 }
             
             tc = st['temporal_counters']
@@ -1290,19 +1295,89 @@ def proctor_activity():
                         tc['identity_fail_frames'] = 0
             
             # ============================================================================
-            # DETECTION 3: GAZE AVERSION (LOW → MEDIUM SEVERITY)
+            # DETECTION 3: ENHANCED GAZE AVERSION WITH DUAL TRACKING
             # ============================================================================
-            # Ratio ≥1.35 for ≥3 consecutive frames
+            # Two independent triggers:
+            # 1. FREQUENCY: Student looks away frequently (5+ times in 30 seconds)
+            # 2. DISTANCE: Student looks extremely far away (full face turn, even once)
+            
             gaze = results.get('gazeDirection', 'Unknown')
-            gaze_away = gaze and str(gaze).lower() not in ('center', 'normal', 'forward', 'unknown')
+            head_pose = results.get('headPose', 'Unknown')
+            gaze_str = str(gaze).lower()
+            head_str = str(head_pose).lower()
+            
+            # Define what counts as "away" vs "extreme"
+            gaze_away = gaze_str not in ('center', 'normal', 'forward', 'unknown')
+            
+            # Extreme = full face turn or looking very far (left/right + down = cheating posture)
+            is_extreme = (
+                head_str in ('left', 'right', 'down-left', 'down-right') or
+                (gaze_str in ('left', 'right') and head_str == 'down')
+            )
+            
+            current_time = datetime.datetime.utcnow().timestamp()
+            
+            # Initialize frequency window if needed
+            if tc['gaze_frequency_window_start'] == 0:
+                tc['gaze_frequency_window_start'] = current_time
+            
+            # Reset frequency window every 30 seconds
+            if current_time - tc['gaze_frequency_window_start'] >= 30:
+                tc['gaze_frequency_count'] = 0
+                tc['gaze_frequency_window_start'] = current_time
             
             if gaze_away:
                 tc['gaze_away_frames'] += 1
                 tc['gaze_forward_frames'] = 0
                 
-                # Require 3 consecutive frames
-                if tc['gaze_away_frames'] >= 3:
-                    # Escalate severity based on repeated violations
+                # ===== TRIGGER 1: EXTREME DISTANCE (IMMEDIATE CRITICAL) =====
+                if is_extreme and tc['gaze_away_frames'] >= 2:  # Confirm over 2 frames
+                    if not tc['gaze_extreme_detected']:  # Only trigger once per extreme event
+                        tc['gaze_extreme_detected'] = True
+                        
+                        is_first = 'gaze_extreme' not in tc['first_violation_emitted']
+                        if is_first:
+                            tc['first_violation_emitted']['gaze_extreme'] = True
+                            if 'gaze_extreme' in st['last_emit']:
+                                del st['last_emit']['gaze_extreme']
+                        
+                        emit('gaze_extreme', {
+                            'direction': gaze,
+                            'head_pose': head_pose,
+                            'message': f'Extreme head turn detected ({head_pose}, {gaze})',
+                            'violation_type': 'distance',
+                            'risk_score': 85
+                        }, 'critical')
+                
+                # ===== TRIGGER 2: HIGH FREQUENCY (CUMULATIVE CRITICAL) =====
+                # Increment frequency counter after 3 consecutive frames of looking away
+                if tc['gaze_away_frames'] == 3:
+                    tc['gaze_frequency_count'] += 1
+                    print(f"[GAZE-FREQUENCY] Incident #{tc['gaze_frequency_count']} in current window")
+                    
+                    # Trigger if 5+ incidents in 30-second window
+                    if tc['gaze_frequency_count'] >= 5:
+                        is_first = 'gaze_frequency' not in tc['first_violation_emitted']
+                        if is_first:
+                            tc['first_violation_emitted']['gaze_frequency'] = True
+                            if 'gaze_frequency' in st['last_emit']:
+                                del st['last_emit']['gaze_frequency']
+                        
+                        emit('gaze_frequency', {
+                            'direction': gaze,
+                            'message': f'Frequent gaze aversion detected ({tc["gaze_frequency_count"]} incidents)',
+                            'incident_count': tc['gaze_frequency_count'],
+                            'violation_type': 'frequency',
+                            'risk_score': 80
+                        }, 'critical')
+                        
+                        # Reset counter after emitting to avoid spam
+                        tc['gaze_frequency_count'] = 0
+                        tc['gaze_frequency_window_start'] = current_time
+                
+                # ===== STANDARD GAZE TRACKING (LOW/MEDIUM SEVERITY) =====
+                # Keep original logic for non-critical gaze issues
+                if tc['gaze_away_frames'] >= 3 and not is_extreme:
                     history_key = 'gaze_aversion'
                     tc['violation_history'][history_key] = tc['violation_history'].get(history_key, 0) + 1
                     
@@ -1328,16 +1403,16 @@ def proctor_activity():
                     }, severity)
             else:
                 tc['gaze_forward_frames'] += 1
-                # Reset only after 3 frames of normal gaze
+                # Reset counters after 3 frames of normal gaze
                 if tc['gaze_forward_frames'] >= 3:
                     tc['gaze_away_frames'] = 0
+                    tc['gaze_extreme_detected'] = False  # Allow re-detection of extreme events
             
             # ============================================================================
             # DETECTION 4: HEAD POSE (LOW → MEDIUM SEVERITY)
             # ============================================================================
             # Vertical angle ≥32° or horizontal offset ≥14px for ≥3 frames
-            head_pose = results.get('headPose', 'Unknown')
-            head_turned = head_pose and str(head_pose).lower() not in ('forward', 'center', 'normal', 'unknown')
+            head_turned = head_pose and head_str not in ('forward', 'center', 'normal', 'unknown')
             
             if head_turned:
                 tc['head_turned_frames'] += 1
@@ -4049,6 +4124,135 @@ def handle_ping():
         - 'pong': Response to ping
     """
     emit('pong', {'timestamp': datetime.datetime.utcnow().isoformat() + 'Z'})
+
+
+@socketio.on('student-video-frame', namespace='/proctor')
+
+
+@app.route('/api/exams/<exam_id>/students/<user_id>/violations', methods=['GET'])
+def get_student_violations(exam_id, user_id):
+    """
+    Get all violations with frame evidence for a specific student.
+    Used by lecturer to review incidents with captured images.
+    
+    Returns:
+        200: List of violations with images, sorted by timestamp (newest first)
+    """
+    try:
+        # Find all proctoring events for this student
+        violations = list(proctor_events_collection.find({
+            'examId': str(exam_id),
+            'userId': str(user_id),
+            'eventType': {'$in': ['gaze_extreme', 'gaze_frequency', 'identity_mismatch', 'multiple_faces', 'face_missing']}
+        }).sort('timestamp', -1).limit(50))  # Last 50 violations
+        
+        # Format response
+        formatted = []
+        for v in violations:
+            formatted.append({
+                '_id': str(v['_id']),
+                'eventType': v.get('eventType'),
+                'severity': v.get('severity'),
+                'timestamp': v.get('timestamp').isoformat() + 'Z' if v.get('timestamp') else None,
+                'details': v.get('details', {}),
+                'frameEvidence': v.get('frameEvidence'),  # Base64 image
+                'reviewStatus': v.get('reviewStatus', 'pending'),  # pending, allowed, rejected
+                'reviewedBy': v.get('reviewedBy'),
+                'reviewedAt': v.get('reviewedAt').isoformat() + 'Z' if v.get('reviewedAt') else None
+            })
+        
+        return jsonify({'violations': formatted}), 200
+    
+    except Exception as e:
+        app.logger.error(f'Error fetching violations: {e}')
+        return jsonify({'error': 'Failed to fetch violations'}), 500
+
+
+@app.route('/api/exams/<exam_id>/students/<user_id>/violations/<violation_id>/review', methods=['POST'])
+def review_violation(exam_id, user_id, violation_id):
+    """
+    Allow or reject a specific violation incident.
+    
+    Request Body:
+        action (str): 'allow' or 'reject'
+        reviewerId (str): Lecturer ID performing the review
+        notes (str, optional): Additional review notes
+    
+    Returns:
+        200: Success message
+    """
+    try:
+        data = request.get_json()
+        action = data.get('action')  # 'allow' or 'reject'
+        reviewer_id = data.get('reviewerId')
+        notes = data.get('notes', '')
+        
+        if action not in ['allow', 'reject']:
+            return jsonify({'error': 'Invalid action. Must be "allow" or "reject"'}), 400
+        
+        if not reviewer_id:
+            return jsonify({'error': 'reviewerId is required'}), 400
+        
+        # Update violation with review decision
+        result = proctor_events_collection.update_one(
+            {'_id': ObjectId(violation_id)},
+            {
+                '$set': {
+                    'reviewStatus': 'allowed' if action == 'allow' else 'rejected',
+                    'reviewedBy': str(reviewer_id),
+                    'reviewedAt': datetime.datetime.utcnow(),
+                    'reviewNotes': notes
+                }
+            }
+        )
+        
+        if result.matched_count == 0:
+            return jsonify({'error': 'Violation not found'}), 404
+        
+        # If rejected, increase risk score for the student
+        if action == 'reject':
+            # Log as confirmed violation
+            proctor_events_collection.insert_one({
+                'examId': str(exam_id),
+                'userId': str(user_id),
+                'eventType': 'violation_confirmed',
+                'severity': 'high',
+                'details': {
+                    'originalViolationId': str(violation_id),
+                    'reviewedBy': str(reviewer_id),
+                    'notes': notes,
+                    'message': 'Violation confirmed by lecturer review'
+                },
+                'timestamp': datetime.datetime.utcnow()
+            })
+        
+        # Broadcast update to lecturer dashboard
+        try:
+            review_status = 'allowed' if action == 'allow' else 'rejected'
+            socketio.emit('violation_reviewed', {
+                'examId': str(exam_id),
+                'userId': str(user_id),
+                'violationId': str(violation_id),
+                'reviewStatus': review_status,
+                'reviewedBy': str(reviewer_id),
+                'reviewedAt': datetime.datetime.utcnow().isoformat() + 'Z'
+            }, room=str(exam_id), namespace='/proctor')
+        except Exception as e:
+            app.logger.error(f'Failed to broadcast violation review: {e}')
+        
+        review_status = 'allowed' if action == 'allow' else 'rejected'
+        
+        return jsonify({
+            'message': f'Violation {action}ed successfully',
+            'reviewStatus': review_status,
+            'reviewedBy': str(reviewer_id),
+            'reviewedAt': datetime.datetime.utcnow().isoformat() + 'Z',
+            'violationId': str(violation_id)
+        }), 200
+    
+    except Exception as e:
+        app.logger.error(f'Error reviewing violation: {e}')
+        return jsonify({'error': 'Failed to review violation'}), 500
 
 
 @socketio.on('student-video-frame', namespace='/proctor')
