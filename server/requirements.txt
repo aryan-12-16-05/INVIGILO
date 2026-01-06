@@ -12,7 +12,7 @@ pymongo[srv]==4.10.1
 bcrypt
 python-dotenv
 requests
-numpy
+numpy<2.0
 Pillow
 opencv-python-headless==4.8.1.78
 
