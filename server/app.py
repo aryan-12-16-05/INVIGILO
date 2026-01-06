@@ -4371,9 +4371,19 @@ def review_violation(exam_id, user_id, violation_id):
         if result.matched_count == 0:
             return jsonify({'error': 'Violation not found'}), 404
         
-        # If rejected, increase risk score for the student
-        if action == 'reject':
-            # Log as confirmed violation
+        # Adjust student risk score based on action
+        if action == 'allow':
+            # Reduce risk score when violation is approved/allowed
+            violation = proctor_events_collection.find_one({'_id': ObjectId(violation_id)})
+            if violation:
+                risk_reduction = violation.get('details', {}).get('risk_score', 10)
+                exam_attempts_collection.update_one(
+                    {'exam_id': str(exam_id), 'user_id': str(user_id)},
+                    {'$inc': {'risk_score': -risk_reduction}}
+                )
+                app.logger.info(f'[VIOLATION-REVIEW] Reduced risk score by {risk_reduction} for user {user_id}')
+        elif action == 'reject':
+            # Keep risk score as is and log confirmed violation
             proctor_events_collection.insert_one({
                 'examId': str(exam_id),
                 'userId': str(user_id),
@@ -4815,7 +4825,8 @@ def handle_stop_student(data):
                         'score_overridden': True,
                         'override_reason': reason,
                         'terminated_at': datetime.datetime.utcnow(),
-                        'terminated_by': 'lecturer'
+                        'terminated_by': 'lecturer',
+                        'end_time': datetime.datetime.utcnow()  # Mark as completed
                     }
                 },
                 upsert=True

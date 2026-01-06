@@ -13,16 +13,17 @@ from imutils import face_utils
 # === EYE BLINK DETECTION THRESHOLDS ===
 # Eye Aspect Ratio (EAR) - ratio of horizontal to vertical eye distance
 # Higher value = more closed eye required to register as blink
-# Typical range: 3.0 - 4.5
-BLINK_THRESHOLD = 3.6
+# Typical range: 3.0 - 5.0
+# Setting to 4.2 for reduced false positives - natural blinking won't trigger
+BLINK_THRESHOLD = 4.2
 
 # === GAZE DETECTION THRESHOLDS ===
 # Ratio of white pixels on one side vs other side of eye
 # Higher value = more extreme eye movement required (stricter)
 # Lower value = detects even small eye movements (more sensitive)
-# Typical range: 1.0 - 1.5
-# Setting to 1.5 for natural reading and 4 FPS temporal confirmation
-GAZE_RATIO_THRESHOLD = 1.5
+# Typical range: 1.0 - 2.5
+# Setting to 2.0 for reduced false positives - requires significant gaze deviation
+GAZE_RATIO_THRESHOLD = 2.0
 
 # Threshold value for binary eye segmentation
 # Lower value = more sensitive to darker pixels (pupil/iris)
@@ -34,25 +35,25 @@ GAZE_THRESHOLD_VALUE = 42
 # === MOUTH DETECTION THRESHOLDS ===
 # Distance in pixels between outer top and bottom lip
 # Higher value = mouth must open wider to register
-# Typical range: 15 - 30 pixels (depends on camera distance)
-# Setting to 28 to avoid false positives from breathing, yawning (requires clear talking)
-MOUTH_OPEN_THRESHOLD = 28
+# Typical range: 15 - 40 pixels (depends on camera distance)
+# Setting to 35 to avoid false positives from breathing, yawning (requires clear talking)
+MOUTH_OPEN_THRESHOLD = 35
 
 # === HEAD POSE DETECTION THRESHOLDS ===
 # Angle in degrees for vertical head movement (up/down)
 # Higher value = more head tilt required (less strict)
 # Lower value = detects smaller head movements (more strict)
-# Typical range: 20 - 40 degrees
-# Setting to 35 for natural reading angles and posture shifts (ProctorU-style)
-HEAD_VERTICAL_ANGLE_THRESHOLD = 35
+# Typical range: 20 - 50 degrees
+# Setting to 45 for natural reading angles and posture shifts - more tolerance
+HEAD_VERTICAL_ANGLE_THRESHOLD = 45
 
 # Horizontal offset in pixels for lateral head movement (left/right)
 # Distance nose must be from eye center line
 # Higher value = more head turn required (less strict)
 # Lower value = detects smaller head turns (more strict)
-# Typical range: 5 - 15 pixels (depends on camera distance)
-# Setting to 12 for natural movement tolerance (Examity-style)
-HEAD_HORIZONTAL_OFFSET_THRESHOLD = 12
+# Typical range: 5 - 20 pixels (depends on camera distance)
+# Setting to 18 for natural movement tolerance - reduced false positives
+HEAD_HORIZONTAL_OFFSET_THRESHOLD = 18
 
 # === AUDIO DETECTION THRESHOLDS ===
 # Amplitude range for human voice detection

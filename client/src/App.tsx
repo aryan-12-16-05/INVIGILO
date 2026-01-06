@@ -1870,7 +1870,11 @@ const ResultsAnalysisPage = ({ user, exams, onLogout, onBack, showToast, navigat
         exam.targetYear === user.year
     );
 
-    const completedExams = userExams.filter(e => (e as any).attemptForUser || (e as any).completedByUser);
+    const completedExams = userExams.filter(e => {
+        const attempt = (e as any).attemptForUser;
+        // Include completed exams OR terminated exams
+        return (e as any).completedByUser || attempt || (attempt?.status === 'terminated_by_proctor');
+    });
     const averageScore = completedExams.length > 0 ? Math.round(completedExams.reduce((acc, e) => {
         const attempt = (e as any).attemptForUser;
         // Ensure we're using the percentage score

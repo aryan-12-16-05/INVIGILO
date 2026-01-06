@@ -426,14 +426,26 @@ const ViolationImagesPanel = ({
                             </div>
                         </div>
 
-                        {/* Frame Evidence */}
+                        {/* Frame Evidence (Photo/Video) */}
                         {violation.frameEvidence && (
-                            <div className="relative rounded-lg overflow-hidden bg-slate-900">
-                                <img 
-                                    src={violation.frameEvidence} 
-                                    alt="Violation evidence" 
-                                    className="w-full h-48 object-cover"
-                                />
+                            <div className="space-y-2">
+                                <div className="relative rounded-lg overflow-hidden bg-slate-900 border border-slate-700">
+                                    <img 
+                                        src={violation.frameEvidence} 
+                                        alt="Violation evidence" 
+                                        className="w-full h-48 object-cover"
+                                    />
+                                    <div className="absolute bottom-2 left-2 bg-black/70 text-white px-2 py-1 rounded text-xs">
+                                        Captured Evidence
+                                    </div>
+                                </div>
+                                {/* Show screen recording note if available */}
+                                {violation.details?.screenRecording && (
+                                    <div className="text-xs text-blue-400 flex items-center gap-1">
+                                        <Monitor className="h-3 w-3" />
+                                        Screen recording captured
+                                    </div>
+                                )}
                             </div>
                         )}
 
@@ -1053,13 +1065,22 @@ export default function LiveMonitoringDashboard({
                                                 RISK: {currentViolation?.riskScore}%
                                             </div>
 
-                                            {/* Live Frame or Captured Evidence */}
+                                            {/* Live Frame, Video Clip, or Captured Evidence */}
                                             {currentViolation?.frameEvidence ? (
-                                                <img 
-                                                    src={currentViolation.frameEvidence} 
-                                                    alt="Violation Evidence"
-                                                    className="w-full h-full object-cover"
-                                                />
+                                                <div className="relative w-full h-full">
+                                                    <img 
+                                                        src={currentViolation.frameEvidence} 
+                                                        alt="Violation Evidence"
+                                                        className="w-full h-full object-cover"
+                                                    />
+                                                    {/* Show video clip if available in violation clips */}
+                                                    {violationClipsRef.current[currentViolation.userId]?.length > 0 && (
+                                                        <div className="absolute bottom-2 left-2 bg-black/60 text-white px-2 py-1 rounded text-xs flex items-center gap-1">
+                                                            <Monitor className="h-3 w-3" />
+                                                            Video Available
+                                                        </div>
+                                                    )}
+                                                </div>
                                             ) : videoFramesRef.current[currentViolation?.userId] ? (
                                                 <img 
                                                     src={videoFramesRef.current[currentViolation.userId]} 
