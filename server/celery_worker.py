@@ -1,3 +1,5 @@
+raise ImportError("Celery has been removed from this project. This module is deprecated and should not be imported.")
+
 """
 Celery Worker Configuration for Invigilo Proctoring System
 ============================================================

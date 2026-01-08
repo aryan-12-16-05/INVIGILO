@@ -27,8 +27,11 @@ interface LiveStudent {
     timeRemaining: number;
     latestViolation?: string;
     violationTime?: string;
+    latestViolationEventId?: string;
     videoStreamUrl?: string;
     screenStreamUrl?: string;
+    violationVideoUrl?: string;
+    latestVideoUrl?: string; // legacy/fallback
 }
 
 // Violation Queue Item - each violation is a separate queue entry
@@ -48,6 +51,7 @@ interface ViolationQueueItem {
     riskScore: number;
     frameEvidence?: string; // Video frame at time of violation
     details?: any; // Additional violation details
+    violationVideoUrl?: string;
 }
 
 const Button = ({ children, variant = 'default', size = 'default', className = '', onClick, disabled }: any) => (
@@ -514,6 +518,7 @@ export default function LiveMonitoringDashboard({
     const [currentPage, setCurrentPage] = useState(0);
     const [currentViolationIndex, setCurrentViolationIndex] = useState(0);
     const [selectedStudent, setSelectedStudent] = useState<LiveStudent | null>(null);
+    const [clipModal, setClipModal] = useState<{ url: string; student: string } | null>(null);
     
     // QUEUE-BASED VIOLATION REVIEW SYSTEM
     const [violationQueue, setViolationQueue] = useState<ViolationQueueItem[]>([]);
@@ -619,7 +624,8 @@ export default function LiveMonitoringDashboard({
                             details: {
                                 violationTime: student.violationTime,
                                 latestViolation: student.latestViolation
-                            }
+                            },
+                            violationVideoUrl: student.violationVideoUrl
                         };
                         
                         // Add to queue (FIFO - push to end)
@@ -952,6 +958,17 @@ export default function LiveMonitoringDashboard({
                                             </div>
                                         )}
 
+                                        {/* Play Clip Overlay if violation clip available */}
+                                        {student.violationVideoUrl && (
+                                            <button
+                                                onClick={(e) => { e.stopPropagation(); setClipModal({ url: student.violationVideoUrl!, student: student.name }); }}
+                                                className="absolute bottom-2 right-2 bg-black/70 hover:bg-black/80 text-white text-xs font-semibold px-3 py-1.5 rounded-md z-30"
+                                                title="Play violation clip"
+                                            >
+                                                Play Clip
+                                            </button>
+                                        )}
+
                                         {/* Face Detection Border */}
                                         {student.faceDetected && (
                                             <div className={cn(
@@ -1066,7 +1083,9 @@ export default function LiveMonitoringDashboard({
                                             </div>
 
                                             {/* Live Frame, Video Clip, or Captured Evidence */}
-                                            {currentViolation?.frameEvidence ? (
+                                            {currentViolation?.violationVideoUrl ? (
+                                                <video controls className="w-full h-full object-cover" src={currentViolation.violationVideoUrl} />
+                                            ) : currentViolation?.frameEvidence ? (
                                                 <div className="relative w-full h-full">
                                                     <img 
                                                         src={currentViolation.frameEvidence} 
@@ -1518,6 +1537,23 @@ export default function LiveMonitoringDashboard({
                         </div>
                     </motion.div>
                 </motion.div>
+            )}
+
+            {/* Clip Modal */}
+            {clipModal && (
+                <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={() => setClipModal(null)}>
+                    <div className="bg-slate-900 border border-slate-700 rounded-lg p-4 w-full max-w-3xl" onClick={(e) => e.stopPropagation()}>
+                        <div className="flex items-center justify-between mb-3">
+                            <h3 className="text-white font-semibold">Latest Violation Clip — {clipModal?.student ?? ''}</h3>
+                            <button className="text-slate-300 hover:text-white" onClick={() => setClipModal(null)}>
+                                <X className="h-5 w-5" />
+                            </button>
+                        </div>
+                        <video controls autoPlay className="w-full rounded-lg border border-slate-800">
+                            <source src={clipModal?.url ?? ''} />
+                        </video>
+                    </div>
+                </div>
             )}
         </div>
     );

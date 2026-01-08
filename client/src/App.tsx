@@ -2848,6 +2848,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
 
     const faceMissingSinceRef = useRef<number | null>(null);
     const darkSinceRef = useRef<number | null>(null);
+    const gazeAwaySinceRef = useRef<number | null>(null);
     const lastViolationAtRef = useRef<Record<string, number>>({});
     const riskScoreRef = useRef<number>(0);  // Cumulative risk score
 
@@ -2910,6 +2911,112 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
             return null;
         }
     }, [exam._id, user._id]);
+
+    const uploadEvidenceFile = useCallback(async (file: File, meta: { evidenceType: string; violationType: string; violationScore?: number; eventId?: string }) => {
+        try {
+            const form = new FormData();
+            form.append('file', file);
+            form.append('examId', exam._id);
+            form.append('userId', user._id);
+            form.append('evidenceType', meta.evidenceType);
+            form.append('violationType', meta.violationType);
+            form.append('violationScore', String(meta.violationScore ?? 0));
+            if (meta.eventId) form.append('eventId', meta.eventId);
+
+            const res = await fetch(`${API_URL}/upload-evidence`, {
+                method: 'POST',
+                body: form,
+            });
+            const j = await res.json();
+            if (!res.ok) return null;
+            return j;
+        } catch {
+            return null;
+        }
+    }, [exam._id, user._id]);
+
+    const violationClipBusyRef = useRef(false);
+    const lastViolationClipAtRef = useRef<number>(0);
+
+    const VIOLATION_CLIP_MS = 4000;
+
+    const recordWebcamClip = useCallback(async (durationMs: number = 4000): Promise<Blob | null> => {
+        try {
+            const v = videoRef.current as any;
+            const stream = (v?.srcObject as MediaStream | null) || null;
+            if (!stream) return null;
+            if (!stream.getVideoTracks || stream.getVideoTracks().length === 0) return null;
+
+            const preferredTypes = [
+                'video/webm;codecs=vp9,opus',
+                'video/webm;codecs=vp8,opus',
+                'video/webm',
+            ];
+            const mimeType = preferredTypes.find(t => (window as any).MediaRecorder?.isTypeSupported?.(t)) || '';
+
+            const chunks: BlobPart[] = [];
+            const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+
+            return await new Promise<Blob | null>((resolve) => {
+                let stopped = false;
+                recorder.ondataavailable = (e: BlobEvent) => {
+                    if (e.data && e.data.size > 0) chunks.push(e.data);
+                };
+                recorder.onerror = () => {
+                    if (stopped) return;
+                    stopped = true;
+                    resolve(null);
+                };
+                recorder.onstop = () => {
+                    if (stopped) return;
+                    stopped = true;
+                    try {
+                        const blob = new Blob(chunks, { type: mimeType || 'video/webm' });
+                        resolve(blob.size > 0 ? blob : null);
+                    } catch {
+                        resolve(null);
+                    }
+                };
+
+                try {
+                    recorder.start();
+                    window.setTimeout(() => {
+                        try {
+                            if (recorder.state !== 'inactive') recorder.stop();
+                        } catch {
+                            resolve(null);
+                        }
+                    }, durationMs);
+                } catch {
+                    resolve(null);
+                }
+            });
+        } catch {
+            return null;
+        }
+    }, []);
+
+    const recordAndUploadViolationClip = useCallback(async (args: { eventId: string; violationType: string; violationScore?: number }) => {
+        const now = Date.now();
+        // Prevent overlapping/rapid clip capture to avoid burning CPU/bandwidth.
+        if (violationClipBusyRef.current) return;
+        if (now - lastViolationClipAtRef.current < 8000) return;
+        lastViolationClipAtRef.current = now;
+        violationClipBusyRef.current = true;
+        try {
+            const blob = await recordWebcamClip(VIOLATION_CLIP_MS);
+            if (!blob) return;
+            const file = new File([blob], `${args.violationType}-${Date.now()}.webm`, { type: blob.type || 'video/webm' });
+            await uploadEvidenceFile(file, {
+                evidenceType: 'video',
+                violationType: args.violationType,
+                violationScore: args.violationScore ?? 0,
+                eventId: args.eventId,
+            });
+        } finally {
+            violationClipBusyRef.current = false;
+        }
+    }, [recordWebcamClip, uploadEvidenceFile]);
 
     const captureScreenFrame = useCallback((targetW: number = 420, quality: number = 0.7): string | null => {
         const v = screenVideoRef.current;
@@ -2999,20 +3106,26 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
         securityModalOpenRef.current = securityModalOpen;
     }, [securityModalOpen]);
 
-    const logProctorEvent = useCallback(async (eventType: string, details: any = {}) => {
+    const logProctorEvent = useCallback(async (eventType: string, details: any = {}): Promise<string | null> => {
         try {
-            await fetch(`${API_URL}/proctor/event`, {
+            const snapshot = typeof details?.frameEvidence === 'string' ? details.frameEvidence : undefined;
+            const res = await fetch(`${API_URL}/proctor/event`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     examId: exam._id,
                     userId: user._id,
                     eventType,
-                    details: { ...details, at: new Date().toISOString() }
+                    details: { ...details, at: new Date().toISOString() },
+                    snapshot
                 })
             });
+            const j = await res.json().catch(() => null);
+            if (res.ok && j && typeof j.eventId === 'string') return j.eventId;
+            return null;
         } catch {
             // best-effort: don't block exam if logging fails
+            return null;
         }
     }, [exam._id, user._id]);
 
@@ -3812,7 +3925,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                         
                         if (darkSinceRef.current && Date.now() - darkSinceRef.current >= proctorPolicy.darkGraceMs) {
                             if (canLogViolation('camera_dark', 65)) {  // High risk score (65)
-                                logProctorEvent('camera_dark_or_covered', {
+                                const eventId = await logProctorEvent('camera_dark_or_covered', {
                                     message: 'Camera feed appears dark/covered for an extended period.',
                                     brightness,
                                     graceMs: proctorPolicy.darkGraceMs,
@@ -3820,6 +3933,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                                     severity: 'high',
                                     risk_score: 65
                                 });
+                                if (eventId) void recordAndUploadViolationClip({ eventId, violationType: 'camera_dark_or_covered', violationScore: 65 });
                                 // Note: No auto-pause - flag for human review instead (ProctorU-style)
                                 showToast('Camera appears dark - flagged for review', 'error');
                             }
@@ -3905,7 +4019,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                                 
                                 if (faceMissingSinceRef.current && Date.now() - faceMissingSinceRef.current >= proctorPolicy.faceMissingGraceMs) {
                                     if (canLogViolation('face_missing', 75)) {  // High risk (75) - leaving camera view
-                                        logProctorEvent('face_missing', {
+                                        const eventId = await logProctorEvent('face_missing', {
                                             message: 'Student left camera view for extended period',
                                             graceMs: proctorPolicy.faceMissingGraceMs,
                                             faceCount,
@@ -3913,6 +4027,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                                             severity: 'high',
                                             risk_score: 75
                                         });
+                                        if (eventId) void recordAndUploadViolationClip({ eventId, violationType: 'face_missing', violationScore: 75 });
                                         showToast('⚠️ Face not detected - stay in camera view', 'error');
                                     }
                                 }
@@ -3922,13 +4037,14 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                                 // ============================================================================
                                 if (typeof faceCount === 'number' && faceCount > 1) {
                                     if (canLogViolation('multiple_faces', 95)) {  // Critical risk (95)
-                                        logProctorEvent('multiple_faces_detected', {
+                                        const eventId = await logProctorEvent('multiple_faces_detected', {
                                             message: `Multiple people detected in frame (${faceCount} faces)`,
                                             faceCount,
                                             frameEvidence: aiFrame,
                                             severity: 'critical',
                                             risk_score: 95
                                         });
+                                        if (eventId) void recordAndUploadViolationClip({ eventId, violationType: 'multiple_faces_detected', violationScore: 95 });
                                         requestPauseFromClient(`Multiple people detected (${faceCount} faces). Exam paused for invigilator review.`);
                                     }
                                 }
@@ -3938,7 +4054,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                                 // ============================================================================
                                 if (faceCount === 1 && !identityVerified && similarity !== null && similarity < 0.58) {
                                     if (canLogViolation('identity_mismatch', 95)) {  // Critical risk (95)
-                                        logProctorEvent('identity_mismatch', {
+                                        const eventId = await logProctorEvent('identity_mismatch', {
                                             message: 'Face does not match registered student',
                                             similarity: similarity,
                                             threshold: 0.58,
@@ -3946,27 +4062,59 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                                             severity: 'critical',
                                             risk_score: 95
                                         });
+                                        if (eventId) void recordAndUploadViolationClip({ eventId, violationType: 'identity_mismatch', violationScore: 95 });
                                         requestPauseFromClient('Identity verification failed. Face does not match registered student. Exam paused.');
                                     }
                                 }
                                 
                                 // ============================================================================
-                                // 4. GAZE AVERSION (LOW SEVERITY - Natural Reading Behavior)
+                                // 4. GAZE (ONLY HIGH/CRITICAL INTO ACTION REVIEW)
                                 // ============================================================================
-                                // Backend handles temporal confirmation (3 consecutive frames)
-                                // Client just provides UX feedback
+                                // We only log the "too away" (extreme) and "away for more time" (sustained)
+                                // cases as high/critical so they appear in Action Review and get a clip.
                                 const gazeAway = gazeDirection && !['center', 'forward', 'normal', 'Unknown'].includes(gazeDirection);
                                 if (gazeAway) {
-                                    if (canLogViolation('gaze_aversion', 30)) {  // Low risk (30)
-                                        logProctorEvent('gaze_aversion', {
-                                            message: `Eyes looking away from screen (${gazeDirection})`,
+                                    if (!gazeAwaySinceRef.current) gazeAwaySinceRef.current = Date.now();
+                                } else {
+                                    gazeAwaySinceRef.current = null;
+                                }
+
+                                const gazeStr = String(gazeDirection || '').toLowerCase();
+                                const headStr = String(headPose || '').toLowerCase();
+                                const gazeExtreme = (
+                                    headStr === 'left' || headStr === 'right' || headStr === 'down-left' || headStr === 'down-right' ||
+                                    ((gazeStr === 'left' || gazeStr === 'right') && headStr === 'down')
+                                );
+
+                                // "Too away" => immediate critical
+                                if (gazeAway && gazeExtreme) {
+                                    if (canLogViolation('gaze_extreme', 85)) {
+                                        const eventId = await logProctorEvent('gaze_extreme', {
+                                            message: `Extreme gaze/head turn detected (${headPose}, ${gazeDirection})`,
                                             gazeDirection,
+                                            headPose,
                                             frameEvidence: aiFrame,
-                                            severity: 'low',
-                                            risk_score: 30
+                                            severity: 'critical',
+                                            risk_score: 85
                                         });
-                                        // Subtle notification (not alarming)
-                                        console.log('[PROCTOR] Gaze aversion detected:', gazeDirection);
+                                        if (eventId) void recordAndUploadViolationClip({ eventId, violationType: 'gaze_extreme', violationScore: 85 });
+                                    }
+                                }
+
+                                // "Away for more time" => sustained high
+                                const awayMs = gazeAwaySinceRef.current ? (Date.now() - gazeAwaySinceRef.current) : 0;
+                                if (gazeAway && !gazeExtreme && awayMs >= 2500) {
+                                    if (canLogViolation('gaze_sustained', 70)) {
+                                        const eventId = await logProctorEvent('gaze_sustained', {
+                                            message: `Sustained gaze away detected (${Math.round(awayMs / 1000)}s)`,
+                                            gazeDirection,
+                                            headPose,
+                                            awayMs,
+                                            frameEvidence: aiFrame,
+                                            severity: 'high',
+                                            risk_score: 70
+                                        });
+                                        if (eventId) void recordAndUploadViolationClip({ eventId, violationType: 'gaze_sustained', violationScore: 70 });
                                     }
                                 }
                                 
@@ -3981,7 +4129,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                                     const severity = isDownPose ? 'medium' : 'low';
                                     
                                     if (canLogViolation('head_pose', riskScore)) {
-                                        logProctorEvent('head_pose_change', {
+                                        await logProctorEvent('head_pose_change', {
                                             message: `Head turned away from screen (${headPose})`,
                                             headPose,
                                             frameEvidence: aiFrame,

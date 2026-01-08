@@ -27,18 +27,7 @@ import io
 import hmac
 import hashlib
 from werkzeug.exceptions import HTTPException
-
-# Celery async task queue (Phase 1: Async Processing)
-try:
-    from celery_worker import celery_app, process_proctor_frame
-    CELERY_AVAILABLE = True
-    print("[CELERY] Async task queue enabled - Frame processing will be asynchronous")
-except ImportError as e:
-    print(f"[CELERY] WARNING: Celery not available: {e}")
-    print("[CELERY] WARNING: Frame processing will run synchronously (performance bottleneck)")
-    CELERY_AVAILABLE = False
-    celery_app = None
-    process_proctor_frame = None
+from collections import Counter
 
 def _bool_env(name: str, default: str = "0") -> bool:
     v = os.getenv(name, default)
@@ -52,6 +41,16 @@ def _bool_env(name: str, default: str = "0") -> bool:
 ML_SERVICE_URL = os.getenv("ML_SERVICE_URL", "")
 ML_SERVICE_TIMEOUT = 30  # seconds
 ML_SHARED_SECRET = os.getenv("ML_SHARED_SECRET", "")  # HMAC secret for ML service auth
+
+# Reuse HTTP connections for lower latency (especially when ML service is remote).
+_ML_HTTP_SESSION = requests.Session()
+try:
+    _adapter = requests.adapters.HTTPAdapter(pool_connections=16, pool_maxsize=16)
+    _ML_HTTP_SESSION.mount('http://', _adapter)
+    _ML_HTTP_SESSION.mount('https://', _adapter)
+except Exception:
+    # If mounting fails for any reason, Session() still works.
+    pass
 
 def call_ml_service(endpoint: str, payload: dict, timeout: int = ML_SERVICE_TIMEOUT):
     """
@@ -94,7 +93,7 @@ def call_ml_service(endpoint: str, payload: dict, timeout: int = ML_SERVICE_TIME
     
     try:
         print(f"[ML-CLIENT] Calling {url}")
-        response = requests.post(url, json=payload, headers=headers, timeout=timeout)
+        response = _ML_HTTP_SESSION.post(url, json=payload, headers=headers, timeout=timeout)
         
         if response.status_code == 200:
             return True, response.json()
@@ -124,6 +123,21 @@ app = Flask(__name__)
 APP_BUILD_ID = os.getenv("APP_BUILD_ID", "2025-12-21-render-debug")
 
 app.secret_key = os.getenv('FLASK_SECRET_KEY', os.getenv('SECRET_KEY', 'dev-secret-change-me'))
+
+
+def _internal_allowed() -> bool:
+    """Restrict internal tooling endpoints.
+
+    - If INTERNAL_DASHBOARD_TOKEN is set, require it via query param `token` or header `X-Internal-Token`.
+    - If not set, allow only localhost access.
+    """
+    token = os.getenv('INTERNAL_DASHBOARD_TOKEN', '').strip()
+    if token:
+        supplied = (request.args.get('token') or request.headers.get('X-Internal-Token') or '').strip()
+        return supplied == token
+    # Fallback: localhost only
+    ra = (request.remote_addr or '').strip()
+    return ra in {'127.0.0.1', '::1'}
 
 def _sign_token(user_id: str, ttl_seconds: int = 3600):
     """Create a simple HMAC-signed token (no external deps).
@@ -814,15 +828,20 @@ def analyze_frame():
         return jsonify({"error": "Internal processing error", "detail": str(e)}), 500
 
 # Helper: face threshold from settings or env
-def get_face_threshold(default_val=0.58):
+def get_face_threshold(
+    default_val=0.58,
+    *,
+    key: str = 'FACE_SIMILARITY_THRESHOLD',
+    env_var: str = 'FACE_SIMILARITY_THRESHOLD'
+):
     try:
-        cfg = settings_collection.find_one({'key': 'FACE_SIMILARITY_THRESHOLD'})
+        cfg = settings_collection.find_one({'key': key})
         if cfg and isinstance(cfg.get('value'), (int, float)):
             return float(cfg['value'])
     except Exception:
         pass
     try:
-        return float(os.getenv('FACE_SIMILARITY_THRESHOLD', str(default_val)))
+        return float(os.getenv(env_var, str(default_val)))
     except Exception:
         return float(default_val)
 
@@ -881,6 +900,40 @@ def verify_face():
         normalized_image_data_url = image_data_url
         if isinstance(normalized_image_data_url, str) and not normalized_image_data_url.startswith('data:'):
             normalized_image_data_url = f"data:image/jpeg;base64,{normalized_image_data_url}"
+
+        # Optional: shrink the image before sending to ML service to reduce payload and latency.
+        # Defaults are chosen to keep accuracy while improving speed.
+        try:
+            max_dim = int(os.getenv('FACE_VERIFY_MAX_DIM', '640'))
+        except Exception:
+            max_dim = 640
+        try:
+            jpeg_quality = int(os.getenv('FACE_VERIFY_JPEG_QUALITY', '85'))
+        except Exception:
+            jpeg_quality = 85
+
+        if max_dim and max_dim > 0:
+            try:
+                import base64
+                import io
+                from PIL import Image
+
+                img_data = normalized_image_data_url.split(',')[1] if ',' in normalized_image_data_url else normalized_image_data_url
+                img_bytes = base64.b64decode(img_data)
+                img = Image.open(io.BytesIO(img_bytes))
+                if img.mode not in ('RGB', 'L'):
+                    img = img.convert('RGB')
+                w, h = img.size
+                if max(w, h) > max_dim:
+                    scale = float(max_dim) / float(max(w, h))
+                    new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+                    img = img.resize(new_size, Image.LANCZOS)
+                buffer = io.BytesIO()
+                img.save(buffer, format='JPEG', quality=max(30, min(95, jpeg_quality)))
+                resized_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                normalized_image_data_url = f"data:image/jpeg;base64,{resized_b64}"
+            except Exception as e:
+                print(f'[FACE-VERIFY] Resize/encode skipped: {e}')
         
         # Get stored embeddings - prioritize averaged embedding if available
         stored_embeddings = []
@@ -897,48 +950,86 @@ def verify_face():
             print('[FACE-VERIFY] ERROR: No stored embeddings found')
             return jsonify({"error": "No face data stored for user"}), 404
         
-        # 1) Generate embedding from current image with multiple preprocessing variants
-        embeddings_to_try = []
-        
-        # Original image
+        # Use a login-specific threshold (lower than proctoring by default).
+        # This reduces false rejections at login without affecting in-exam proctor identity checks.
+        THRESHOLD = get_face_threshold(
+            default_val=0.55,
+            key='FACE_SIMILARITY_THRESHOLD_LOGIN',
+            env_var='FACE_SIMILARITY_THRESHOLD_LOGIN'
+        )
+
+        def _best_similarities_for_embedding(new_emb):
+            sims_local = []
+            for stored in stored_embeddings:
+                sim = _cosine_similarity(new_emb, stored)
+                if sim is not None:
+                    sims_local.append(sim)
+            return sims_local
+
+        # 1) Generate embedding from current image.
         ok_verify, verify_result = call_ml_service('/verify-face', {
             'imageDataUrl': normalized_image_data_url
         }, timeout=8)
 
+        embeddings_to_try = []
         if ok_verify and isinstance(verify_result, dict) and 'embedding' in verify_result:
             embeddings_to_try.append(verify_result['embedding'])
             print('[FACE-VERIFY] Generated embedding from original image')
-        else:
-            # If original fails, try with brightness/contrast adjustment
-            try:
-                # Decode image for preprocessing
-                import base64
-                import io
-                from PIL import Image, ImageEnhance
-                
-                img_data = normalized_image_data_url.split(',')[1] if ',' in normalized_image_data_url else normalized_image_data_url
-                img_bytes = base64.b64decode(img_data)
-                img = Image.open(io.BytesIO(img_bytes))
-                
-                # Try brightness-enhanced variant
-                enhancer = ImageEnhance.Brightness(img)
-                bright_img = enhancer.enhance(1.3)
-                
-                # Convert back to base64
-                buffer = io.BytesIO()
-                bright_img.save(buffer, format='JPEG', quality=95)
-                bright_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-                bright_url = f"data:image/jpeg;base64,{bright_b64}"
-                
-                ok_bright, bright_result = call_ml_service('/verify-face', {
-                    'imageDataUrl': bright_url
-                }, timeout=8)
-                
-                if ok_bright and isinstance(bright_result, dict) and 'embedding' in bright_result:
-                    embeddings_to_try.append(bright_result['embedding'])
-                    print('[FACE-VERIFY] Generated embedding from brightness-enhanced image')
-            except Exception as e:
-                print(f'[FACE-VERIFY] Preprocessing failed: {e}')
+
+        # 2) If first attempt fails threshold, optionally retry with a simple brightness variant.
+        # This addresses intermittent failures due to under/overexposure and camera auto-gain.
+        enable_retry = _bool_env('FACE_VERIFY_ENABLE_RETRY', '1')
+        sims = []
+        if embeddings_to_try:
+            sims = _best_similarities_for_embedding(embeddings_to_try[0])
+            if sims and max(sims) >= THRESHOLD:
+                max_sim = max(sims)
+                print(f'[FACE-VERIFY] Face verify for {identifier}: 1 variant, {len(stored_embeddings)} stored, max={max_sim:.3f} thr={THRESHOLD}')
+                return jsonify({
+                    "message": "Face verified successfully",
+                    "verified": True,
+                    "similarity": float(max_sim),
+                    "similarities": sims,
+                    "threshold": float(THRESHOLD)
+                }), 200
+
+            if not enable_retry:
+                max_sim = max(sims) if sims else None
+                return jsonify({
+                    "message": "Face verification failed",
+                    "verified": False,
+                    "similarity": float(max_sim) if max_sim is not None else None,
+                    "similarities": sims,
+                    "threshold": float(THRESHOLD)
+                }), 401
+
+        # Prepare brightness-enhanced variant (even if original embed exists but was low).
+        try:
+            import base64
+            import io
+            from PIL import Image, ImageEnhance
+
+            img_data = normalized_image_data_url.split(',')[1] if ',' in normalized_image_data_url else normalized_image_data_url
+            img_bytes = base64.b64decode(img_data)
+            img = Image.open(io.BytesIO(img_bytes))
+
+            enhancer = ImageEnhance.Brightness(img)
+            bright_img = enhancer.enhance(1.25)
+
+            buffer = io.BytesIO()
+            bright_img.save(buffer, format='JPEG', quality=95)
+            bright_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+            bright_url = f"data:image/jpeg;base64,{bright_b64}"
+
+            ok_bright, bright_result = call_ml_service('/verify-face', {
+                'imageDataUrl': bright_url
+            }, timeout=8)
+
+            if ok_bright and isinstance(bright_result, dict) and 'embedding' in bright_result:
+                embeddings_to_try.append(bright_result['embedding'])
+                print('[FACE-VERIFY] Generated embedding from brightness-enhanced image')
+        except Exception as e:
+            print(f'[FACE-VERIFY] Preprocessing failed: {e}')
 
         if not embeddings_to_try:
             detail = (verify_result or {}).get('error') if isinstance(verify_result, dict) else str(verify_result)
@@ -946,44 +1037,42 @@ def verify_face():
             return jsonify({
                 "error": "Face verification failed",
                 "detail": "Could not detect face in image",
-                "verified": False
+                "verified": False,
+                "threshold": float(THRESHOLD)
             }), 401
 
-        # 2) Match against all stored embeddings using all generated embeddings
+        # 3) Match against all stored embeddings using all generated embeddings
         all_similarities = []
         for new_emb in embeddings_to_try:
-            for stored in stored_embeddings:
-                sim = _cosine_similarity(new_emb, stored)
-                if sim is not None:
-                    all_similarities.append(sim)
+            all_similarities.extend(_best_similarities_for_embedding(new_emb))
 
         if not all_similarities:
             print('[FACE-VERIFY] ERROR: No similarities computed (invalid embeddings)')
             return jsonify({
                 "error": "Failed to verify face",
-                "detail": "No valid stored embeddings to compare"
+                "detail": "No valid stored embeddings to compare",
+                "threshold": float(THRESHOLD)
             }), 400
 
         max_sim = max(all_similarities)
-        sims = all_similarities
-        THRESHOLD = get_face_threshold()  # Single source of truth
-        
-        print(f'[FACE-VERIFY] Face verify for {identifier}: {len(embeddings_to_try)} variants, {len(stored_embeddings)} stored, similarities={sims[:5]}..., max={max_sim:.3f} thr={THRESHOLD}')
-        
+        print(f'[FACE-VERIFY] Face verify for {identifier}: {len(embeddings_to_try)} variants, {len(stored_embeddings)} stored, similarities={all_similarities[:5]}..., max={max_sim:.3f} thr={THRESHOLD}')
+
         if max_sim >= THRESHOLD:
             return jsonify({
                 "message": "Face verified successfully",
                 "verified": True,
                 "similarity": float(max_sim),
-                "similarities": sims
+                "similarities": all_similarities,
+                "threshold": float(THRESHOLD)
             }), 200
-        else:
-            return jsonify({
-                "message": "Face verification failed",
-                "verified": False,
-                "similarity": float(max_sim),
-                "similarities": sims
-            }), 401
+
+        return jsonify({
+            "message": "Face verification failed",
+            "verified": False,
+            "similarity": float(max_sim),
+            "similarities": all_similarities,
+            "threshold": float(THRESHOLD)
+        }), 401
 
     except ValueError:
         return jsonify({"error": "No face detected"}), 400
@@ -1000,28 +1089,14 @@ def verify_face():
 @limiter.limit("100 per hour")
 def proctor_activity():
     """
-    Proctoring frame analysis endpoint.
-    
-    Supports two modes:
-    1. Synchronous (default): Process frame immediately, return results (backward compatible)
-    2. Asynchronous (async=true): Queue task in Celery, return 202 Accepted (Phase 1 optimization)
-    
-    Phase 1 (Async Queue):
-    - Reduces request timeouts during exam start
-    - Scales to 100+ concurrent students
-    - Background workers handle heavy ML processing
-    
-    Phase 2 (Future - MediaPipe):
-    - Client detects violations locally in browser
-    - Only sends violation snapshots to server
-    - Reduces server load by 90%
+    Proctoring frame analysis endpoint (synchronous).
+    Processes the frame immediately and returns results.
     """
     data = request.get_json()
     image_data_url = data.get('imageDataUrl')
     user_id = data.get('userId')
     exam_id = str(data.get('examId') or '')
     exam_active = data.get('examActive', True)  # True by default for backward compatibility
-    async_mode = data.get('async', False)  # NEW: Enable async processing (Phase 1)
 
     if not image_data_url or not user_id:
         return jsonify({"error": "Image data and User ID are required"}), 400
@@ -1038,67 +1113,7 @@ def proctor_activity():
         print(f"[PROCTOR] Error encoding frame: {e}")
         return jsonify({"error": "Failed to encode frame"}), 500
     
-    # ============================================================================
-    # PHASE 1: ASYNC MODE (CELERY BACKGROUND PROCESSING)
-    # ============================================================================
-    if async_mode and CELERY_AVAILABLE:
-        print(f"[PROCTOR-ASYNC] Queuing frame analysis for user {user_id} in exam {exam_id}")
-        
-        try:
-            # Quick camera blocking check (synchronous, critical security check)
-            mean_brightness = np.mean(frame)
-            if mean_brightness < 10 and exam_active:
-                # Camera blocked during active exam - record immediately (don't queue)
-                now = datetime.datetime.utcnow()
-                recent = proctor_events_collection.find_one({
-                    'examId': str(exam_id),
-                    'userId': str(user_id),
-                    'eventType': 'camera_blocked',
-                    'timestamp': {'$gt': now - datetime.timedelta(seconds=5)}
-                })
-                
-                if not recent:
-                    proctor_events_collection.insert_one({
-                        'examId': str(exam_id),
-                        'userId': str(user_id),
-                        'eventType': 'camera_blocked',
-                        'details': {
-                            'brightness': float(mean_brightness),
-                            'message': 'Camera blocked/covered during exam'
-                        },
-                        'severity': 'high',
-                        'timestamp': now,
-                        'frameEvidence': f"data:image/jpeg;base64,{frame_base64}"
-                    })
-                    
-                    # Emit Socket.IO event immediately
-                    socketio.emit('camera_blocked', {
-                        'examId': str(exam_id),
-                        'userId': str(user_id),
-                        'severity': 'high',
-                        'timestamp': now.isoformat() + 'Z'
-                    }, room=str(exam_id), namespace='/proctor')
-            
-            # Queue heavy ML processing in background
-            task = process_proctor_frame.delay(
-                exam_id=str(exam_id),
-                user_id=str(user_id),
-                frame_base64=frame_base64
-            )
-            
-            print(f"[PROCTOR-ASYNC] Task {task.id} queued for user {user_id}")
-            
-            return jsonify({
-                "status": "accepted",
-                "task_id": str(task.id),
-                "message": "Frame queued for analysis",
-                "async": True
-            }), 202
-            
-        except Exception as e:
-            print(f"[PROCTOR-ASYNC] Error queuing task: {e}")
-            # Fallback to synchronous processing
-            print("[PROCTOR-ASYNC] Falling back to synchronous processing")
+    # Async/Celery mode removed: processing is always synchronous
     
     # ============================================================================
     # SYNCHRONOUS MODE (ORIGINAL FLOW - BACKWARD COMPATIBLE)
@@ -1206,45 +1221,11 @@ def proctor_activity():
         print(f"[PROCTOR] Error calling ML service: {e}")
         return jsonify({"error": "ML service error"}), 500
 
-    # Identity verification using ML service
+    # Identity verification is expensive (extra ML call). Do NOT run it every frame.
+    # We perform it on an interval inside the temporal detection block and keep the
+    # latest known value in per-session state.
     identity_verified = False
     similarity_score = None
-    try:
-        user = users_collection.find_one({'_id': ObjectId(user_id)})
-        if user and (user.get('faceEmbeddings') or user.get('faceEmbedding')):
-            
-            # Get stored embeddings
-            stored_embeddings = []
-            if user.get('faceEmbeddings') and isinstance(user.get('faceEmbeddings'), list):
-                stored_embeddings = [e for e in user['faceEmbeddings'] if isinstance(e, (list, tuple))]
-            elif user.get('faceEmbedding'):
-                stored_embeddings = [user['faceEmbedding']]
-            
-            if stored_embeddings:
-                # Generate embedding from current frame via ML service
-                verify_payload = {'imageDataUrl': f"data:image/jpeg;base64,{frame_base64}"}
-                ok_verify, verify_result = call_ml_service('/verify-face', verify_payload, timeout=15)
-
-                if ok_verify and isinstance(verify_result, dict) and 'embedding' in verify_result:
-                    sims = []
-                    for stored in stored_embeddings:
-                        sim = _cosine_similarity(verify_result['embedding'], stored)
-                        if sim is not None:
-                            sims.append(sim)
-
-                    if sims:
-                        similarity_score = max(sims)
-                        THRESH_P = get_face_threshold()  # Single source of truth
-                        identity_verified = similarity_score >= THRESH_P
-                        app.logger.info(f'Proctor identity for {user_id}: similarity={similarity_score} threshold={THRESH_P}')
-                    else:
-                        app.logger.warning('Local face matching failed (invalid embeddings)')
-                else:
-                    app.logger.warning('ML service face verification failed')
-            else:
-                app.logger.warning(f'No stored embeddings for user {user_id}')
-    except Exception as e:
-        print(f"Error during identity verification: {e}")
 
     # Build response
     results = {
@@ -1270,7 +1251,14 @@ def proctor_activity():
             key = (str(exam_id), str(user_id))
             st = PROCTOR_STATE.get(key) or {
                 'last_emit': {},  # Track last event time to prevent spam (5 second cooldown per event type)
-                'reference_background': None
+                'reference_background': None,
+                # Latest known identity check outcome for this session
+                'last_identity': {
+                    'similarity': None,
+                    'verified': False,
+                    'threshold': None,
+                    'checked_at': None,
+                },
             }
             
             # Store reference background on first check (for background change detection)
@@ -1306,12 +1294,28 @@ def proctor_activity():
                         print(f"[PROCTOR] Error encoding frame: {e}")
                         return  # Don't record event if frame capture fails
                 
+                # Attach standard metrics for debugging/tuning ("why" fields)
+                metrics = {
+                    'faceCount': int(face_count) if isinstance(face_count, (int, float)) else face_count,
+                    'similarity': float(similarity_score) if isinstance(similarity_score, (int, float)) else similarity_score,
+                    'identityVerified': bool(identity_verified),
+                    'blinkStatus': blink_status,
+                    'gazeDirection': gaze_direction,
+                    'mouthStatus': mouth_status,
+                    'headPose': head_pose,
+                }
+                # Preserve any normalized fields added by detectors
+                for k in ('pose_norm', 'gaze_norm', 'head_norm'):
+                    if isinstance(details, dict) and k in details:
+                        metrics[k] = details.get(k)
+
                 # CRITICAL FIX: Store in database
                 proctor_events_collection.insert_one({
                     'examId': str(exam_id),
                     'userId': str(user_id),
                     'eventType': ev_type,
                     'details': details,
+                    'metrics': metrics,
                     'severity': severity,
                     'timestamp': now,
                     'frameEvidence': frame_evidence  # Store captured frame
@@ -1324,9 +1328,11 @@ def proctor_activity():
                         'userId': str(user_id),
                         'eventType': ev_type,
                         'details': details,
+                        'metrics': metrics,
                         'severity': severity,
                         'timestamp': now.isoformat() + 'Z',
-                        'message': details.get('message', ev_type)
+                        'message': details.get('message', ev_type),
+                        'frameEvidence': frame_evidence
                     }, room=str(exam_id), namespace='/proctor')
                     print(f"[PROCTOR-SOCKET] Emitted {ev_type} to room {exam_id}")
                 except Exception as e:
@@ -1371,13 +1377,29 @@ def proctor_activity():
                     'gaze_frequency_count': 0,  # Count of gaze away incidents
                     'gaze_frequency_window_start': 0,  # Timestamp for 30-second window
                     'gaze_extreme_detected': False,  # Flag for extreme head turn
+                    # Suppression window to avoid duplicate events for same scenario
+                    'suppress_identity_until': 0.0,
+                    'suppress_face_missing_until': 0.0,
                 }
             
             tc = st['temporal_counters']
+
+            # Fill response fields from latest identity check (if any)
+            try:
+                last_ident = st.get('last_identity') or {}
+                if similarity_score is None and last_ident.get('similarity') is not None:
+                    similarity_score = last_ident.get('similarity')
+                if (not identity_verified) and last_ident.get('verified'):
+                    identity_verified = True
+                results['identityVerified'] = identity_verified
+                results['similarity'] = similarity_score
+            except Exception:
+                pass
             
             # ============================================================================
             # DETECTION 1: FACE MISSING (HIGH SEVERITY)
             # ============================================================================
+            current_time = datetime.datetime.utcnow().timestamp()
             # Warning at 2 seconds (8 frames @ 4 FPS)
             # Violation at 4 seconds (16 frames @ 4 FPS)
             face_detected = face_count > 0
@@ -1398,7 +1420,7 @@ def proctor_activity():
                 else:
                     severity = None  # Don't emit yet
                 
-                if severity:
+                if severity and current_time >= tc.get('suppress_face_missing_until', 0.0):
                     # Check if this is first time - bypass cooldown
                     is_first = 'face_missing' not in tc['first_violation_emitted']
                     if is_first:
@@ -1420,38 +1442,100 @@ def proctor_activity():
                     tc['face_missing_frames'] = 0
             
             # ============================================================================
-            # DETECTION 2: IDENTITY MISMATCH (CRITICAL SEVERITY)
+            # DETECTION 2: IDENTITY MISMATCH (SOFT FAIL + ESCALATION)
             # ============================================================================
-            # Re-verify every 2.5 seconds using dynamic threshold from settings
-            current_time = datetime.datetime.utcnow().timestamp()
+            # Re-verify every 2.5 seconds using dynamic threshold from settings.
+            # Soft-fail: require repeated failures before critical severity.
             time_since_last_check = current_time - tc['last_identity_check']
             
-            if time_since_last_check >= 2.5 and similarity_score is not None:
+            # Gate identity check: skip if recently suppressed or head turned (unreliable)
+            head_pose_val = results.get('headPose', 'Unknown')
+            head_pose_str = str(head_pose_val).lower()
+            head_turned_now = head_pose_val and head_pose_str not in ('forward', 'center', 'normal', 'unknown')
+            if (
+                time_since_last_check >= 2.5 and
+                current_time >= tc.get('suppress_identity_until', 0.0) and
+                not head_turned_now and
+                face_count == 1 and
+                tc.get('face_missing_frames', 0) < 8
+            ):
                 tc['last_identity_check'] = current_time
-                
-                # Use centralized threshold function (single source of truth)
-                identity_threshold = get_face_threshold()
-                identity_failed = similarity_score < identity_threshold
+
+                # Compute similarity on this interval (avoid per-frame verify-face calls).
+                identity_threshold = get_face_threshold()  # single source of truth for proctoring
+                similarity_score = None
+                identity_verified = False
+
+                try:
+                    user = users_collection.find_one({'_id': ObjectId(user_id)})
+                    if user and (user.get('faceEmbeddings') or user.get('faceEmbedding') or user.get('faceEmbeddingAvg')):
+                        stored_embeddings = []
+                        if user.get('faceEmbeddingAvg') and isinstance(user.get('faceEmbeddingAvg'), (list, tuple)):
+                            stored_embeddings.append(user.get('faceEmbeddingAvg'))
+                        if user.get('faceEmbeddings') and isinstance(user.get('faceEmbeddings'), list):
+                            stored_embeddings.extend([e for e in user['faceEmbeddings'] if isinstance(e, (list, tuple))])
+                        if not stored_embeddings and user.get('faceEmbedding'):
+                            stored_embeddings = [user.get('faceEmbedding')]
+
+                        if stored_embeddings:
+                            verify_payload = {'imageDataUrl': f"data:image/jpeg;base64,{frame_base64}"}
+                            ok_verify, verify_result = call_ml_service('/verify-face', verify_payload, timeout=12)
+                            if ok_verify and isinstance(verify_result, dict) and 'embedding' in verify_result:
+                                sims = []
+                                for stored in stored_embeddings:
+                                    sim = _cosine_similarity(verify_result['embedding'], stored)
+                                    if sim is not None:
+                                        sims.append(sim)
+                                if sims:
+                                    similarity_score = float(max(sims))
+                                    identity_verified = similarity_score >= float(identity_threshold)
+                except Exception as e:
+                    print(f"[PROCTOR] Identity check error: {e}")
+
+                # Update response + session cache
+                try:
+                    st['last_identity'] = {
+                        'similarity': similarity_score,
+                        'verified': bool(identity_verified),
+                        'threshold': float(identity_threshold),
+                        'checked_at': now.isoformat() + 'Z',
+                    }
+                    results['identityVerified'] = identity_verified
+                    results['similarity'] = similarity_score
+                except Exception:
+                    pass
+
+                # If we couldn't compute similarity, don't punish the student.
+                if similarity_score is None:
+                    identity_failed = False
+                else:
+                    identity_failed = similarity_score < float(identity_threshold)
                 
                 if identity_failed:
                     tc['identity_fail_frames'] += 1
                     tc['identity_pass_frames'] = 0
-                    
-                    # Trigger after 2 consecutive failures
+
+                    # Escalate severity based on sustained failures
+                    # - 2 consecutive checks (~5s): high
+                    # - 4 consecutive checks (~10s): critical
                     if tc['identity_fail_frames'] >= 2:
                         is_first = 'identity_mismatch' not in tc['first_violation_emitted']
                         if is_first:
                             tc['first_violation_emitted']['identity_mismatch'] = True
                             if 'identity_mismatch' in st['last_emit']:
                                 del st['last_emit']['identity_mismatch']
-                        
+
+                        severity = 'high' if tc['identity_fail_frames'] < 4 else 'critical'
+                        risk = 80 if severity == 'high' else 95
+
                         emit('identity_mismatch', {
                             'similarity': float(similarity_score),
-                            'threshold': identity_threshold,
-                            'message': 'Face does not match registered student',
+                            'threshold': float(identity_threshold),
+                            'faceCount': int(face_count),
+                            'message': 'Face does not match registered student (sustained)',
                             'consecutive_failures': tc['identity_fail_frames'],
-                            'risk_score': 95
-                        }, 'critical')
+                            'risk_score': risk
+                        }, severity)
                 else:
                     tc['identity_pass_frames'] += 1
                     # Reset only after 2 consecutive passes
@@ -1467,16 +1551,64 @@ def proctor_activity():
             
             gaze = results.get('gazeDirection', 'Unknown')
             head_pose = results.get('headPose', 'Unknown')
-            gaze_str = str(gaze).lower()
-            head_str = str(head_pose).lower()
+
+            def _norm_head_pose(v):
+                s = str(v or '').strip().lower().replace(' ', '-').replace('_', '-')
+                if not s or s in ('unknown', 'n/a', 'na', 'none'):
+                    return 'unknown'
+                # Common prefixes from older/local detectors
+                if s.startswith('head-'):
+                    s = s[len('head-'):]
+                if s in ('forward', 'center', 'centred', 'centered', 'normal', 'straight'):
+                    return 'forward'
+                has_down = 'down' in s
+                has_up = 'up' in s
+                has_left = 'left' in s
+                has_right = 'right' in s
+                if has_down and has_left:
+                    return 'down_left'
+                if has_down and has_right:
+                    return 'down_right'
+                if has_up and has_left:
+                    return 'up_left'
+                if has_up and has_right:
+                    return 'up_right'
+                if has_down:
+                    return 'down'
+                if has_up:
+                    return 'up'
+                if has_left:
+                    return 'left'
+                if has_right:
+                    return 'right'
+                return 'unknown'
+
+            def _norm_gaze(v):
+                s = str(v or '').strip().lower().replace(' ', '-').replace('_', '-')
+                if not s or s in ('unknown', 'n/a', 'na', 'none'):
+                    return 'unknown'
+                if s in ('center', 'centre', 'forward', 'straight', 'normal'):
+                    return 'center'
+                if 'left' in s:
+                    return 'left'
+                if 'right' in s:
+                    return 'right'
+                if 'up' in s:
+                    return 'up'
+                if 'down' in s:
+                    return 'down'
+                return 'unknown'
+
+            gaze_norm = _norm_gaze(gaze)
+            head_norm = _norm_head_pose(head_pose)
             
-            # Define what counts as "away" vs "extreme"
-            gaze_away = gaze_str not in ('center', 'normal', 'forward', 'unknown')
+            # Define what counts as "away" vs "extreme" (normalize ML labels to avoid false positives)
+            gaze_away = gaze_norm not in ('center', 'unknown')
             
-            # Extreme = full face turn or looking very far (left/right + down = cheating posture)
+            # Extreme = full face turn or very suspicious posture (turn + down)
             is_extreme = (
-                head_str in ('left', 'right', 'down-left', 'down-right') or
-                (gaze_str in ('left', 'right') and head_str == 'down')
+                head_norm in ('left', 'right', 'down_left', 'down_right') or
+                (gaze_norm in ('left', 'right') and head_norm == 'down')
             )
             
             current_time = datetime.datetime.utcnow().timestamp()
@@ -1495,7 +1627,7 @@ def proctor_activity():
                 tc['gaze_forward_frames'] = 0
                 
                 # ===== TRIGGER 1: EXTREME DISTANCE (IMMEDIATE CRITICAL) =====
-                if is_extreme and tc['gaze_away_frames'] >= 2:  # Confirm over 2 frames
+                if is_extreme and tc['gaze_away_frames'] >= 3:  # Confirm over ~0.75s @ 4 FPS
                     if not tc['gaze_extreme_detected']:  # Only trigger once per extreme event
                         tc['gaze_extreme_detected'] = True
                         
@@ -1508,14 +1640,17 @@ def proctor_activity():
                         emit('gaze_extreme', {
                             'direction': gaze,
                             'head_pose': head_pose,
+                            'direction_norm': gaze_norm,
+                            'head_pose_norm': head_norm,
                             'message': f'Extreme head turn detected ({head_pose}, {gaze})',
                             'violation_type': 'distance',
                             'risk_score': 85
                         }, 'critical')
                 
                 # ===== TRIGGER 2: HIGH FREQUENCY (CUMULATIVE CRITICAL) =====
-                # Increment frequency counter after 3 consecutive frames of looking away
-                if tc['gaze_away_frames'] == 3:
+                # Increment frequency counter after 5 consecutive away frames (~1.25s @ 4 FPS)
+                # Also: don't count extreme turns as "frequency" (they are handled separately).
+                if (not is_extreme) and tc['gaze_away_frames'] == 5:
                     tc['gaze_frequency_count'] += 1
                     print(f"[GAZE-FREQUENCY] Incident #{tc['gaze_frequency_count']} in current window")
                     
@@ -1529,6 +1664,7 @@ def proctor_activity():
                         
                         emit('gaze_frequency', {
                             'direction': gaze,
+                            'direction_norm': gaze_norm,
                             'message': f'Frequent gaze aversion detected ({tc["gaze_frequency_count"]} incidents)',
                             'incident_count': tc['gaze_frequency_count'],
                             'violation_type': 'frequency',
@@ -1539,57 +1675,55 @@ def proctor_activity():
                         tc['gaze_frequency_count'] = 0
                         tc['gaze_frequency_window_start'] = current_time
                 
-                # ===== STANDARD GAZE TRACKING (LOW/MEDIUM SEVERITY) =====
-                # Keep original logic for non-critical gaze issues
-                if tc['gaze_away_frames'] >= 3 and not is_extreme:
-                    history_key = 'gaze_aversion'
-                    tc['violation_history'][history_key] = tc['violation_history'].get(history_key, 0) + 1
-                    
-                    if tc['violation_history'][history_key] >= 3:
-                        severity = 'medium'
-                        risk = 50
-                    else:
-                        severity = 'low'
-                        risk = 30
-                    
-                    is_first = 'gaze_aversion' not in tc['first_violation_emitted']
+                # ===== SUSTAINED GAZE (HIGH SIGNAL) =====
+                # Emit a single sustained event instead of noisy low/medium spam.
+                # Threshold aligns with client-side clip policy (~2.5s).
+                if (not is_extreme) and tc['gaze_away_frames'] == 10:
+                    is_first = 'gaze_sustained' not in tc['first_violation_emitted']
                     if is_first:
-                        tc['first_violation_emitted']['gaze_aversion'] = True
-                        if 'gaze_aversion' in st['last_emit']:
-                            del st['last_emit']['gaze_aversion']
-                    
-                    emit('gaze_aversion', {
+                        tc['first_violation_emitted']['gaze_sustained'] = True
+                        if 'gaze_sustained' in st['last_emit']:
+                            del st['last_emit']['gaze_sustained']
+
+                    emit('gaze_sustained', {
                         'direction': gaze,
-                        'message': f'Eyes looking {gaze} (sustained)',
+                        'direction_norm': gaze_norm,
+                        'message': f'Sustained looking away ({gaze})',
                         'consecutive_frames': tc['gaze_away_frames'],
-                        'repeated_violations': tc['violation_history'][history_key],
-                        'risk_score': risk
-                    }, severity)
+                        'duration_seconds': tc['gaze_away_frames'] / 4.0,
+                        'risk_score': 65
+                    }, 'high')
             else:
                 tc['gaze_forward_frames'] += 1
                 # Reset counters after 3 frames of normal gaze
                 if tc['gaze_forward_frames'] >= 3:
                     tc['gaze_away_frames'] = 0
                     tc['gaze_extreme_detected'] = False  # Allow re-detection of extreme events
+                    # Allow sustained re-detection in a new away episode
+                    if 'gaze_sustained' in tc.get('first_violation_emitted', {}):
+                        try:
+                            del tc['first_violation_emitted']['gaze_sustained']
+                        except Exception:
+                            pass
             
             # ============================================================================
             # DETECTION 4: HEAD POSE (LOW → MEDIUM SEVERITY)
             # ============================================================================
             # Vertical angle ≥32° or horizontal offset ≥14px for ≥3 frames
-            head_turned = head_pose and head_str not in ('forward', 'center', 'normal', 'unknown')
+            head_turned = head_pose and head_norm not in ('forward', 'unknown')
             
             if head_turned:
                 tc['head_turned_frames'] += 1
                 tc['head_forward_frames'] = 0
                 
-                # Require 3 consecutive frames
-                if tc['head_turned_frames'] >= 3:
+                # Require 5 consecutive frames (~1.25s @ 4 FPS) to reduce false positives
+                if tc['head_turned_frames'] >= 5:
                     # Escalate severity based on repeated violations
                     history_key = 'head_pose'
                     tc['violation_history'][history_key] = tc['violation_history'].get(history_key, 0) + 1
                     
                     # Down pose is more severe (potential cheating posture)
-                    if str(head_pose).lower() == 'down':
+                    if head_norm in ('down', 'down_left', 'down_right'):
                         severity = 'medium'
                         risk = 55
                     elif tc['violation_history'][history_key] >= 3:
@@ -1607,11 +1741,15 @@ def proctor_activity():
                     
                     emit('head_pose', {
                         'pose': head_pose,
+                        'pose_norm': head_norm,
                         'message': f'Head turned {head_pose} (sustained)',
                         'consecutive_frames': tc['head_turned_frames'],
                         'repeated_violations': tc['violation_history'][history_key],
                         'risk_score': risk
                     }, severity)
+                    # Suppress noisy/overlapping events for a short window
+                    tc['suppress_identity_until'] = current_time + 3.0
+                    tc['suppress_face_missing_until'] = current_time + 3.0
             else:
                 tc['head_forward_frames'] += 1
                 # Reset only after 3 frames of normal pose
@@ -1645,8 +1783,8 @@ def proctor_activity():
                 tc['mouth_open_frames'] += 1
                 tc['mouth_closed_frames'] = 0
                 
-                # Require 3 consecutive frames
-                if tc['mouth_open_frames'] >= 3:
+                # Require 6 consecutive frames (~1.5s @ 4 FPS) to reduce false positives
+                if tc['mouth_open_frames'] >= 6:
                     is_first = 'talking' not in tc['first_violation_emitted']
                     if is_first:
                         tc['first_violation_emitted']['talking'] = True
@@ -1671,10 +1809,19 @@ def proctor_activity():
                     current_small = cv2.resize(frame, (160, 120))
                     diff = cv2.absdiff(st['reference_background'], current_small)
                     diff_score = np.mean(diff)
+
+                    # If the change is mostly a global lighting shift, ignore it.
+                    # This reduces false positives when the screen brightness/ambient light changes.
+                    try:
+                        ref_gray = cv2.cvtColor(st['reference_background'], cv2.COLOR_BGR2GRAY)
+                        cur_gray = cv2.cvtColor(current_small, cv2.COLOR_BGR2GRAY)
+                        lighting_delta = float(abs(np.mean(cur_gray) - np.mean(ref_gray)))
+                    except Exception:
+                        lighting_delta = 0.0
                     
                     # Increased threshold to reduce false positives from lighting changes
                     BACKGROUND_THRESHOLD = 30.0  # More tolerant (was 20.0)
-                    if diff_score > BACKGROUND_THRESHOLD:
+                    if diff_score > BACKGROUND_THRESHOLD and lighting_delta < 25.0:
                         is_first = 'background_change' not in tc['first_violation_emitted']
                         if is_first:
                             tc['first_violation_emitted']['background_change'] = True
@@ -1683,6 +1830,7 @@ def proctor_activity():
                         
                         emit('background_change', {
                             'change_score': float(diff_score),
+                            'lighting_delta': float(lighting_delta),
                             'message': 'Significant background change detected',
                             'risk_score': 70  # High risk
                         }, 'high')
@@ -2139,12 +2287,14 @@ def get_exam_monitoring_data(exam_id):
             # Get latest violation
             latest_violation = None
             violation_time = None
+            latest_violation_event_id = None
             if logs:
                 sorted_logs = sorted(logs, key=lambda x: x.get('timestamp', datetime.datetime.min), reverse=True)
                 if sorted_logs:
                     latest_log = sorted_logs[0]
                     latest_violation = latest_log.get('violation_type', 'Unknown violation')
                     violation_time = latest_log.get('timestamp')
+                    latest_violation_event_id = latest_log.get('eventId')
                     if violation_time:
                         if isinstance(violation_time, str):
                             violation_time = violation_time
@@ -2180,6 +2330,162 @@ def get_exam_monitoring_data(exam_id):
                             head_pose = 'tilted'
                         break
             
+            # Fetch video evidence for action review panel
+            # Prefer exact eventId match (1:1 mapping). Fall back to violationType match.
+            latest_video_url = None
+            violation_video_url = None
+            try:
+                if latest_violation_event_id and isinstance(latest_violation_event_id, str):
+                    vq = {
+                        'examId': str(exam_id),
+                        'userId': str(user_id),
+                        'type': 'evidence',
+                        'evidenceType': 'video',
+                        'eventId': latest_violation_event_id,
+                    }
+                    match_vid = proctor_events_collection.find(vq).sort('timestamp', -1).limit(1)
+                    match_vid_list = list(match_vid)
+                    if match_vid_list:
+                        violation_video_url = f"/api/evidence/{str(match_vid_list[0]['_id'])}"
+
+                if (
+                    not violation_video_url and
+                    latest_violation and isinstance(latest_violation, str) and
+                    latest_violation.lower() not in ('unknown', 'unknown violation')
+                ):
+                    vq = {
+                        'examId': str(exam_id),
+                        'userId': str(user_id),
+                        'type': 'evidence',
+                        'evidenceType': 'video',
+                        'violationType': latest_violation
+                    }
+                    match_vid = proctor_events_collection.find(vq).sort('timestamp', -1).limit(1)
+                    match_vid_list = list(match_vid)
+                    if match_vid_list:
+                        violation_video_url = f"/api/evidence/{str(match_vid_list[0]['_id'])}"
+
+                latest_vid = proctor_events_collection.find({
+                    'examId': str(exam_id),
+                    'userId': str(user_id),
+                    'type': 'evidence',
+                    'evidenceType': 'video'
+                }).sort('timestamp', -1).limit(1)
+                latest_vid_list = list(latest_vid)
+                if latest_vid_list:
+                    latest_video_url = f"/api/evidence/{str(latest_vid_list[0]['_id'])}"
+            except Exception as _e:
+                pass
+
+
+
+    @app.route('/internal/proctor-events', methods=['GET'])
+    def internal_proctor_events_dashboard():
+            """Minimal internal dashboard to inspect recent proctor events and their metrics.
+
+            Query params:
+                examId, userId, eventType, severity, limit (default 200)
+                token (optional, if INTERNAL_DASHBOARD_TOKEN is set)
+            """
+            if not _internal_allowed():
+                    return jsonify({"error": "forbidden"}), 403
+
+            exam_id = (request.args.get('examId') or '').strip()
+            user_id = (request.args.get('userId') or '').strip()
+            event_type = (request.args.get('eventType') or '').strip()
+            severity = (request.args.get('severity') or '').strip()
+
+            try:
+                    limit = int(request.args.get('limit') or 200)
+            except Exception:
+                    limit = 200
+            limit = max(1, min(1000, limit))
+
+            q = {}
+            if exam_id:
+                    q['examId'] = exam_id
+            if user_id:
+                    q['userId'] = user_id
+            if event_type:
+                    q['eventType'] = event_type
+            if severity:
+                    q['severity'] = severity
+
+            try:
+                    cur = proctor_events_collection.find(q).sort('timestamp', -1).limit(limit)
+                    events = list(cur)
+            except Exception as e:
+                    return jsonify({"error": "query_failed", "detail": str(e)}), 500
+
+            # Compute simple counts (helps spot spammy false positives)
+            counts = Counter([str(ev.get('eventType') or '') for ev in events])
+            top_counts = counts.most_common(12)
+
+            def esc(s: str) -> str:
+                    return (s or '').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
+
+            # Render tiny HTML (no JS, no CSS frameworks)
+            rows = []
+            for ev in events:
+                    ts = ev.get('timestamp')
+                    ts_s = ts.isoformat() + 'Z' if hasattr(ts, 'isoformat') else str(ts)
+                    det = ev.get('details') if isinstance(ev.get('details'), dict) else {}
+                    msg = det.get('message') if isinstance(det, dict) else ''
+                    metrics = ev.get('metrics') if isinstance(ev.get('metrics'), dict) else {}
+                    rows.append(
+                            "<tr>"
+                            f"<td>{esc(ts_s)}</td>"
+                            f"<td>{esc(str(ev.get('eventType')))}</td>"
+                            f"<td>{esc(str(ev.get('severity')))}</td>"
+                            f"<td>{esc(str(ev.get('examId')))}</td>"
+                            f"<td>{esc(str(ev.get('userId')))}</td>"
+                            f"<td>{esc(str(msg))}</td>"
+                            f"<td><pre style='margin:0;white-space:pre-wrap'>{esc(json.dumps(metrics, default=str, sort_keys=True))}</pre></td>"
+                            "</tr>"
+                    )
+
+            counts_html = " ".join([f"<span style='margin-right:10px'><b>{esc(k)}</b>: {v}</span>" for k, v in top_counts])
+
+            html = f"""<!doctype html>
+    <html>
+    <head>
+        <meta charset='utf-8'>
+        <title>Invigilo - Proctor Events</title>
+    </head>
+    <body style='font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; padding: 16px;'>
+        <h2 style='margin:0 0 8px 0;'>Proctor Events (internal)</h2>
+        <div style='margin: 8px 0 12px 0; color: #333;'>Top event counts: {counts_html}</div>
+
+        <form method='get' style='margin: 0 0 12px 0;'>
+            <label>examId <input name='examId' value='{esc(exam_id)}' style='width: 260px;'></label>
+            <label>userId <input name='userId' value='{esc(user_id)}' style='width: 260px;'></label>
+            <label>eventType <input name='eventType' value='{esc(event_type)}' style='width: 160px;'></label>
+            <label>severity <input name='severity' value='{esc(severity)}' style='width: 120px;'></label>
+            <label>limit <input name='limit' value='{limit}' style='width: 80px;'></label>
+            {'<input name="token" value="' + esc(request.args.get('token') or '') + '" type="hidden">' if os.getenv('INTERNAL_DASHBOARD_TOKEN','').strip() else ''}
+            <button type='submit'>Refresh</button>
+        </form>
+
+        <table border='1' cellpadding='6' cellspacing='0' style='border-collapse: collapse; width: 100%; font-size: 12px;'>
+            <thead>
+                <tr>
+                    <th>timestamp</th>
+                    <th>eventType</th>
+                    <th>severity</th>
+                    <th>examId</th>
+                    <th>userId</th>
+                    <th>message</th>
+                    <th>metrics</th>
+                </tr>
+            </thead>
+            <tbody>
+                {''.join(rows)}
+            </tbody>
+        </table>
+    </body>
+    </html>"""
+
+            return html, 200, {'Content-Type': 'text/html; charset=utf-8'}
             students_data.append({
                 'userId': str(user_id),
                 'studentId': user.get('studentId', user.get('email', '')),
@@ -2191,7 +2497,10 @@ def get_exam_monitoring_data(exam_id):
                 'status': status,
                 'timeRemaining': time_remaining,
                 'latestViolation': latest_violation,
-                'violationTime': violation_time
+                'violationTime': violation_time,
+                'latestViolationEventId': latest_violation_event_id,
+                'violationVideoUrl': violation_video_url,
+                'latestVideoUrl': latest_video_url
             })
         
         # Calculate ID verified count (students with successful face verification)
@@ -2973,6 +3282,9 @@ def record_proctor_event():
         'object_detected': 'high',
         'head_pose': 'medium',
         'gaze': 'medium',
+        'gaze_extreme': 'critical',
+        'gaze_frequency': 'critical',
+        'gaze_sustained': 'high',
         'blink': 'low',
         # Advanced events
         'head_pose_excess': 'medium',
@@ -2994,16 +3306,18 @@ def record_proctor_event():
         'timestamp': datetime.datetime.utcnow()
     }
     if snapshot and isinstance(snapshot, str):
-        # Store snapshot under details to keep schema simple
+        # Store snapshot both under details and as unified frameEvidence for consistency
         try:
             event['details'] = event.get('details', {})
             event['details']['snapshot'] = snapshot
+            event['frameEvidence'] = snapshot
         except Exception:
             pass
     try:
         # Store in proctor_events_collection (main collection)
-        proctor_events_collection.insert_one(event)
-        
+        result = proctor_events_collection.insert_one(event)
+        event_id = str(result.inserted_id)
+
         # Also store in proctoring_logs_collection for report queries
         # Create a compatible format for reports
         log_entry = {
@@ -3012,11 +3326,13 @@ def record_proctor_event():
             'violation_type': event_type,
             'details': event.get('details', {}),
             'severity': severity,
-            'timestamp': datetime.datetime.utcnow()
+            'timestamp': datetime.datetime.utcnow(),
+            # Link log -> proctor event for 1:1 evidence mapping
+            'eventId': event_id,
         }
         proctoring_logs_collection.insert_one(log_entry)
-        
-        return jsonify({'message': 'Event recorded'}), 201
+
+        return jsonify({'message': 'Event recorded', 'eventId': event_id}), 201
     except Exception as e:
         print(f"[PROCTOR-EVENT] ERROR saving event: {e}")
         return jsonify({'error': str(e)}), 500
@@ -3314,6 +3630,7 @@ def upload_evidence():
         evidence_type = request.form.get('evidenceType', 'screenshot')
         violation_type = request.form.get('violationType', 'unknown')
         violation_score = request.form.get('violationScore', 0)
+        event_id = request.form.get('eventId')
         
         if not exam_id:
             return jsonify({"error": "examId is required"}), 400
@@ -3391,6 +3708,10 @@ def upload_evidence():
             'timestamp': datetime.datetime.utcnow(),
             'violationScore': int(violation_score) if violation_score else 0
         }
+
+        # Optional: link evidence to a specific proctor event (1:1 mapping)
+        if event_id and isinstance(event_id, str):
+            evidence_record['eventId'] = event_id
         
         try:
             result = proctor_events_collection.insert_one(evidence_record)
@@ -3408,7 +3729,8 @@ def upload_evidence():
             "fileId": file_id,
             "filePath": relative_path,
             "fileSize": file_size,
-            "evidenceType": evidence_type
+            "evidenceType": evidence_type,
+            "eventId": event_id
         }), 200
         
     except Exception as e:
@@ -3572,6 +3894,7 @@ def list_evidence():
                 'userId': doc.get('userId'),
                 'evidenceType': doc.get('evidenceType'),
                 'violationType': doc.get('violationType'),
+                'eventId': doc.get('eventId'),
                 'fileSize': doc.get('fileSize'),
                 'violationScore': doc.get('violationScore'),
                 'url': f"/api/evidence/{str(doc.get('_id'))}",
@@ -4305,7 +4628,7 @@ def get_student_violations(exam_id, user_id):
         violations = list(proctor_events_collection.find({
             'examId': str(exam_id),
             'userId': str(user_id),
-            'eventType': {'$in': ['gaze_extreme', 'gaze_frequency', 'identity_mismatch', 'multiple_faces', 'face_missing']}
+            'eventType': {'$in': ['gaze_extreme', 'gaze_frequency', 'gaze_sustained', 'identity_mismatch', 'multiple_faces', 'face_missing']}
         }).sort('timestamp', -1).limit(50))  # Last 50 violations
         
         # Format response

@@ -306,4 +306,12 @@ def process_audio_chunk(audio_bytes):
         print(f"Error processing audio chunk: {e}")
         return "Audio error"
 
+# --- Compatibility Aliases ---
+# Provide names expected by callers (e.g., ML service app)
+def headPoseEstimation(faces, img):
+    return head_pose_detection(faces, img)
+
+def gazeEstimation(faces, frame):
+    return gazeDetection(faces, frame)
+
 

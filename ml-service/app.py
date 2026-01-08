@@ -197,8 +197,7 @@ def analyze_frame():
     
     try:
         # Run all proctoring checks
-        faces = detectFace(img)
-        face_count = len(faces)
+        face_count, faces = detectFace(img)
         
         violations = []
         
@@ -216,12 +215,12 @@ def analyze_frame():
         
         if face_count == 1:
             blink_status = isBlinking(faces, img)
-            mouth_status = mouthTrack(faces)
-            head_pose = headPoseEstimation(faces)
-            gaze_dir = gazeEstimation(faces)
+            mouth_status = mouthTrack(faces, img)
+            head_pose = headPoseEstimation(faces, img)
+            gaze_dir = gazeEstimation(faces, img)
             
             # Check for violations
-            if mouth_status == "Open":
+            if mouth_status == "Mouth Open":
                 violations.append("Mouth open (possible talking)")
             
             if head_pose not in ["Forward", "Unknown"]:

@@ -14,35 +14,35 @@ from imutils import face_utils
 # Eye Aspect Ratio (EAR) - ratio of horizontal to vertical eye distance
 # Higher value = more closed eye required to register as blink
 # Typical range: 3.0 - 4.5
-BLINK_THRESHOLD = 3.6
+BLINK_THRESHOLD = 4.2
 
 # === GAZE DETECTION THRESHOLDS ===
 # Ratio of white pixels on one side vs other side of eye
 # Higher value = more extreme eye movement required
 # Typical range: 1.0 - 1.5
-GAZE_RATIO_THRESHOLD = 1.2
+GAZE_RATIO_THRESHOLD = 2.0
 
 # Threshold value for binary eye segmentation
 # Lower value = more sensitive to darker pixels (pupil/iris)
 # Typical range: 40 - 70
-GAZE_THRESHOLD_VALUE = 50
+GAZE_THRESHOLD_VALUE = 42
 
 # === MOUTH DETECTION THRESHOLDS ===
 # Distance in pixels between outer top and bottom lip
 # Higher value = mouth must open wider to register
 # Typical range: 15 - 30 pixels (depends on camera distance)
-MOUTH_OPEN_THRESHOLD = 23
+MOUTH_OPEN_THRESHOLD = 35
 
 # === HEAD POSE DETECTION THRESHOLDS ===
 # Angle in degrees for vertical head movement (up/down)
 # Higher value = more head tilt required
 # Typical range: 20 - 40 degrees
-HEAD_VERTICAL_ANGLE_THRESHOLD = 30
+HEAD_VERTICAL_ANGLE_THRESHOLD = 45
 
 # Horizontal offset in pixels for lateral head movement (left/right)
 # Distance nose must be from eye center line
 # Typical range: 5 - 15 pixels (depends on camera distance)
-HEAD_HORIZONTAL_OFFSET_THRESHOLD = 10
+HEAD_HORIZONTAL_OFFSET_THRESHOLD = 18
 
 # === AUDIO DETECTION THRESHOLDS ===
 # Amplitude range for human voice detection
@@ -294,5 +294,13 @@ def process_audio_chunk(audio_bytes):
     except Exception as e:
         print(f"Error processing audio chunk: {e}")
         return "Audio error"
+
+# --- Compatibility Aliases ---
+# Provide names expected by callers (e.g., ML service app)
+def headPoseEstimation(faces, img):
+    return head_pose_detection(faces, img)
+
+def gazeEstimation(faces, frame):
+    return gazeDetection(faces, frame)
 
 
