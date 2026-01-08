@@ -2377,115 +2377,6 @@ def get_exam_monitoring_data(exam_id):
             except Exception as _e:
                 pass
 
-
-
-    @app.route('/internal/proctor-events', methods=['GET'])
-    def internal_proctor_events_dashboard():
-            """Minimal internal dashboard to inspect recent proctor events and their metrics.
-
-            Query params:
-                examId, userId, eventType, severity, limit (default 200)
-                token (optional, if INTERNAL_DASHBOARD_TOKEN is set)
-            """
-            if not _internal_allowed():
-                    return jsonify({"error": "forbidden"}), 403
-
-            exam_id = (request.args.get('examId') or '').strip()
-            user_id = (request.args.get('userId') or '').strip()
-            event_type = (request.args.get('eventType') or '').strip()
-            severity = (request.args.get('severity') or '').strip()
-
-            try:
-                    limit = int(request.args.get('limit') or 200)
-            except Exception:
-                    limit = 200
-            limit = max(1, min(1000, limit))
-
-            q = {}
-            if exam_id:
-                    q['examId'] = exam_id
-            if user_id:
-                    q['userId'] = user_id
-            if event_type:
-                    q['eventType'] = event_type
-            if severity:
-                    q['severity'] = severity
-
-            try:
-                    cur = proctor_events_collection.find(q).sort('timestamp', -1).limit(limit)
-                    events = list(cur)
-            except Exception as e:
-                    return jsonify({"error": "query_failed", "detail": str(e)}), 500
-
-            # Compute simple counts (helps spot spammy false positives)
-            counts = Counter([str(ev.get('eventType') or '') for ev in events])
-            top_counts = counts.most_common(12)
-
-            def esc(s: str) -> str:
-                    return (s or '').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
-
-            # Render tiny HTML (no JS, no CSS frameworks)
-            rows = []
-            for ev in events:
-                    ts = ev.get('timestamp')
-                    ts_s = ts.isoformat() + 'Z' if hasattr(ts, 'isoformat') else str(ts)
-                    det = ev.get('details') if isinstance(ev.get('details'), dict) else {}
-                    msg = det.get('message') if isinstance(det, dict) else ''
-                    metrics = ev.get('metrics') if isinstance(ev.get('metrics'), dict) else {}
-                    rows.append(
-                            "<tr>"
-                            f"<td>{esc(ts_s)}</td>"
-                            f"<td>{esc(str(ev.get('eventType')))}</td>"
-                            f"<td>{esc(str(ev.get('severity')))}</td>"
-                            f"<td>{esc(str(ev.get('examId')))}</td>"
-                            f"<td>{esc(str(ev.get('userId')))}</td>"
-                            f"<td>{esc(str(msg))}</td>"
-                            f"<td><pre style='margin:0;white-space:pre-wrap'>{esc(json.dumps(metrics, default=str, sort_keys=True))}</pre></td>"
-                            "</tr>"
-                    )
-
-            counts_html = " ".join([f"<span style='margin-right:10px'><b>{esc(k)}</b>: {v}</span>" for k, v in top_counts])
-
-            html = f"""<!doctype html>
-    <html>
-    <head>
-        <meta charset='utf-8'>
-        <title>Invigilo - Proctor Events</title>
-    </head>
-    <body style='font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; padding: 16px;'>
-        <h2 style='margin:0 0 8px 0;'>Proctor Events (internal)</h2>
-        <div style='margin: 8px 0 12px 0; color: #333;'>Top event counts: {counts_html}</div>
-
-        <form method='get' style='margin: 0 0 12px 0;'>
-            <label>examId <input name='examId' value='{esc(exam_id)}' style='width: 260px;'></label>
-            <label>userId <input name='userId' value='{esc(user_id)}' style='width: 260px;'></label>
-            <label>eventType <input name='eventType' value='{esc(event_type)}' style='width: 160px;'></label>
-            <label>severity <input name='severity' value='{esc(severity)}' style='width: 120px;'></label>
-            <label>limit <input name='limit' value='{limit}' style='width: 80px;'></label>
-            {'<input name="token" value="' + esc(request.args.get('token') or '') + '" type="hidden">' if os.getenv('INTERNAL_DASHBOARD_TOKEN','').strip() else ''}
-            <button type='submit'>Refresh</button>
-        </form>
-
-        <table border='1' cellpadding='6' cellspacing='0' style='border-collapse: collapse; width: 100%; font-size: 12px;'>
-            <thead>
-                <tr>
-                    <th>timestamp</th>
-                    <th>eventType</th>
-                    <th>severity</th>
-                    <th>examId</th>
-                    <th>userId</th>
-                    <th>message</th>
-                    <th>metrics</th>
-                </tr>
-            </thead>
-            <tbody>
-                {''.join(rows)}
-            </tbody>
-        </table>
-    </body>
-    </html>"""
-
-            return html, 200, {'Content-Type': 'text/html; charset=utf-8'}
             students_data.append({
                 'userId': str(user_id),
                 'studentId': user.get('studentId', user.get('email', '')),
@@ -5236,6 +5127,120 @@ def handle_allow_student(data):
     except Exception as e:
         app.logger.error(f'[PROCTOR] Error allowing student: {e}')
         emit('error', {'message': 'Failed to allow student'})
+
+
+# --- Internal tuning dashboard (protected) ---
+@app.route('/internal/proctor-events', methods=['GET'])
+def internal_proctor_events_dashboard():
+        """Minimal internal dashboard to inspect recent proctor events and their metrics.
+
+        Query params:
+            examId, userId, eventType, severity, limit (default 200)
+            token (optional, if INTERNAL_DASHBOARD_TOKEN is set)
+        """
+        if not _internal_allowed():
+                return jsonify({"error": "forbidden"}), 403
+
+        exam_id = (request.args.get('examId') or '').strip()
+        user_id = (request.args.get('userId') or '').strip()
+        event_type = (request.args.get('eventType') or '').strip()
+        severity = (request.args.get('severity') or '').strip()
+
+        try:
+                limit = int(request.args.get('limit') or 200)
+        except Exception:
+                limit = 200
+        limit = max(1, min(1000, limit))
+
+        q = {}
+        if exam_id:
+                q['examId'] = exam_id
+        if user_id:
+                q['userId'] = user_id
+        if event_type:
+                q['eventType'] = event_type
+        if severity:
+                q['severity'] = severity
+
+        try:
+                cur = proctor_events_collection.find(q).sort('timestamp', -1).limit(limit)
+                events = list(cur)
+        except Exception as e:
+                return jsonify({"error": "query_failed", "detail": str(e)}), 500
+
+        counts = Counter([str(ev.get('eventType') or '') for ev in events])
+        top_counts = counts.most_common(12)
+
+        def esc(s: str) -> str:
+                return (s or '').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
+
+        rows = []
+        for ev in events:
+                ts = ev.get('timestamp')
+                ts_s = ts.isoformat() + 'Z' if hasattr(ts, 'isoformat') else str(ts)
+                det = ev.get('details') if isinstance(ev.get('details'), dict) else {}
+                msg = det.get('message') if isinstance(det, dict) else ''
+                metrics = ev.get('metrics') if isinstance(ev.get('metrics'), dict) else {}
+                rows.append(
+                        "<tr>"
+                        f"<td>{esc(ts_s)}</td>"
+                        f"<td>{esc(str(ev.get('eventType')))}</td>"
+                        f"<td>{esc(str(ev.get('severity')))}</td>"
+                        f"<td>{esc(str(ev.get('examId')))}</td>"
+                        f"<td>{esc(str(ev.get('userId')))}</td>"
+                        f"<td>{esc(str(msg))}</td>"
+                        f"<td><pre style='margin:0;white-space:pre-wrap'>{esc(json.dumps(metrics, default=str, sort_keys=True))}</pre></td>"
+                        "</tr>"
+                )
+
+        counts_html = " ".join([f"<span style='margin-right:10px'><b>{esc(k)}</b>: {v}</span>" for k, v in top_counts])
+
+        token_val = (request.args.get('token') or '').strip()
+        token_input = (
+                f"<input name=\"token\" value=\"{esc(token_val)}\" type=\"hidden\">"
+                if os.getenv('INTERNAL_DASHBOARD_TOKEN', '').strip() else ''
+        )
+
+        html = f"""<!doctype html>
+<html>
+<head>
+    <meta charset='utf-8'>
+    <title>Invigilo - Proctor Events</title>
+</head>
+<body style='font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; padding: 16px;'>
+    <h2 style='margin:0 0 8px 0;'>Proctor Events (internal)</h2>
+    <div style='margin: 8px 0 12px 0; color: #333;'>Top event counts: {counts_html}</div>
+
+    <form method='get' style='margin: 0 0 12px 0;'>
+        <label>examId <input name='examId' value='{esc(exam_id)}' style='width: 260px;'></label>
+        <label>userId <input name='userId' value='{esc(user_id)}' style='width: 260px;'></label>
+        <label>eventType <input name='eventType' value='{esc(event_type)}' style='width: 160px;'></label>
+        <label>severity <input name='severity' value='{esc(severity)}' style='width: 120px;'></label>
+        <label>limit <input name='limit' value='{limit}' style='width: 80px;'></label>
+        {token_input}
+        <button type='submit'>Refresh</button>
+    </form>
+
+    <table border='1' cellpadding='6' cellspacing='0' style='border-collapse: collapse; width: 100%; font-size: 12px;'>
+        <thead>
+            <tr>
+                <th>timestamp</th>
+                <th>eventType</th>
+                <th>severity</th>
+                <th>examId</th>
+                <th>userId</th>
+                <th>message</th>
+                <th>metrics</th>
+            </tr>
+        </thead>
+        <tbody>
+            {''.join(rows)}
+        </tbody>
+    </table>
+</body>
+</html>"""
+
+        return html, 200, {'Content-Type': 'text/html; charset=utf-8'}
 
 
 # ================================================================================
