@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { ArrowLeft, RefreshCw, Search, Filter, Download, AlertTriangle, CheckCircle, XCircle, Eye, Flag, Ban, MessageSquare, Users, Activity, Shield } from 'lucide-react';
+import { ArrowLeft, Search, Download, AlertTriangle, CheckCircle, XCircle, Eye, Flag, Ban, MessageSquare, Users, Activity, Shield } from 'lucide-react';
 
 const cn = (...classes: (string | undefined | null | false)[]) => classes.filter(Boolean).join(' ');
 
@@ -116,96 +116,7 @@ export default function LecturerProctoringMonitor({
         return () => clearInterval(interval);
     }, [examId, isMonitoring]);
 
-    // Load mock data initially
-    useEffect(() => {
-        const loadMockData = () => {
-            // Mock students for testing
-            const mockStudents: StudentStatus[] = [
-                {
-                    userId: '1',
-                    studentId: 'S001',
-                    name: 'John Doe',
-                    status: 'online',
-                    identityVerified: true,
-                    faceCount: 1,
-                    gazeDirection: 'center',
-                    headPose: 'normal',
-                    mouthStatus: 'normal',
-                    blinkStatus: 'normal',
-                    audioStatus: 'normal',
-                    lastSeen: new Date().toISOString(),
-                    riskScore: 5,
-                    alertLevel: 'none',
-                    incidentCount: 0
-                },
-                {
-                    userId: '2',
-                    studentId: 'S002',
-                    name: 'Jane Smith',
-                    status: 'online',
-                    identityVerified: true,
-                    faceCount: 2,
-                    gazeDirection: 'left',
-                    headPose: 'suspicious',
-                    mouthStatus: 'talking',
-                    blinkStatus: 'normal',
-                    audioStatus: 'multiple-voices',
-                    lastSeen: new Date().toISOString(),
-                    riskScore: 65,
-                    alertLevel: 'high',
-                    incidentCount: 3
-                },
-                {
-                    userId: '3',
-                    studentId: 'S003',
-                    name: 'Mike Johnson',
-                    status: 'not-started',
-                    identityVerified: false,
-                    faceCount: 0,
-                    gazeDirection: 'unknown',
-                    headPose: 'normal',
-                    mouthStatus: 'normal',
-                    blinkStatus: 'normal',
-                    audioStatus: 'normal',
-                    lastSeen: new Date(Date.now() - 300000).toISOString(),
-                    riskScore: 0,
-                    alertLevel: 'none',
-                    incidentCount: 0
-                }
-            ];
-
-            const mockIncidents: Incident[] = [
-                {
-                    _id: '1',
-                    userId: '2',
-                    studentId: 'S002',
-                    studentName: 'Jane Smith',
-                    timestamp: new Date().toISOString(),
-                    eventType: 'Multiple Faces Detected',
-                    severity: 'high',
-                    details: { faceCount: 2 },
-                    resolved: false
-                },
-                {
-                    _id: '2',
-                    userId: '2',
-                    studentId: 'S002',
-                    studentName: 'Jane Smith',
-                    timestamp: new Date(Date.now() - 60000).toISOString(),
-                    eventType: 'Multiple Voices Detected',
-                    severity: 'medium',
-                    details: { audioStatus: 'multiple-voices' },
-                    resolved: false
-                }
-            ];
-
-            setStudents(mockStudents);
-            setIncidents(mockIncidents);
-            setIsLoading(false);
-        };
-
-        loadMockData();
-    }, []);
+    // REMOVED: unconditional mock data injection (would overwrite real monitoring data in production).
 
     const filteredStudents = students.filter(s => 
         s.name.toLowerCase().includes(searchQuery.toLowerCase()) ||

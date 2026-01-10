@@ -4236,53 +4236,6 @@ Generate questions that demonstrate real knowledge of {topic}."""
 # Note: server start is performed at the end of the file after all route definitions.
 
 
-@app.route('/api/debug/models', methods=['GET'])
-def debug_list_models():
-    """Admin/debug endpoint: returns the ListModels output the server sees."""
-    if not GEMINI_API_KEY:
-        return jsonify({"error": "GEMINI_API_KEY not configured"}), 400
-    try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
-        resp = requests.get(url)
-        resp.raise_for_status()
-        data = resp.json()
-        # Return a filtered summary to keep payload small
-        summary = []
-        for m in data.get('models', []):
-            summary.append({
-                'name': m.get('name'),
-                'displayName': m.get('displayName'),
-                'supportedMethods': m.get('supportedMethods')
-            })
-        return jsonify({'models': summary}), 200
-    except Exception as e:
-        print(f"Error fetching models: {e}")
-        return jsonify({"error": str(e), "raw_response": getattr(e, 'response', None) and getattr(e.response, 'text', None)}), 500
-
-
-@app.route('/api/debug/selected-model', methods=['GET'])
-def debug_get_selected_model():
-    sel = getattr(app, '_selected_model', None)
-    if not sel:
-        return jsonify({'selected': None}), 200
-    return jsonify({'selected': sel}), 200
-
-
-@app.route('/api/debug/selected-model', methods=['POST'])
-def debug_set_selected_model():
-    data = request.get_json()
-    name = data.get('name')
-    methods = data.get('methods', [])
-    if not name:
-        return jsonify({'error': 'Model name is required'}), 400
-    try:
-        app._selected_model = {'name': name, 'methods': methods, 'ts': int(datetime.datetime.utcnow().timestamp())}
-        return jsonify({'selected': app._selected_model}), 200
-    except Exception as e:
-        print(f"Error setting selected model: {e}")
-        return jsonify({'error': str(e)}), 500
-
-
 @app.route('/api/users/<user_id>', methods=['PUT'])
 def update_user(user_id):
     """Update user profile fields. Allowed fields: name, phoneNumber, institution, department, year, studentId, lecturerId."""

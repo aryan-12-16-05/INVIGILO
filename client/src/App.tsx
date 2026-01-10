@@ -43,7 +43,7 @@ const API_URL = (() => {
     return trimmed.endsWith('/api') ? trimmed : `${trimmed}/api`;
 })();
 
-// --- MOCK INSTITUTION DATA ---
+// --- INSTITUTIONS AND DEPARTMENTS ---
 const INSTITUTIONS: { [key: string]: string[] } = {
   "Indian Institute of Technology Hyderabad (IIT Hyderabad)": [
     "Artificial Intelligence",
