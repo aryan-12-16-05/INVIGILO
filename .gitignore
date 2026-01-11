@@ -62,3 +62,6 @@ server/shape_predictor_model/*.dat
 
 # Vite timestamp artifacts that sometimes appear
 client/vite.config.ts.timestamp-*.mjs
+
+# Local analysis docs (do not commit)
+/INVIGILO_PROCTORING_WORKFLOW_TIMELINE_ANALYSIS.Rmd
