@@ -676,19 +676,23 @@ export default function LecturerExamReport({
                                                     {studentViolations.map((v: any) => (
                                                         <div key={v._id} className="p-3 rounded-lg border border-slate-800 bg-slate-900/40">
                                                             <div className="flex items-start justify-between gap-3">
-                                                                <div>
-                                                                    <div className="text-sm text-white font-medium">{String(v.eventType || 'violation')}</div>
-                                                                    <div className="text-xs text-slate-400 mt-1">{v.timestamp ? new Date(v.timestamp).toLocaleString() : ''}</div>
+                                                                <div className="min-w-0">
+                                                                    <div className="flex items-start justify-between gap-3">
+                                                                        <div className="min-w-0">
+                                                                            <div className="text-sm text-white font-medium">{String(v.eventType || 'violation')}</div>
+                                                                            <div className="text-xs text-slate-400 mt-1">{v.timestamp ? new Date(v.timestamp).toLocaleString() : ''}</div>
+                                                                        </div>
+                                                                        <span className="text-xs px-2 py-1 rounded border bg-orange-500/10 text-orange-300 border-orange-500/20 whitespace-nowrap">
+                                                                            {String(v.severity || 'unknown').toUpperCase()}
+                                                                        </span>
+                                                                    </div>
                                                                 </div>
-                                                                <span className="text-xs px-2 py-1 rounded border bg-orange-500/10 text-orange-300 border-orange-500/20">
-                                                                    {String(v.severity || 'unknown').toUpperCase()}
-                                                                </span>
+                                                                {v.frameEvidence && (
+                                                                    <div className="flex-shrink-0 w-24 h-24 rounded-lg overflow-hidden border border-slate-800 bg-slate-950/40">
+                                                                        <img src={v.frameEvidence} alt="Evidence" className="w-full h-full object-contain" />
+                                                                    </div>
+                                                                )}
                                                             </div>
-                                                            {v.frameEvidence && (
-                                                                <div className="mt-3 rounded-lg overflow-hidden border border-slate-800 bg-slate-950/40">
-                                                                    <img src={v.frameEvidence} alt="Evidence" className="w-full max-h-72 object-cover" />
-                                                                </div>
-                                                            )}
                                                         </div>
                                                     ))}
                                                 </div>
@@ -702,26 +706,30 @@ export default function LecturerExamReport({
                                                     {studentEvents.slice(0, 100).map((ev) => (
                                                         <div key={ev._id} className="p-3 rounded-lg border border-slate-800 bg-slate-900/40">
                                                             <div className="flex items-start justify-between gap-3">
-                                                                <div>
-                                                                    <div className="text-sm text-white font-medium">{String(ev.eventType || 'event')}</div>
-                                                                    <div className="text-xs text-slate-400 mt-1">{ev.timestamp ? new Date(ev.timestamp).toLocaleString() : ''}</div>
+                                                                <div className="min-w-0">
+                                                                    <div className="flex items-start justify-between gap-3">
+                                                                        <div className="min-w-0">
+                                                                            <div className="text-sm text-white font-medium">{String(ev.eventType || 'event')}</div>
+                                                                            <div className="text-xs text-slate-400 mt-1">{ev.timestamp ? new Date(ev.timestamp).toLocaleString() : ''}</div>
+                                                                        </div>
+                                                                        {ev.severity && (
+                                                                            <span className="text-xs px-2 py-1 rounded border bg-slate-800 text-slate-200 border-slate-700 whitespace-nowrap">
+                                                                                {String(ev.severity).toUpperCase()}
+                                                                            </span>
+                                                                        )}
+                                                                    </div>
+
+                                                                    {ev.details?.message && (
+                                                                        <div className="text-xs text-slate-300 mt-2 break-words">{String(ev.details.message)}</div>
+                                                                    )}
                                                                 </div>
-                                                                {ev.severity && (
-                                                                    <span className="text-xs px-2 py-1 rounded border bg-slate-800 text-slate-200 border-slate-700">
-                                                                        {String(ev.severity).toUpperCase()}
-                                                                    </span>
+
+                                                                {ev.frameEvidence && (
+                                                                    <div className="flex-shrink-0 w-24 h-24 rounded-lg overflow-hidden border border-slate-800 bg-slate-950/40">
+                                                                        <img src={ev.frameEvidence} alt="Evidence" className="w-full h-full object-contain" />
+                                                                    </div>
                                                                 )}
                                                             </div>
-
-                                                            {ev.details?.message && (
-                                                                <div className="text-xs text-slate-300 mt-2">{String(ev.details.message)}</div>
-                                                            )}
-
-                                                            {ev.frameEvidence && (
-                                                                <div className="mt-3 rounded-lg overflow-hidden border border-slate-800 bg-slate-950/40">
-                                                                    <img src={ev.frameEvidence} alt="Evidence" className="w-full max-h-72 object-cover" />
-                                                                </div>
-                                                            )}
                                                         </div>
                                                     ))}
                                                 </div>

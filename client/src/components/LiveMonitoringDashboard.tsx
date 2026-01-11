@@ -507,10 +507,12 @@ const ViolationImagesPanel = ({
 export default function LiveMonitoringDashboard({
     examId,
     examTitle,
+    lecturerId,
     onBack
 }: {
     examId: string;
     examTitle: string;
+    lecturerId: string;
     onBack: () => void;
 }) {
     const [students, setStudents] = useState<LiveStudent[]>([]);
@@ -518,7 +520,7 @@ export default function LiveMonitoringDashboard({
     const [currentPage, setCurrentPage] = useState(0);
     const [currentViolationIndex, setCurrentViolationIndex] = useState(0);
     const [selectedStudent, setSelectedStudent] = useState<LiveStudent | null>(null);
-    const [clipModal, setClipModal] = useState<{ url: string; student: string } | null>(null);
+    const [evidenceClipSrc, setEvidenceClipSrc] = useState<string | null>(null);
     
     // QUEUE-BASED VIOLATION REVIEW SYSTEM
     const [violationQueue, setViolationQueue] = useState<ViolationQueueItem[]>([]);
@@ -537,6 +539,13 @@ export default function LiveMonitoringDashboard({
         activeViolations: 0
     });
     const [, forceUpdate] = useState(0);
+
+    const resolveEvidenceUrl = (url: string) => {
+        if (!url) return url;
+        if (/^https?:\/\//i.test(url)) return url;
+        const baseUrl = API_URL.replace(/\/api\/?$/, '');
+        return `${baseUrl}${url.startsWith('/') ? '' : '/'}${url}`;
+    };
 
     const studentsPerPage = 15;
     const totalPages = Math.ceil(students.length / studentsPerPage);
@@ -644,6 +653,43 @@ export default function LiveMonitoringDashboard({
 
     // Get current violation from queue (FIFO)
     const currentViolation = violationQueue[currentViolationIndex];
+
+    useEffect(() => {
+        let cancelled = false;
+        let objectUrlToRevoke: string | null = null;
+
+        async function loadEvidenceVideo() {
+            const raw = currentViolation?.violationVideoUrl;
+            if (!raw) {
+                setEvidenceClipSrc(null);
+                return;
+            }
+
+            const resolved = resolveEvidenceUrl(raw);
+            try {
+                const resp = await fetch(resolved, {
+                    headers: {
+                        'X-User-Id': lecturerId
+                    }
+                });
+                if (!resp.ok) throw new Error(`Evidence fetch failed: ${resp.status}`);
+                const blob = await resp.blob();
+                if (cancelled) return;
+                objectUrlToRevoke = URL.createObjectURL(blob);
+                setEvidenceClipSrc(objectUrlToRevoke);
+            } catch {
+                // Fallback: try direct URL (may work in dev if server doesn't require headers)
+                if (!cancelled) setEvidenceClipSrc(resolved);
+            }
+        }
+
+        loadEvidenceVideo();
+
+        return () => {
+            cancelled = true;
+            if (objectUrlToRevoke) URL.revokeObjectURL(objectUrlToRevoke);
+        };
+    }, [currentViolation?.violationVideoUrl, lecturerId]);
 
     // Handle queue navigation
     const handleNext = () => {
@@ -958,17 +1004,6 @@ export default function LiveMonitoringDashboard({
                                             </div>
                                         )}
 
-                                        {/* Play Clip Overlay if violation clip available */}
-                                        {student.violationVideoUrl && (
-                                            <button
-                                                onClick={(e) => { e.stopPropagation(); setClipModal({ url: student.violationVideoUrl!, student: student.name }); }}
-                                                className="absolute bottom-2 right-2 bg-black/70 hover:bg-black/80 text-white text-xs font-semibold px-3 py-1.5 rounded-md z-30"
-                                                title="Play violation clip"
-                                            >
-                                                Play Clip
-                                            </button>
-                                        )}
-
                                         {/* Face Detection Border */}
                                         {student.faceDetected && (
                                             <div className={cn(
@@ -1084,7 +1119,7 @@ export default function LiveMonitoringDashboard({
 
                                             {/* Live Frame, Video Clip, or Captured Evidence */}
                                             {currentViolation?.violationVideoUrl ? (
-                                                <video controls className="w-full h-full object-cover" src={currentViolation.violationVideoUrl} />
+                                                <video controls playsInline className="w-full h-full object-cover" src={evidenceClipSrc ?? undefined} />
                                             ) : currentViolation?.frameEvidence ? (
                                                 <div className="relative w-full h-full">
                                                     <img 
@@ -1537,23 +1572,6 @@ export default function LiveMonitoringDashboard({
                         </div>
                     </motion.div>
                 </motion.div>
-            )}
-
-            {/* Clip Modal */}
-            {clipModal && (
-                <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={() => setClipModal(null)}>
-                    <div className="bg-slate-900 border border-slate-700 rounded-lg p-4 w-full max-w-3xl" onClick={(e) => e.stopPropagation()}>
-                        <div className="flex items-center justify-between mb-3">
-                            <h3 className="text-white font-semibold">Latest Violation Clip — {clipModal?.student ?? ''}</h3>
-                            <button className="text-slate-300 hover:text-white" onClick={() => setClipModal(null)}>
-                                <X className="h-5 w-5" />
-                            </button>
-                        </div>
-                        <video controls autoPlay className="w-full rounded-lg border border-slate-800">
-                            <source src={clipModal?.url ?? ''} />
-                        </video>
-                    </div>
-                </div>
             )}
         </div>
     );

@@ -250,7 +250,7 @@ const INSTITUTIONS: { [key: string]: string[] } = {
 
 
 // --- TYPE DEFINITIONS ---
-type AppState = 'loading' | 'landing' | 'auth' | 'student-dashboard' | 'lecturer-dashboard' | 'exam' | 'result' | 'results-analysis' | 'live-proctoring' | 'help' | 'my-exams' | 'profile' | 'lecturer-proctor' | 'lecturer-report' | 'lecturer-live-exams' | 'lecturer-live-monitor';
+type AppState = 'loading' | 'landing' | 'auth' | 'student-dashboard' | 'lecturer-dashboard' | 'exam' | 'result' | 'results-analysis' | 'live-proctoring' | 'help' | 'my-exams' | 'profile' | 'lecturer-proctor' | 'lecturer-report' | 'lecturer-live-exams' | 'lecturer-live-monitor' | 'lecturer-create-exam';
 type UserRole = 'student' | 'lecturer';
 type ExamStatus = 'Scheduled' | 'Available' | 'Locked' | 'Completed' | 'Live';
 type QuestionType = 'multiple-choice' | 'true-false' | 'short-answer' | 'essay';
@@ -482,6 +482,7 @@ export default function App() {
     const [lastResult, setLastResult] = useState<ExamResult | null>(null);
     const [selectedExamIdForProctoring, setSelectedExamIdForProctoring] = useState<string>('');
     const [selectedExamTitle, setSelectedExamTitle] = useState<string>('');
+    const [lecturerExamToEdit, setLecturerExamToEdit] = useState<Exam | null>(null);
 
     useEffect(() => {
         const timer = setTimeout(() => setAppState('landing'), 1500);
@@ -612,11 +613,54 @@ export default function App() {
             case 'student-dashboard': return currentUser && <StudentDashboard key="student-dashboard" user={currentUser} exams={exams} onLogout={handleLogout} onStartExam={handleStartExam} onBack={() => navigateTo('landing')} showToast={showToast} navigateTo={navigateTo} />;
             case 'my-exams': return currentUser && <MyExamsPage key="my-exams" user={currentUser} exams={exams} onLogout={handleLogout} onStartExam={handleStartExam} showToast={showToast} navigateTo={navigateTo} />;
             case 'results-analysis': return currentUser && <ResultsAnalysisPage key="results-analysis" user={currentUser} exams={exams} onLogout={handleLogout} onBack={() => navigateTo('student-dashboard')} showToast={showToast} navigateTo={navigateTo} />;
-                case 'lecturer-dashboard': return currentUser && <LecturerDashboard key="lecturer-dashboard" user={currentUser} exams={exams} onLogout={handleLogout} onBack={() => navigateTo('landing')} onExamChange={fetchExams} showToast={showToast} navigateTo={navigateTo} setSelectedExamIdForProctoring={setSelectedExamIdForProctoring} />;
+                case 'lecturer-dashboard':
+                    return currentUser && (
+                        <LecturerDashboard
+                            key="lecturer-dashboard"
+                            user={currentUser}
+                            exams={exams}
+                            onLogout={handleLogout}
+                            onBack={() => navigateTo('landing')}
+                            onExamChange={fetchExams}
+                            showToast={showToast}
+                            navigateTo={navigateTo}
+                            setSelectedExamIdForProctoring={setSelectedExamIdForProctoring}
+                            onCreateExam={() => {
+                                setLecturerExamToEdit(null);
+                                navigateTo('lecturer-create-exam');
+                            }}
+                            onEditExam={(exam) => {
+                                setLecturerExamToEdit(exam);
+                                navigateTo('lecturer-create-exam');
+                            }}
+                        />
+                    );
             case 'lecturer-live-exams': return currentUser && <LecturerLiveExamsList key="lecturer-live-exams" lecturerId={currentUser._id} onBack={() => navigateTo('lecturer-dashboard')} onSelectExam={(examId, examTitle) => { setSelectedExamIdForProctoring(examId); setSelectedExamTitle(examTitle); navigateTo('lecturer-live-monitor'); }} />;
-            case 'lecturer-live-monitor': return currentUser && selectedExamIdForProctoring && <LiveMonitoringDashboard key="lecturer-live-monitor" examId={selectedExamIdForProctoring} examTitle={selectedExamTitle} onBack={() => navigateTo('lecturer-dashboard')} />;
+            case 'lecturer-live-monitor': return currentUser && selectedExamIdForProctoring && <LiveMonitoringDashboard key="lecturer-live-monitor" examId={selectedExamIdForProctoring} examTitle={selectedExamTitle} lecturerId={currentUser._id} onBack={() => navigateTo('lecturer-dashboard')} />;
             case 'lecturer-proctor': return currentUser && selectedExamIdForProctoring && <LecturerProctoringMonitor key="lecturer-proctor" examId={selectedExamIdForProctoring} onBack={() => navigateTo('lecturer-dashboard')} showToast={showToast} />;
             case 'lecturer-report': return currentUser && selectedExamIdForProctoring && <LecturerExamReport key="lecturer-report" user={currentUser} examId={selectedExamIdForProctoring} onBack={() => navigateTo('lecturer-dashboard')} showToast={showToast} />;
+            case 'lecturer-create-exam':
+                return (
+                    currentUser && (
+                        <LecturerCreateExamPage
+                            key="lecturer-create-exam"
+                            lecturer={currentUser}
+                            onLogout={handleLogout}
+                            showToast={showToast}
+                            examToEdit={lecturerExamToEdit || undefined}
+                            onCancel={() => {
+                                setLecturerExamToEdit(null);
+                                navigateTo('lecturer-dashboard');
+                            }}
+                            onSaved={() => {
+                                setLecturerExamToEdit(null);
+                                fetchExams();
+                                navigateTo('lecturer-dashboard');
+                            }}
+                            onNavigate={navigateTo}
+                        />
+                    )
+                );
             case 'live-proctoring': return currentUser && <LiveProctoring key="live-proctoring" user={currentUser} onBack={() => navigateTo(currentUser?.role === 'student' ? 'student-dashboard' : 'lecturer-dashboard')} />;
             case 'help': return <HelpPage key="help" onBack={() => navigateTo(currentUser?.role === 'student' ? 'student-dashboard' : 'lecturer-dashboard')} />;
             case 'profile': return currentUser && <ProfilePage key="profile" user={currentUser} onLogout={handleLogout} onBack={() => navigateTo(currentUser?.role === 'student' ? 'student-dashboard' : 'lecturer-dashboard')} showToast={showToast} onUpdateUser={setCurrentUser} navigateTo={navigateTo} />;
@@ -1607,7 +1651,7 @@ const getVideoStatus = () => {
 
 
 
-const DashboardLayout = ({ children, user, onLogout, onBack, onAction, showToast }: { children: React.ReactNode, user: UserProfile, onLogout?: () => void, onBack: () => void, onAction?: (action: string) => void, showToast?: (msg:string, type:'success'|'error') => void }) => {
+const DashboardLayout = ({ children, user, onLogout, onBack, onAction, showToast, headerTitle, backLabel }: { children: React.ReactNode, user: UserProfile, onLogout?: () => void, onBack: () => void, onAction?: (action: string) => void, showToast?: (msg:string, type:'success'|'error') => void, headerTitle?: string, backLabel?: string }) => {
     const [faceDialogOpen, setFaceDialogOpen] = useState(false);
     const videoRef = useRef<HTMLVideoElement>(null);
     const [faceSamples, setFaceSamples] = useState<string[]>([]);
@@ -1622,9 +1666,9 @@ const DashboardLayout = ({ children, user, onLogout, onBack, onAction, showToast
             <Sidebar user={user} onAction={handleAction} />
             <main className="flex-1 p-8 bg-slate-950/50 overflow-y-auto">
                 <div className="flex justify-between items-center mb-8">
-                    <h1 className="text-3xl font-bold text-white">Welcome back, {user.name.split(' ')[0]}!</h1>
+                    <h1 className="text-3xl font-bold text-white">{headerTitle ?? `Welcome back, ${user.name.split(' ')[0]}!`}</h1>
                     <div className="flex items-center space-x-2">
-                        <Button variant="outline" onClick={onBack}><ChevronLeft className="h-4 w-4 mr-2" /> Back to Home</Button>
+                        <Button variant="outline" onClick={onBack}><ChevronLeft className="h-4 w-4 mr-2" /> {backLabel ?? 'Back to Home'}</Button>
                         {onLogout && <Button variant="destructive" onClick={onLogout}>Logout</Button>}
                     </div>
                 </div>
@@ -2622,11 +2666,9 @@ const StudentDashboard = ({ user, exams, onLogout, onStartExam, onBack, showToas
         </DashboardLayout>
     );
 };
-const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showToast, navigateTo, setSelectedExamIdForProctoring }: { user: UserProfile; exams: Exam[]; onLogout: () => void; onBack: () => void; onExamChange: () => void; showToast: (message: string, type: 'success' | 'error') => void; navigateTo: (state: AppState) => void; setSelectedExamIdForProctoring: (id: string) => void }) => {
+const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showToast, navigateTo, setSelectedExamIdForProctoring, onCreateExam, onEditExam }: { user: UserProfile; exams: Exam[]; onLogout: () => void; onBack: () => void; onExamChange: () => void; showToast: (message: string, type: 'success' | 'error') => void; navigateTo: (state: AppState) => void; setSelectedExamIdForProctoring: (id: string) => void; onCreateExam: () => void; onEditExam: (exam: Exam) => void }) => {
     const lecturerExams = exams.filter((exam) => exam.lecturerId === user._id);
-    const [createExamOpen, setCreateExamOpen] = useState(false);
     const [examToDelete, setExamToDelete] = useState<Exam | null>(null);
-    const [examToEdit, setExamToEdit] = useState<Exam | null>(null);
 
 
     
@@ -2684,7 +2726,7 @@ const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showTo
     return (
     <DashboardLayout user={user} onLogout={onLogout} onBack={onBack} showToast={showToast} onAction={(a) => {
         if (a === 'overview' || a === 'dashboard') { /* default overview; no-op */ return; }
-        if (a === 'create-exam') { setCreateExamOpen(true); return; }
+        if (a === 'create-exam') { onCreateExam(); return; }
         if (a === 'live-proctoring') { navigateTo('live-proctoring'); return; }
         if (a === 'lecturer-live-exams') { navigateTo('lecturer-live-exams'); return; }
         if (a === 'help') { navigateTo('help'); return; }
@@ -2692,7 +2734,7 @@ const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showTo
     }}>
             <div className="flex justify-between items-center mb-4">
                 <h2 className="text-2xl font-bold text-white">Your Exams</h2>
-                <Button onClick={() => setCreateExamOpen(true)}><PlusCircle className="h-4 w-4 mr-2" /> Create Exam</Button>
+                <Button onClick={onCreateExam}><PlusCircle className="h-4 w-4 mr-2" /> Create Exam</Button>
             </div>
             <div className="space-y-4">
                 {lecturerExams.length > 0 ? lecturerExams.map((exam: Exam) => (
@@ -2725,7 +2767,7 @@ const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showTo
                             </select>
                         </div>
                             <div className="flex justify-end items-center space-x-1">
-                            <Button variant="ghost" size="sm" onClick={() => { setExamToEdit(exam); setCreateExamOpen(true); }} title="Edit Exam">
+                            <Button variant="ghost" size="sm" onClick={() => onEditExam(exam)} title="Edit Exam">
                                 Edit
                             </Button>
                             <Button variant="ghost" size="sm" onClick={() => { setSelectedExamIdForProctoring(exam._id); navigateTo('lecturer-live-monitor'); }} title="Live Monitoring">
@@ -2744,8 +2786,6 @@ const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showTo
                     </Card>
                 )) : <p className="text-slate-400 text-center py-8">You haven't created any exams yet.</p>}
             </div>
-            <CreateExamDialog open={createExamOpen} onOpenChange={(open) => { if (!open) setExamToEdit(null); setCreateExamOpen(open); }} lecturer={user} onExamCreated={() => { setExamToEdit(null); onExamChange(); }} showToast={showToast} examToEdit={examToEdit || undefined} />
-            
             <Dialog open={!!examToDelete} onOpenChange={() => setExamToDelete(null)}>
                 <h2 className="text-xl font-bold text-white">Confirm Deletion</h2>
                 <p className="text-slate-400 my-4">Are you sure you want to delete the exam "{examToDelete?.title}"? This action cannot be undone.</p>
@@ -2754,6 +2794,36 @@ const LecturerDashboard = ({ user, exams, onLogout, onBack, onExamChange, showTo
                     <Button variant="destructive" onClick={handleDelete}>Delete</Button>
                 </div>
             </Dialog>
+        </DashboardLayout>
+    );
+};
+
+const LecturerCreateExamPage = ({ lecturer, onLogout, showToast, examToEdit, onCancel, onSaved }: { lecturer: UserProfile; onLogout: () => void; showToast: (message: string, type: 'success' | 'error') => void; examToEdit?: Exam; onCancel: () => void; onSaved: () => void; onNavigate?: (state: AppState) => void }) => {
+    return (
+        <DashboardLayout
+            user={lecturer}
+            onLogout={onLogout}
+            onBack={onCancel}
+            backLabel="Back to Dashboard"
+            headerTitle={examToEdit ? 'Edit Exam' : 'Create Exam'}
+            showToast={showToast}
+        >
+            <div className="mx-auto w-full max-w-5xl">
+                <div className="mb-6">
+                    <h2 className="text-2xl font-bold text-white">{examToEdit ? 'Edit Exam' : 'Create New Exam'}</h2>
+                    <p className="text-slate-400 text-sm mt-1">Fill all details and add questions, then submit.</p>
+                </div>
+
+                <Card className="p-6">
+                    <CreateExamForm
+                        lecturer={lecturer}
+                        examToEdit={examToEdit}
+                        showToast={showToast}
+                        onCancel={onCancel}
+                        onSaved={onSaved}
+                    />
+                </Card>
+            </div>
         </DashboardLayout>
     );
 };
@@ -4856,7 +4926,8 @@ const SystemCheckDialog = ({ open, onOpenChange }: { open: boolean, onOpenChange
         </Dialog>
     );
 };
-const CreateExamDialog = ({ open, onOpenChange, lecturer, onExamCreated, showToast, examToEdit }: { open: boolean, onOpenChange: (open: boolean) => void; lecturer: UserProfile, onExamCreated: () => void, showToast: (message: string, type: 'success' | 'error') => void; examToEdit?: Exam }) => {
+
+const CreateExamForm = ({ lecturer, showToast, examToEdit, onCancel, onSaved }: { lecturer: UserProfile; showToast: (message: string, type: 'success' | 'error') => void; examToEdit?: Exam; onCancel: () => void; onSaved: () => void }) => {
     const [isLoading, setIsLoading] = useState(false);
     const [department, setDepartment] = useState('');
     const [questions, setQuestions] = useState<NewQuestion[]>([]);
@@ -4874,26 +4945,19 @@ const CreateExamDialog = ({ open, onOpenChange, lecturer, onExamCreated, showToa
     const handleRemoveQuestion = (index: number) => {
         setQuestions(prev => prev.filter((_, i) => i !== index));
     };
-    
+
     useEffect(() => {
-        if (open && examToEdit) {
-            // prefill form values when editing
-            setDepartment(examToEdit.department || '');
-            setQuestions(examToEdit.questions || []);
-            // we will populate the form fields via DOM when the dialog renders using defaultValue
-        } else if (!open) {
-            // clear when closed
-            setDepartment('');
-            setQuestions([]);
-        }
-    }, [open, examToEdit]);
+        // Prefill/reset when entering create vs edit mode
+        setDepartment(examToEdit?.department || '');
+        setQuestions(examToEdit?.questions || []);
+    }, [examToEdit]);
 
     const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
         e.preventDefault();
         setIsLoading(true);
 
         const formData = new FormData(e.currentTarget);
-        
+
         const examDetails = {
             title: formData.get('title'),
             courseCode: formData.get('courseCode'),
@@ -4909,11 +4973,10 @@ const CreateExamDialog = ({ open, onOpenChange, lecturer, onExamCreated, showToa
             lecturerName: lecturer.name,
             questions: questions,
         };
-        
+
         try {
             let res;
             if (examToEdit) {
-                // Update existing exam
                 res = await fetch(`${API_URL}/exams/${examToEdit._id}`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
@@ -4933,20 +4996,17 @@ const CreateExamDialog = ({ open, onOpenChange, lecturer, onExamCreated, showToa
             showToast(examToEdit ? 'Exam updated successfully!' : 'Exam created successfully!', 'success');
             try { e.currentTarget?.reset?.(); } catch (err) {}
             setQuestions([]);
-            onExamCreated();
-            onOpenChange(false);
-
+            onSaved();
         } catch (error: any) {
             showToast(error.message, 'error');
         } finally {
             setIsLoading(false);
         }
     };
-    
+
     return (
-        <Dialog open={open} onOpenChange={onOpenChange} className="max-w-3xl">
-            <h2 className="text-2xl font-bold mb-4 text-white">Create New Exam</h2>
-            <form onSubmit={handleSubmit} className="space-y-4 max-h-[80vh] overflow-y-auto pr-2">
+        <>
+            <form onSubmit={handleSubmit} className="space-y-4">
                 <div className="grid grid-cols-2 gap-4">
                     <div><Label htmlFor="exam-title">Exam Title</Label><Input id="exam-title" name="title" required defaultValue={examToEdit?.title || ''} /></div>
                     <div><Label htmlFor="course-code">Course Code</Label><Input id="course-code" name="courseCode" required defaultValue={examToEdit?.courseCode || ''} /></div>
@@ -4958,7 +5018,7 @@ const CreateExamDialog = ({ open, onOpenChange, lecturer, onExamCreated, showToa
                     </div>
                     <div className="space-y-1">
                         <Label htmlFor="department-create">Department</Label>
-                        <Select id="department-create" name="department" value={department || examToEdit?.department || ''} onChange={(e: ChangeEvent<HTMLSelectElement>) => setDepartment(e.target.value)} required>
+                        <Select id="department-create" name="department" value={department} onChange={(e: ChangeEvent<HTMLSelectElement>) => setDepartment(e.target.value)} required>
                             <option value="">Select Department</option>
                             {INSTITUTIONS[lecturer.institution]?.map(dept => <option key={dept} value={dept}>{dept}</option>)}
                         </Select>
@@ -4970,13 +5030,22 @@ const CreateExamDialog = ({ open, onOpenChange, lecturer, onExamCreated, showToa
                     <div><Label htmlFor="duration">Duration (mins)</Label><Input id="duration" name="duration" type="number" required defaultValue={examToEdit?.duration ? String(examToEdit.duration) : ''} /></div>
                 </div>
                 <div className="grid grid-cols-2 gap-4">
-                    <div><Label htmlFor="targetYear">Target Year</Label><Input id="targetYear" name="targetYear" placeholder="e.g., 3" required defaultValue={examToEdit?.targetYear || ''} /></div>
+                    <div className="space-y-1">
+                        <Label htmlFor="targetYear">Target Year</Label>
+                        <Select id="targetYear" name="targetYear" required defaultValue={examToEdit?.targetYear || ''}>
+                            <option value="">Select Year</option>
+                            <option value="1">1</option>
+                            <option value="2">2</option>
+                            <option value="3">3</option>
+                            <option value="4">4</option>
+                        </Select>
+                    </div>
                 </div>
                 <div><Label htmlFor="description">Description</Label><textarea id="description" name="description" rows={2} className="w-full rounded-md border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm" required defaultValue={examToEdit?.description || ''}></textarea></div>
-                
+
                 <div>
                     <h3 className="text-lg font-semibold mb-2 text-white">Questions ({questions.length})</h3>
-                    <div className="space-y-2 max-h-48 overflow-y-auto p-2 border border-slate-700 rounded-md">
+                    <div className="space-y-2 max-h-64 overflow-y-auto p-2 border border-slate-700 rounded-md">
                         {questions.map((q, index) => (
                             <div key={index} className="bg-slate-800 p-2 rounded-md flex justify-between items-center">
                                 <div className="flex-1 min-w-0">
@@ -5000,7 +5069,7 @@ const CreateExamDialog = ({ open, onOpenChange, lecturer, onExamCreated, showToa
                         <Button type="button" variant="secondary" className="flex-1" onClick={() => setShowAIGenerator(true)}><Cpu className="h-4 w-4 mr-2"/> Generate with AI</Button>
                         <Button type="button" variant="secondary" className="flex-1" onClick={() => setShowQuestionForm(true)}><PlusCircle className="h-4 w-4 mr-2"/> Type Manually</Button>
                     </div>
-                    
+
                     <AnimatePresence>
                         {showQuestionForm && (
                             <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden">
@@ -5011,19 +5080,21 @@ const CreateExamDialog = ({ open, onOpenChange, lecturer, onExamCreated, showToa
                 </div>
 
                 <div className="pt-4 flex justify-end space-x-2">
-                    <Button variant="outline" type="button" onClick={() => onOpenChange(false)}>Cancel</Button>
-                    <Button type="submit" isLoading={isLoading}>Create Exam</Button>
+                    <Button variant="outline" type="button" onClick={onCancel}>Cancel</Button>
+                    <Button type="submit" isLoading={isLoading}>{examToEdit ? 'Update Exam' : 'Create Exam'}</Button>
                 </div>
             </form>
-             <AIGenerateQuestionsDialog 
-                open={showAIGenerator} 
-                onOpenChange={setShowAIGenerator} 
+
+            <AIGenerateQuestionsDialog
+                open={showAIGenerator}
+                onOpenChange={setShowAIGenerator}
                 onAddQuestions={handleAddMultipleQuestions}
                 showToast={showToast}
             />
-        </Dialog>
+        </>
     );
 };
+
 const AddQuestionForm = ({ onAddQuestion, onDone }: { onAddQuestion: (q: NewQuestion) => void; onDone: () => void; }) => {
     const [questionType, setQuestionType] = useState<QuestionType>('multiple-choice');
     const [questionText, setQuestionText] = useState('');
@@ -5469,7 +5540,13 @@ const LiveProctoring = ({ user, onBack }: { user: UserProfile; onBack: () => voi
                                             <p className="text-xs text-slate-500">{new Date(evt.timestamp).toLocaleString()}</p>
                                         </div>
                                         {evt.details?.snapshot && (
-                                            <img src={evt.details.snapshot} alt="Snapshot" className="h-16 w-20 object-cover rounded ml-3" />
+                                            <div className="ml-3 flex-shrink-0 w-16 h-16 rounded border border-slate-700 bg-slate-950/40 overflow-hidden">
+                                                <img
+                                                    src={evt.details.snapshot}
+                                                    alt="Snapshot"
+                                                    className="w-full h-full object-contain"
+                                                />
+                                            </div>
                                         )}
                                     </div>
                                 </div>

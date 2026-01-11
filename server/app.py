@@ -27,7 +27,8 @@ import io
 import hmac
 import hashlib
 from werkzeug.exceptions import HTTPException
-from collections import Counter
+from collections import Counter, deque
+import math
 
 def _bool_env(name: str, default: str = "0") -> bool:
     v = os.getenv(name, default)
@@ -863,6 +864,108 @@ def _cosine_similarity(vec_a, vec_b):
     except Exception:
         return None
 
+
+def _norm_head_pose(v):
+    s = str(v or '').strip().lower().replace(' ', '-').replace('_', '-')
+    if not s or s in ('unknown', 'n/a', 'na', 'none'):
+        return 'unknown'
+    if s.startswith('head-'):
+        s = s[len('head-'):]
+    if s in ('forward', 'center', 'centred', 'centered', 'normal', 'straight'):
+        return 'forward'
+    has_down = 'down' in s
+    has_up = 'up' in s
+    has_left = 'left' in s
+    has_right = 'right' in s
+    if has_down and has_left:
+        return 'down_left'
+    if has_down and has_right:
+        return 'down_right'
+    if has_up and has_left:
+        return 'up_left'
+    if has_up and has_right:
+        return 'up_right'
+    if has_down:
+        return 'down'
+    if has_up:
+        return 'up'
+    if has_left:
+        return 'left'
+    if has_right:
+        return 'right'
+    return 'unknown'
+
+
+def _norm_gaze(v):
+    s = str(v or '').strip().lower().replace(' ', '-').replace('_', '-')
+    if not s or s in ('unknown', 'n/a', 'na', 'none'):
+        return 'unknown'
+    if s in ('center', 'centre', 'forward', 'straight', 'normal'):
+        return 'center'
+    if 'left' in s:
+        return 'left'
+    if 'right' in s:
+        return 'right'
+    if 'up' in s:
+        return 'up'
+    if 'down' in s:
+        return 'down'
+    return 'unknown'
+
+
+def _decay_score(score: float, dt_seconds: float, half_life_seconds: float = 300.0) -> float:
+    """Exponential decay with a configurable half-life (default 5 minutes)."""
+    try:
+        if score <= 0:
+            return 0.0
+        if dt_seconds <= 0:
+            return float(score)
+        # score * 0.5^(dt/half_life)
+        return float(score) * (0.5 ** (float(dt_seconds) / float(half_life_seconds)))
+    except Exception:
+        return float(score)
+
+
+def _sum_flag_duration(samples, now_ts: float, window_seconds: float, flag_index: int = 1) -> float:
+    """Approximate total time a boolean flag was true in a rolling window.
+
+    samples: iterable of tuples (ts, flag, ...)
+    flag_index: tuple index of boolean flag
+    """
+    try:
+        if not samples:
+            return 0.0
+        start_ts = now_ts - float(window_seconds)
+        # Ensure time-ordered
+        items = list(samples)
+        items.sort(key=lambda x: x[0])
+
+        # Trim to window (keep one sample before start for continuity if present)
+        trimmed = []
+        prev = None
+        for it in items:
+            if it[0] < start_ts:
+                prev = it
+                continue
+            if prev is not None:
+                trimmed.append(prev)
+                prev = None
+            trimmed.append(it)
+        if not trimmed:
+            return 0.0
+
+        total = 0.0
+        for i in range(len(trimmed)):
+            t0 = max(float(trimmed[i][0]), start_ts)
+            t1 = float(trimmed[i + 1][0]) if i + 1 < len(trimmed) else float(now_ts)
+            if t1 <= start_ts:
+                continue
+            if bool(trimmed[i][flag_index]):
+                total += max(0.0, t1 - t0)
+        return float(total)
+    except Exception:
+        return 0.0
+
 # ✅ FACE VERIFICATION
 @app.route('/api/verify-face', methods=['POST'])
 #@limiter.limit("20 per hour")
@@ -1086,7 +1189,8 @@ def verify_face():
 
 
 @app.route('/api/proctor', methods=['POST'])
-@limiter.limit("100 per hour")
+# Proctoring runs at ~4 FPS; 100/hour would break normal operation.
+@limiter.limit("20000 per hour")
 def proctor_activity():
     """
     Proctoring frame analysis endpoint (synchronous).
@@ -1119,16 +1223,47 @@ def proctor_activity():
     # SYNCHRONOUS MODE (ORIGINAL FLOW - BACKWARD COMPATIBLE)
     # ============================================================================
     
-    # Check frame brightness for camera blocking detection
+    # NOTE: Proctoring is sampling-based; avoid single-frame punishments.
+    # We'll track sustained darkness/absence over a rolling time window.
     try:
-        mean_brightness = np.mean(frame)
-        
-        # CRITICAL SECURITY CHECK: Distinguish between legitimate and suspicious blank frames
-        if mean_brightness < 10:  # Nearly black frame detected
-            
-            if not exam_active:
-                # LEGITIMATE: Exam submission in progress - camera stopped legitimately
-                print(f"[PROCTOR] Skipping blank frame - exam inactive (brightness: {mean_brightness:.2f})")
+        mean_brightness = float(np.mean(frame))
+    except Exception:
+        mean_brightness = None
+
+    # If the exam is inactive (submission/exit), do not treat blank frames as suspicious.
+    if mean_brightness is not None and mean_brightness < 10 and not exam_active:
+        print(f"[PROCTOR] Skipping blank frame - exam inactive (brightness: {mean_brightness:.2f})")
+        return jsonify({
+            "faceCount": 0,
+            "identityVerified": False,
+            "similarity": None,
+            "blinkStatus": "Unknown",
+            "gazeDirection": "Unknown",
+            "mouthStatus": "Unknown",
+            "headPose": "Unknown",
+            "message": "Blank frame - exam inactive"
+        }), 200
+
+    # Call ML service for full proctoring analysis.
+    # If the frame is nearly black, skip ML call (cheap + avoids noise); treat as 0-face sample.
+    blank_like = bool(mean_brightness is not None and mean_brightness < 10)
+    try:
+        # Standardized payload format: imageDataUrl with data URL prefix
+        ml_payload = {
+            'imageDataUrl': f"data:image/jpeg;base64,{frame_base64}"
+        }
+        if blank_like:
+            ok_ml, ml_result = True, {}
+            face_count = 0
+            blink_status = 'Unknown'
+            gaze_direction = 'Unknown'
+            mouth_status = 'Unknown'
+            head_pose = 'Unknown'
+        else:
+            ok_ml, ml_result = call_ml_service('/analyze-frame', ml_payload, timeout=30)
+
+            if not ok_ml or not isinstance(ml_result, dict):
+                print("[PROCTOR] ML service unavailable or returned invalid response")
                 return jsonify({
                     "faceCount": 0,
                     "identityVerified": False,
@@ -1137,86 +1272,16 @@ def proctor_activity():
                     "gazeDirection": "Unknown",
                     "mouthStatus": "Unknown",
                     "headPose": "Unknown",
-                    "message": "Blank frame - proctoring stopped"
+                    "message": "ML service unavailable"
                 }), 200
-            
-            else:
-                # SUSPICIOUS: Exam is ACTIVE but frame is blank - camera likely covered!
-                print(f"[PROCTOR] ⚠️ CAMERA COVERED/BLOCKED during active exam! (brightness: {mean_brightness:.2f})")
-                
-                # Record HIGH severity event - this is cheating behavior
-                try:
-                    now = datetime.datetime.utcnow()
-                    recent = proctor_events_collection.find_one({
-                        'examId': str(exam_id),
-                        'userId': str(user_id),
-                        'eventType': 'camera_blocked',
-                        'timestamp': {'$gt': now - datetime.timedelta(seconds=5)}
-                    })
-                    
-                    if not recent:
-                        frame_evidence = f"data:image/jpeg;base64,{frame_base64}"
-                        
-                        proctor_events_collection.insert_one({
-                            'examId': str(exam_id),
-                            'userId': str(user_id),
-                            'eventType': 'camera_blocked',
-                            'details': {
-                                'brightness': float(mean_brightness),
-                                'message': 'Camera blocked/covered during exam - possible cheating attempt'
-                            },
-                            'severity': 'high',
-                            'timestamp': now,
-                            'frameEvidence': frame_evidence
-                        })
-                        print(f"[PROCTOR-EVENT] camera_blocked (high) for user {user_id} in exam {exam_id}")
-                except Exception as e:
-                    print(f"[PROCTOR] Error recording camera_blocked event: {e}")
-                
-                # Return response indicating blocked camera
-                return jsonify({
-                    "faceCount": 0,
-                    "identityVerified": False,
-                    "similarity": None,
-                    "blinkStatus": "Unknown",
-                    "gazeDirection": "Unknown",
-                    "mouthStatus": "Camera Blocked",
-                    "headPose": "Camera Blocked",
-                    "message": "Camera appears to be blocked or covered"
-                }), 200
-                
-    except Exception as e:
-        print(f"[PROCTOR] Error checking frame brightness: {e}")
 
-    # Call ML service for full proctoring analysis
-    try:
-        # Standardized payload format: imageDataUrl with data URL prefix
-        ml_payload = {
-            'imageDataUrl': f"data:image/jpeg;base64,{frame_base64}"
-        }
-        
-        ok_ml, ml_result = call_ml_service('/analyze-frame', ml_payload, timeout=30)
-        
-        if not ok_ml or not isinstance(ml_result, dict):
-            print("[PROCTOR] ML service unavailable or returned invalid response")
-            return jsonify({
-                "faceCount": 0,
-                "identityVerified": False,
-                "similarity": None,
-                "blinkStatus": "Unknown",
-                "gazeDirection": "Unknown",
-                "mouthStatus": "Unknown",
-                "headPose": "Unknown",
-                "message": "ML service unavailable"
-            }), 200
-        
-        # Extract ML results
-        face_count = ml_result.get('face_count', 0)
-        blink_status = ml_result.get('blink_status', 'Unknown')
-        gaze_direction = ml_result.get('gaze_direction', 'Unknown')
-        mouth_status = ml_result.get('mouth_status', 'Unknown')
-        head_pose = ml_result.get('head_pose', 'Unknown')
-        
+            # Extract ML results
+            face_count = ml_result.get('face_count', 0)
+            blink_status = ml_result.get('blink_status', 'Unknown')
+            gaze_direction = ml_result.get('gaze_direction', 'Unknown')
+            mouth_status = ml_result.get('mouth_status', 'Unknown')
+            head_pose = ml_result.get('head_pose', 'Unknown')
+
     except Exception as e:
         print(f"[PROCTOR] Error calling ML service: {e}")
         return jsonify({"error": "ML service error"}), 500
@@ -1237,65 +1302,135 @@ def proctor_activity():
         "mouthStatus": mouth_status,
         "headPose": head_pose
     }
-    # Compute avg brightness to approximate environment changes
-    try:
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        avg_b = float(np.mean(hsv[...,2]))
-    except Exception:
-        avg_b = None
-
-    # Immediate event recording - no tolerance thresholds
+    # Timestamp-based temporal consensus + conservative eventing.
     try:
         if exam_id and user_id:
-            now = datetime.datetime.utcnow()
+            now_dt = datetime.datetime.utcnow()
+            now_ts = now_dt.timestamp()
             key = (str(exam_id), str(user_id))
+
             st = PROCTOR_STATE.get(key) or {
-                'last_emit': {},  # Track last event time to prevent spam (5 second cooldown per event type)
+                'last_emit': {},
                 'reference_background': None,
-                # Latest known identity check outcome for this session
+                'samples': deque(),
+                'risk_score': 0.0,
+                'risk_last_ts': None,
+                'face_absent_since': None,
+                'gaze_away_since': None,
+                'head_turned_since': None,
+                'mouth_open_since': None,
+                'dark_since': None,
+                'background_change_since': None,
+                'suppress_camera_until': 0.0,
+                'recent_activity': {},  # activityType -> ts (from /api/log-activity)
                 'last_identity': {
                     'similarity': None,
                     'verified': False,
                     'threshold': None,
                     'checked_at': None,
                 },
+                'identity': {
+                    'last_check_ts': 0.0,
+                    'fail_count': 0,
+                    'pass_count': 0,
+                    'recent_sims': deque(),  # (ts, similarity)
+                    'cached_embeddings': None,
+                    'cached_embeddings_at': None,
+                },
             }
-            
-            # Store reference background on first check (for background change detection)
-            if st['reference_background'] is None and frame is not None:
+
+            # Detect large gaps (slow network / paused capture) and reset volatile counters.
+            try:
+                last_sample_ts = st.get('last_sample_ts')
+                if last_sample_ts and (now_ts - float(last_sample_ts)) > 2.5:
+                    # Treat as a discontinuity: don't punish camera issues immediately after resuming.
+                    st['face_absent_since'] = None
+                    st['gaze_away_since'] = None
+                    st['head_turned_since'] = None
+                    st['mouth_open_since'] = None
+                    st['dark_since'] = None
+                    st['background_change_since'] = None
+                    st['suppress_camera_until'] = now_ts + 2.0
+                    try:
+                        st['samples'] = deque()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            st['last_sample_ts'] = now_ts
+
+            # Store reference background on first good frame
+            if st.get('reference_background') is None and frame is not None and (mean_brightness is None or mean_brightness >= 30):
                 try:
                     ref_small = cv2.resize(frame, (160, 120))
                     st['reference_background'] = ref_small.copy()
                 except Exception as e:
                     print(f"[PROCTOR] Error storing reference background: {e}")
 
-            def emit(ev_type: str, details: dict, severity: str):
-                # Shorter cooldown for critical events (1 second), longer for low severity (5 seconds)
-                cooldown = 1 if severity in ('critical', 'high') else 5
-                last_time = st['last_emit'].get(ev_type)
-                if last_time and (now - last_time).total_seconds() < cooldown:
-                    return
-                
-                # Capture frame evidence as base64 image
-                frame_evidence = None
-                if frame is not None:
-                    try:
-                        # Check if frame is blank/black/very dark - increased threshold to 30
-                        mean_brightness = np.mean(frame)
-                        if mean_brightness < 30:
-                            print(f"[PROCTOR] Skipping event {ev_type} - blank/dark frame detected (brightness: {mean_brightness:.2f})")
-                            return  # Don't record events with blank/dark frames
-                        
-                        # Encode frame to JPEG format
-                        _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                        frame_base64 = base64.b64encode(buffer).decode('utf-8')
-                        frame_evidence = f"data:image/jpeg;base64,{frame_base64}"
-                    except Exception as e:
-                        print(f"[PROCTOR] Error encoding frame: {e}")
-                        return  # Don't record event if frame capture fails
-                
-                # Attach standard metrics for debugging/tuning ("why" fields)
-                metrics = {
+            gaze_norm = _norm_gaze(gaze_direction)
+            head_norm = _norm_head_pose(head_pose)
+            mouth_open = bool(mouth_status and str(mouth_status).lower() in ('open', 'talking', 'speaking'))
+            face_present = bool(face_count and int(face_count) > 0)
+
+            # Brightness: prefer mean brightness (works even if HSV conversion fails)
+            brightness_val = float(mean_brightness) if mean_brightness is not None else None
+
+            # Rolling samples over 15 seconds
+            WINDOW_S = 15.0
+            try:
+                st['samples'].append((now_ts, bool(face_present), bool(mouth_open), bool(head_norm not in ('forward', 'unknown')), bool(gaze_norm not in ('center', 'unknown')), brightness_val, gaze_norm, head_norm))
+                cutoff = now_ts - WINDOW_S
+                while st['samples'] and float(st['samples'][0][0]) < cutoff:
+                    st['samples'].popleft()
+            except Exception:
+                # If deque fails for any reason, keep system functional
+                st['samples'] = deque([(now_ts, bool(face_present), bool(mouth_open), bool(head_norm not in ('forward', 'unknown')), bool(gaze_norm not in ('center', 'unknown')), brightness_val, gaze_norm, head_norm)])
+
+            # Update episode start times (timestamp-based)
+            if not face_present:
+                if st.get('face_absent_since') is None:
+                    st['face_absent_since'] = now_ts
+            else:
+                st['face_absent_since'] = None
+
+            gaze_away = bool(gaze_norm not in ('center', 'unknown'))
+            if gaze_away:
+                if st.get('gaze_away_since') is None:
+                    st['gaze_away_since'] = now_ts
+            else:
+                st['gaze_away_since'] = None
+
+            head_turned = bool(head_norm not in ('forward', 'unknown'))
+            if head_turned:
+                if st.get('head_turned_since') is None:
+                    st['head_turned_since'] = now_ts
+            else:
+                st['head_turned_since'] = None
+
+            if mouth_open:
+                if st.get('mouth_open_since') is None:
+                    st['mouth_open_since'] = now_ts
+            else:
+                st['mouth_open_since'] = None
+
+            # Sustained darkness: require consensus of darkness + face absence.
+            DARK_THR = 12.0
+            is_dark = bool(brightness_val is not None and brightness_val < DARK_THR)
+            if is_dark and (not face_present):
+                if st.get('dark_since') is None:
+                    st['dark_since'] = now_ts
+            else:
+                st['dark_since'] = None
+
+            # Risk score decay update
+            prev_ts = st.get('risk_last_ts')
+            if prev_ts is not None:
+                st['risk_score'] = _decay_score(float(st.get('risk_score') or 0.0), now_ts - float(prev_ts), half_life_seconds=300.0)
+            st['risk_last_ts'] = now_ts
+
+            # Attach standard metrics for debugging/tuning ("why" fields)
+            def _build_metrics(extra=None):
+                m = {
                     'faceCount': int(face_count) if isinstance(face_count, (int, float)) else face_count,
                     'similarity': float(similarity_score) if isinstance(similarity_score, (int, float)) else similarity_score,
                     'identityVerified': bool(identity_verified),
@@ -1303,540 +1438,375 @@ def proctor_activity():
                     'gazeDirection': gaze_direction,
                     'mouthStatus': mouth_status,
                     'headPose': head_pose,
+                    'gaze_norm': gaze_norm,
+                    'head_norm': head_norm,
+                    'brightness': brightness_val,
                 }
-                # Preserve any normalized fields added by detectors
-                for k in ('pose_norm', 'gaze_norm', 'head_norm'):
-                    if isinstance(details, dict) and k in details:
-                        metrics[k] = details.get(k)
+                if isinstance(extra, dict):
+                    for k, v in extra.items():
+                        m[k] = v
+                return m
 
-                # CRITICAL FIX: Store in database
-                proctor_events_collection.insert_one({
-                    'examId': str(exam_id),
-                    'userId': str(user_id),
-                    'eventType': ev_type,
-                    'details': details,
-                    'metrics': metrics,
-                    'severity': severity,
-                    'timestamp': now,
-                    'frameEvidence': frame_evidence  # Store captured frame
-                })
-                
-                # CRITICAL FIX: Emit Socket.IO event to lecturer dashboard for live monitoring
+            COOLDOWN_S = {
+                'camera_blocked': 10.0,
+                'multiple_faces': 10.0,
+                'identity_mismatch': 15.0,
+                'face_missing': 10.0,
+                'background_change': 30.0,
+                'gaze_sustained': 15.0,
+                'gaze_extreme': 20.0,
+                'gaze_frequency': 20.0,
+                'head_pose': 15.0,
+                'talking': 15.0,
+                'default': 8.0,
+            }
+            RISK_DB_THRESHOLD = 140.0
+
+            def emit_event(ev_type: str, details: dict, severity: str, risk_score: float = 0.0):
+                # Event cooldowns (prevent DB spam and alert fatigue)
+                last_time = st['last_emit'].get(ev_type)
+                cd = float(COOLDOWN_S.get(ev_type, COOLDOWN_S['default']))
+                if last_time and (now_dt - last_time).total_seconds() < cd:
+                    return
+
+                # Update rolling risk score (used for score-based decisioning)
                 try:
-                    socketio.emit(ev_type, {
-                        'examId': str(exam_id),
-                        'userId': str(user_id),
-                        'eventType': ev_type,
-                        'details': details,
-                        'metrics': metrics,
-                        'severity': severity,
-                        'timestamp': now.isoformat() + 'Z',
-                        'message': details.get('message', ev_type),
-                        'frameEvidence': frame_evidence
-                    }, room=str(exam_id), namespace='/proctor')
-                    print(f"[PROCTOR-SOCKET] Emitted {ev_type} to room {exam_id}")
-                except Exception as e:
-                    print(f"[PROCTOR-SOCKET] Error emitting {ev_type}: {e}")
-                
-                st['last_emit'][ev_type] = now
-                print(f"[PROCTOR-EVENT] {ev_type} ({severity}) for user {user_id} in exam {exam_id}")
-
-
-            # ============================================================================
-            # COMMERCIAL-GRADE TEMPORAL DETECTION SYSTEM (4 FPS OPTIMIZED)
-            # ============================================================================
-            # Implements ProctorU/Examity-style detection with:
-            # - Consecutive frame confirmation (no single-frame triggers)
-            # - Frame counters that persist until neutral state is stable
-            # - Escalating severity for repeated violations
-            # - Fair thresholds aligned with real-world proctoring systems
-            
-            # Initialize temporal tracking with frame counters
-            if 'temporal_counters' not in st:
-                st['temporal_counters'] = {
-                    # Frame counters (persist until stable neutral state)
-                    'face_missing_frames': 0,
-                    'gaze_away_frames': 0,
-                    'head_turned_frames': 0,
-                    'identity_fail_frames': 0,
-                    'mouth_open_frames': 0,
-                    
-                    # Neutral state counters (reset violation counters)
-                    'face_present_frames': 0,
-                    'gaze_forward_frames': 0,
-                    'head_forward_frames': 0,
-                    'identity_pass_frames': 0,
-                    'mouth_closed_frames': 0,
-                    
-                    # Violation tracking
-                    'last_identity_check': 0,
-                    'violation_history': {},  # Track repeated violations for escalation
-                    'first_violation_emitted': {},  # Track if first violation was emitted (bypass cooldown)
-                    
-                    # ENHANCED: Dual gaze tracking (frequency + distance)
-                    'gaze_frequency_count': 0,  # Count of gaze away incidents
-                    'gaze_frequency_window_start': 0,  # Timestamp for 30-second window
-                    'gaze_extreme_detected': False,  # Flag for extreme head turn
-                    # Suppression window to avoid duplicate events for same scenario
-                    'suppress_identity_until': 0.0,
-                    'suppress_face_missing_until': 0.0,
-                }
-            
-            tc = st['temporal_counters']
-
-            # Fill response fields from latest identity check (if any)
-            try:
-                last_ident = st.get('last_identity') or {}
-                if similarity_score is None and last_ident.get('similarity') is not None:
-                    similarity_score = last_ident.get('similarity')
-                if (not identity_verified) and last_ident.get('verified'):
-                    identity_verified = True
-                results['identityVerified'] = identity_verified
-                results['similarity'] = similarity_score
-            except Exception:
-                pass
-            
-            # ============================================================================
-            # DETECTION 1: FACE MISSING (HIGH SEVERITY)
-            # ============================================================================
-            current_time = datetime.datetime.utcnow().timestamp()
-            # Warning at 2 seconds (8 frames @ 4 FPS)
-            # Violation at 4 seconds (16 frames @ 4 FPS)
-            face_detected = face_count > 0
-            
-            if not face_detected:
-                tc['face_missing_frames'] += 1
-                tc['face_present_frames'] = 0  # Reset neutral counter
-                
-                # Escalate severity based on duration
-                if tc['face_missing_frames'] >= 16:  # 4 seconds
-                    severity = 'critical'
-                    risk = 95
-                    message = 'Student left camera view (critical duration)'
-                elif tc['face_missing_frames'] >= 8:  # 2 seconds
-                    severity = 'high'
-                    risk = 75
-                    message = 'Student left camera view (warning)'
-                else:
-                    severity = None  # Don't emit yet
-                
-                if severity and current_time >= tc.get('suppress_face_missing_until', 0.0):
-                    # Check if this is first time - bypass cooldown
-                    is_first = 'face_missing' not in tc['first_violation_emitted']
-                    if is_first:
-                        tc['first_violation_emitted']['face_missing'] = True
-                        # Force emit by clearing last_emit
-                        if 'face_missing' in st['last_emit']:
-                            del st['last_emit']['face_missing']
-                    
-                    emit('face_missing', {
-                        'message': message,
-                        'frames_missing': tc['face_missing_frames'],
-                        'duration_seconds': tc['face_missing_frames'] / 4.0,
-                        'risk_score': risk
-                    }, severity)
-            else:
-                tc['face_present_frames'] += 1
-                # Reset counter only after stable presence (2 frames)
-                if tc['face_present_frames'] >= 2:
-                    tc['face_missing_frames'] = 0
-            
-            # ============================================================================
-            # DETECTION 2: IDENTITY MISMATCH (SOFT FAIL + ESCALATION)
-            # ============================================================================
-            # Re-verify every 2.5 seconds using dynamic threshold from settings.
-            # Soft-fail: require repeated failures before critical severity.
-            time_since_last_check = current_time - tc['last_identity_check']
-            
-            # Gate identity check: skip if recently suppressed or head turned (unreliable)
-            head_pose_val = results.get('headPose', 'Unknown')
-            head_pose_str = str(head_pose_val).lower()
-            head_turned_now = head_pose_val and head_pose_str not in ('forward', 'center', 'normal', 'unknown')
-            if (
-                time_since_last_check >= 2.5 and
-                current_time >= tc.get('suppress_identity_until', 0.0) and
-                not head_turned_now and
-                face_count == 1 and
-                tc.get('face_missing_frames', 0) < 8
-            ):
-                tc['last_identity_check'] = current_time
-
-                # Compute similarity on this interval (avoid per-frame verify-face calls).
-                identity_threshold = get_face_threshold()  # single source of truth for proctoring
-                similarity_score = None
-                identity_verified = False
-
-                try:
-                    user = users_collection.find_one({'_id': ObjectId(user_id)})
-                    if user and (user.get('faceEmbeddings') or user.get('faceEmbedding') or user.get('faceEmbeddingAvg')):
-                        stored_embeddings = []
-                        if user.get('faceEmbeddingAvg') and isinstance(user.get('faceEmbeddingAvg'), (list, tuple)):
-                            stored_embeddings.append(user.get('faceEmbeddingAvg'))
-                        if user.get('faceEmbeddings') and isinstance(user.get('faceEmbeddings'), list):
-                            stored_embeddings.extend([e for e in user['faceEmbeddings'] if isinstance(e, (list, tuple))])
-                        if not stored_embeddings and user.get('faceEmbedding'):
-                            stored_embeddings = [user.get('faceEmbedding')]
-
-                        if stored_embeddings:
-                            verify_payload = {'imageDataUrl': f"data:image/jpeg;base64,{frame_base64}"}
-                            ok_verify, verify_result = call_ml_service('/verify-face', verify_payload, timeout=12)
-                            if ok_verify and isinstance(verify_result, dict) and 'embedding' in verify_result:
-                                sims = []
-                                for stored in stored_embeddings:
-                                    sim = _cosine_similarity(verify_result['embedding'], stored)
-                                    if sim is not None:
-                                        sims.append(sim)
-                                if sims:
-                                    similarity_score = float(max(sims))
-                                    identity_verified = similarity_score >= float(identity_threshold)
-                except Exception as e:
-                    print(f"[PROCTOR] Identity check error: {e}")
-
-                # Update response + session cache
-                try:
-                    st['last_identity'] = {
-                        'similarity': similarity_score,
-                        'verified': bool(identity_verified),
-                        'threshold': float(identity_threshold),
-                        'checked_at': now.isoformat() + 'Z',
-                    }
-                    results['identityVerified'] = identity_verified
-                    results['similarity'] = similarity_score
+                    st['risk_score'] = float(st.get('risk_score') or 0.0) + float(risk_score or 0.0)
                 except Exception:
                     pass
 
-                # If we couldn't compute similarity, don't punish the student.
-                if similarity_score is None:
-                    identity_failed = False
-                else:
-                    identity_failed = similarity_score < float(identity_threshold)
-                
-                if identity_failed:
-                    tc['identity_fail_frames'] += 1
-                    tc['identity_pass_frames'] = 0
+                # Store only if severity >= medium OR aggregated score exceeded
+                should_store = severity in ('medium', 'high', 'critical') or (float(st.get('risk_score') or 0.0) >= RISK_DB_THRESHOLD)
+                # Emit only HIGH / CRITICAL events
+                should_emit_socket = severity in ('high', 'critical')
 
-                    # Escalate severity based on sustained failures
-                    # - 2 consecutive checks (~5s): high
-                    # - 4 consecutive checks (~10s): critical
-                    if tc['identity_fail_frames'] >= 2:
-                        is_first = 'identity_mismatch' not in tc['first_violation_emitted']
-                        if is_first:
-                            tc['first_violation_emitted']['identity_mismatch'] = True
-                            if 'identity_mismatch' in st['last_emit']:
-                                del st['last_emit']['identity_mismatch']
+                # Evidence frames are expensive + privacy-sensitive: keep only for high/critical.
+                frame_evidence = None
+                if severity in ('high', 'critical') and frame is not None:
+                    try:
+                        mb = float(np.mean(frame))
+                        if mb >= 30:
+                            _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                            fb64 = base64.b64encode(buffer).decode('utf-8')
+                            frame_evidence = f"data:image/jpeg;base64,{fb64}"
+                    except Exception:
+                        frame_evidence = None
 
-                        severity = 'high' if tc['identity_fail_frames'] < 4 else 'critical'
-                        risk = 80 if severity == 'high' else 95
+                metrics = _build_metrics(extra={'risk_total': float(st.get('risk_score') or 0.0)})
+                if isinstance(details, dict):
+                    for k in ('gaze_norm', 'head_norm', 'pose_norm'):
+                        if k in details:
+                            metrics[k] = details.get(k)
 
-                        emit('identity_mismatch', {
-                            'similarity': float(similarity_score),
-                            'threshold': float(identity_threshold),
-                            'faceCount': int(face_count),
-                            'message': 'Face does not match registered student (sustained)',
-                            'consecutive_failures': tc['identity_fail_frames'],
-                            'risk_score': risk
-                        }, severity)
-                else:
-                    tc['identity_pass_frames'] += 1
-                    # Reset only after 2 consecutive passes
-                    if tc['identity_pass_frames'] >= 2:
-                        tc['identity_fail_frames'] = 0
-            
-            # ============================================================================
-            # DETECTION 3: ENHANCED GAZE AVERSION WITH DUAL TRACKING
-            # ============================================================================
-            # Two independent triggers:
-            # 1. FREQUENCY: Student looks away frequently (5+ times in 30 seconds)
-            # 2. DISTANCE: Student looks extremely far away (full face turn, even once)
-            
-            gaze = results.get('gazeDirection', 'Unknown')
-            head_pose = results.get('headPose', 'Unknown')
+                if should_store and proctor_events_collection is not None:
+                    try:
+                        proctor_events_collection.insert_one({
+                            'examId': str(exam_id),
+                            'userId': str(user_id),
+                            'eventType': ev_type,
+                            'details': details,
+                            'metrics': metrics,
+                            'severity': severity,
+                            'timestamp': now_dt,
+                            'frameEvidence': frame_evidence
+                        })
+                    except Exception as e:
+                        print(f"[PROCTOR] DB insert failed for {ev_type}: {e}")
 
-            def _norm_head_pose(v):
-                s = str(v or '').strip().lower().replace(' ', '-').replace('_', '-')
-                if not s or s in ('unknown', 'n/a', 'na', 'none'):
-                    return 'unknown'
-                # Common prefixes from older/local detectors
-                if s.startswith('head-'):
-                    s = s[len('head-'):]
-                if s in ('forward', 'center', 'centred', 'centered', 'normal', 'straight'):
-                    return 'forward'
-                has_down = 'down' in s
-                has_up = 'up' in s
-                has_left = 'left' in s
-                has_right = 'right' in s
-                if has_down and has_left:
-                    return 'down_left'
-                if has_down and has_right:
-                    return 'down_right'
-                if has_up and has_left:
-                    return 'up_left'
-                if has_up and has_right:
-                    return 'up_right'
-                if has_down:
-                    return 'down'
-                if has_up:
-                    return 'up'
-                if has_left:
-                    return 'left'
-                if has_right:
-                    return 'right'
-                return 'unknown'
+                if should_emit_socket:
+                    try:
+                        socketio.emit(ev_type, {
+                            'examId': str(exam_id),
+                            'userId': str(user_id),
+                            'eventType': ev_type,
+                            'details': details,
+                            'metrics': metrics,
+                            'severity': severity,
+                            'timestamp': now_dt.isoformat() + 'Z',
+                            'message': (details or {}).get('message', ev_type),
+                            'frameEvidence': frame_evidence,
+                        }, room=str(exam_id), namespace='/proctor')
+                    except Exception as e:
+                        print(f"[PROCTOR-SOCKET] Error emitting {ev_type}: {e}")
 
-            def _norm_gaze(v):
-                s = str(v or '').strip().lower().replace(' ', '-').replace('_', '-')
-                if not s or s in ('unknown', 'n/a', 'na', 'none'):
-                    return 'unknown'
-                if s in ('center', 'centre', 'forward', 'straight', 'normal'):
-                    return 'center'
-                if 'left' in s:
-                    return 'left'
-                if 'right' in s:
-                    return 'right'
-                if 'up' in s:
-                    return 'up'
-                if 'down' in s:
-                    return 'down'
-                return 'unknown'
+                st['last_emit'][ev_type] = now_dt
 
-            gaze_norm = _norm_gaze(gaze)
-            head_norm = _norm_head_pose(head_pose)
-            
-            # Define what counts as "away" vs "extreme" (normalize ML labels to avoid false positives)
-            gaze_away = gaze_norm not in ('center', 'unknown')
-            
-            # Extreme = full face turn or very suspicious posture (turn + down)
-            is_extreme = (
-                head_norm in ('left', 'right', 'down_left', 'down_right') or
-                (gaze_norm in ('left', 'right') and head_norm == 'down')
-            )
-            
-            current_time = datetime.datetime.utcnow().timestamp()
-            
-            # Initialize frequency window if needed
-            if tc['gaze_frequency_window_start'] == 0:
-                tc['gaze_frequency_window_start'] = current_time
-            
-            # Reset frequency window every 30 seconds
-            if current_time - tc['gaze_frequency_window_start'] >= 30:
-                tc['gaze_frequency_count'] = 0
-                tc['gaze_frequency_window_start'] = current_time
-            
-            if gaze_away:
-                tc['gaze_away_frames'] += 1
-                tc['gaze_forward_frames'] = 0
-                
-                # ===== TRIGGER 1: EXTREME DISTANCE (IMMEDIATE CRITICAL) =====
-                if is_extreme and tc['gaze_away_frames'] >= 3:  # Confirm over ~0.75s @ 4 FPS
-                    if not tc['gaze_extreme_detected']:  # Only trigger once per extreme event
-                        tc['gaze_extreme_detected'] = True
-                        
-                        is_first = 'gaze_extreme' not in tc['first_violation_emitted']
-                        if is_first:
-                            tc['first_violation_emitted']['gaze_extreme'] = True
-                            if 'gaze_extreme' in st['last_emit']:
-                                del st['last_emit']['gaze_extreme']
-                        
-                        emit('gaze_extreme', {
-                            'direction': gaze,
-                            'head_pose': head_pose,
-                            'direction_norm': gaze_norm,
-                            'head_pose_norm': head_norm,
-                            'message': f'Extreme head turn detected ({head_pose}, {gaze})',
-                            'violation_type': 'distance',
-                            'risk_score': 85
-                        }, 'critical')
-                
-                # ===== TRIGGER 2: HIGH FREQUENCY (CUMULATIVE CRITICAL) =====
-                # Increment frequency counter after 5 consecutive away frames (~1.25s @ 4 FPS)
-                # Also: don't count extreme turns as "frequency" (they are handled separately).
-                if (not is_extreme) and tc['gaze_away_frames'] == 5:
-                    tc['gaze_frequency_count'] += 1
-                    print(f"[GAZE-FREQUENCY] Incident #{tc['gaze_frequency_count']} in current window")
-                    
-                    # Trigger if 5+ incidents in 30-second window
-                    if tc['gaze_frequency_count'] >= 5:
-                        is_first = 'gaze_frequency' not in tc['first_violation_emitted']
-                        if is_first:
-                            tc['first_violation_emitted']['gaze_frequency'] = True
-                            if 'gaze_frequency' in st['last_emit']:
-                                del st['last_emit']['gaze_frequency']
-                        
-                        emit('gaze_frequency', {
-                            'direction': gaze,
-                            'direction_norm': gaze_norm,
-                            'message': f'Frequent gaze aversion detected ({tc["gaze_frequency_count"]} incidents)',
-                            'incident_count': tc['gaze_frequency_count'],
-                            'violation_type': 'frequency',
-                            'risk_score': 80
-                        }, 'critical')
-                        
-                        # Reset counter after emitting to avoid spam
-                        tc['gaze_frequency_count'] = 0
-                        tc['gaze_frequency_window_start'] = current_time
-                
-                # ===== SUSTAINED GAZE (HIGH SIGNAL) =====
-                # Emit a single sustained event instead of noisy low/medium spam.
-                # Threshold aligns with client-side clip policy (~2.5s).
-                if (not is_extreme) and tc['gaze_away_frames'] == 10:
-                    is_first = 'gaze_sustained' not in tc['first_violation_emitted']
-                    if is_first:
-                        tc['first_violation_emitted']['gaze_sustained'] = True
-                        if 'gaze_sustained' in st['last_emit']:
-                            del st['last_emit']['gaze_sustained']
+            # =====================================================================
+            # CONTEXT AWARENESS: if exam inactive, do not emit camera-related events.
+            # =====================================================================
+            if not exam_active:
+                PROCTOR_STATE[key] = st
+                return jsonify(results), 200
 
-                    emit('gaze_sustained', {
-                        'direction': gaze,
-                        'direction_norm': gaze_norm,
-                        'message': f'Sustained looking away ({gaze})',
-                        'consecutive_frames': tc['gaze_away_frames'],
-                        'duration_seconds': tc['gaze_away_frames'] / 4.0,
-                        'risk_score': 65
-                    }, 'high')
-            else:
-                tc['gaze_forward_frames'] += 1
-                # Reset counters after 3 frames of normal gaze
-                if tc['gaze_forward_frames'] >= 3:
-                    tc['gaze_away_frames'] = 0
-                    tc['gaze_extreme_detected'] = False  # Allow re-detection of extreme events
-                    # Allow sustained re-detection in a new away episode
-                    if 'gaze_sustained' in tc.get('first_violation_emitted', {}):
+            # Compute rolling totals (10s window) for score-based evaluation
+            total_gaze_away_10s = _sum_flag_duration(st['samples'], now_ts, window_seconds=10.0, flag_index=4)
+            total_head_turned_10s = _sum_flag_duration(st['samples'], now_ts, window_seconds=10.0, flag_index=3)
+            total_mouth_open_10s = _sum_flag_duration(st['samples'], now_ts, window_seconds=10.0, flag_index=2)
+
+            # Continuous durations
+            face_absent_dur = (now_ts - float(st['face_absent_since'])) if st.get('face_absent_since') else 0.0
+            gaze_away_dur = (now_ts - float(st['gaze_away_since'])) if st.get('gaze_away_since') else 0.0
+            head_turned_dur = (now_ts - float(st['head_turned_since'])) if st.get('head_turned_since') else 0.0
+            mouth_open_dur = (now_ts - float(st['mouth_open_since'])) if st.get('mouth_open_since') else 0.0
+            dark_dur = (now_ts - float(st['dark_since'])) if st.get('dark_since') else 0.0
+
+            # ========================================
+            # MULTIPLE FACES (HIGH)
+            # ========================================
+            if face_count and int(face_count) > 1:
+                emit_event('multiple_faces', {
+                    'count': int(face_count),
+                    'message': f'{int(face_count)} people detected in frame',
+                    'risk_score': 95,
+                }, 'high', risk_score=95)
+
+            # ========================================
+            # CAMERA BLOCKED (HIGH; CRITICAL if paired with fullscreen_exit)
+            # ========================================
+            if now_ts >= float(st.get('suppress_camera_until') or 0.0):
+                # Require sustained darkness + face absence consensus for >=3s
+                if st.get('dark_since') and dark_dur >= 3.0:
+                    # Require at least 3 samples in the last ~3.5s meeting consensus
+                    recent = [x for x in list(st['samples']) if float(x[0]) >= now_ts - 3.5]
+                    dark_votes = 0
+                    for x in recent:
+                        b = x[5]
+                        if (b is not None and float(b) < DARK_THR) and (not bool(x[1])):
+                            dark_votes += 1
+                    if len(recent) >= 3 and (dark_votes / max(1, len(recent))) >= 0.7:
+                        sev = 'high'
+                        # Escalate to critical if a fullscreen_exit occurred very recently
                         try:
-                            del tc['first_violation_emitted']['gaze_sustained']
+                            fe_ts = float(st.get('recent_activity', {}).get('fullscreen_exit') or 0.0)
+                            if fe_ts and (now_ts - fe_ts) <= 10.0:
+                                sev = 'critical'
                         except Exception:
                             pass
-            
-            # ============================================================================
-            # DETECTION 4: HEAD POSE (LOW → MEDIUM SEVERITY)
-            # ============================================================================
-            # Vertical angle ≥32° or horizontal offset ≥14px for ≥3 frames
-            head_turned = head_pose and head_norm not in ('forward', 'unknown')
-            
-            if head_turned:
-                tc['head_turned_frames'] += 1
-                tc['head_forward_frames'] = 0
-                
-                # Require 5 consecutive frames (~1.25s @ 4 FPS) to reduce false positives
-                if tc['head_turned_frames'] >= 5:
-                    # Escalate severity based on repeated violations
-                    history_key = 'head_pose'
-                    tc['violation_history'][history_key] = tc['violation_history'].get(history_key, 0) + 1
-                    
-                    # Down pose is more severe (potential cheating posture)
-                    if head_norm in ('down', 'down_left', 'down_right'):
-                        severity = 'medium'
-                        risk = 55
-                    elif tc['violation_history'][history_key] >= 3:
-                        severity = 'medium'
-                        risk = 45
-                    else:
-                        severity = 'low'
-                        risk = 28
-                    
-                    is_first = 'head_pose' not in tc['first_violation_emitted']
-                    if is_first:
-                        tc['first_violation_emitted']['head_pose'] = True
-                        if 'head_pose' in st['last_emit']:
-                            del st['last_emit']['head_pose']
-                    
-                    emit('head_pose', {
-                        'pose': head_pose,
-                        'pose_norm': head_norm,
-                        'message': f'Head turned {head_pose} (sustained)',
-                        'consecutive_frames': tc['head_turned_frames'],
-                        'repeated_violations': tc['violation_history'][history_key],
-                        'risk_score': risk
-                    }, severity)
-                    # Suppress noisy/overlapping events for a short window
-                    tc['suppress_identity_until'] = current_time + 3.0
-                    tc['suppress_face_missing_until'] = current_time + 3.0
-            else:
-                tc['head_forward_frames'] += 1
-                # Reset only after 3 frames of normal pose
-                if tc['head_forward_frames'] >= 3:
-                    tc['head_turned_frames'] = 0
-            
-            # ============================================================================
-            # DETECTION 5: MULTIPLE FACES (CRITICAL - IMMEDIATE)
-            # ============================================================================
-            # No temporal confirmation needed - critical security violation
-            if face_count and face_count > 1:
-                is_first = 'multiple_faces' not in tc['first_violation_emitted']
-                if is_first:
-                    tc['first_violation_emitted']['multiple_faces'] = True
-                    if 'multiple_faces' in st['last_emit']:
-                        del st['last_emit']['multiple_faces']
-                
-                emit('multiple_faces', {
-                    'count': face_count,
-                    'message': f'{face_count} people detected in frame',
-                    'risk_score': 95
-                }, 'critical')
-            
-            # ============================================================================
-            # DETECTION 6: MOUTH MOVEMENT (LOW SEVERITY)
-            # ============================================================================
-            mouth = results.get('mouthStatus', 'Unknown')
-            mouth_open = mouth and str(mouth).lower() in ('open', 'talking', 'speaking')
-            
-            if mouth_open:
-                tc['mouth_open_frames'] += 1
-                tc['mouth_closed_frames'] = 0
-                
-                # Require 6 consecutive frames (~1.5s @ 4 FPS) to reduce false positives
-                if tc['mouth_open_frames'] >= 6:
-                    is_first = 'talking' not in tc['first_violation_emitted']
-                    if is_first:
-                        tc['first_violation_emitted']['talking'] = True
-                        if 'talking' in st['last_emit']:
-                            del st['last_emit']['talking']
-                    
-                    emit('talking', {
-                        'status': mouth,
-                        'message': 'Sustained mouth movement detected',
-                        'consecutive_frames': tc['mouth_open_frames'],
-                        'risk_score': 35
-                    }, 'low')
-            else:
-                tc['mouth_closed_frames'] += 1
-                # Reset after 3 frames of closed mouth
-                if tc['mouth_closed_frames'] >= 3:
-                    tc['mouth_open_frames'] = 0
-            
-            # 7. BACKGROUND CHANGE - High severity (immediate, but with higher threshold)
-            if st['reference_background'] is not None and frame is not None:
+
+                        emit_event('camera_blocked', {
+                            'brightness': brightness_val,
+                            'duration_seconds': float(dark_dur),
+                            'message': 'Camera appears blocked/covered (sustained darkness + face absence)',
+                            'risk_score': 95 if sev in ('high', 'critical') else 80,
+                        }, sev, risk_score=95 if sev in ('high', 'critical') else 80)
+
+            # ========================================
+            # FACE MISSING (MEDIUM/HIGH) - long absence only
+            # ========================================
+            if now_ts >= float(st.get('suppress_camera_until') or 0.0):
+                if face_absent_dur >= 10.0:
+                    emit_event('face_missing', {
+                        'message': 'Face not detected for an extended period',
+                        'duration_seconds': float(face_absent_dur),
+                        'risk_score': 70,
+                    }, 'high', risk_score=70)
+                elif face_absent_dur >= 6.0:
+                    emit_event('face_missing', {
+                        'message': 'Face not detected (sustained)',
+                        'duration_seconds': float(face_absent_dur),
+                        'risk_score': 55,
+                    }, 'medium', risk_score=55)
+
+            # ========================================
+            # TALKING (MEDIUM) - require sustained mouth activity
+            # ========================================
+            # Ignore natural mouth movements; require sustained activity.
+            if mouth_open_dur >= 4.0 or total_mouth_open_10s >= 6.0:
+                emit_event('talking', {
+                    'status': mouth_status,
+                    'message': 'Sustained mouth movement detected',
+                    'duration_seconds': float(max(mouth_open_dur, total_mouth_open_10s)),
+                    'risk_score': 45,
+                }, 'medium', risk_score=45)
+
+            # ========================================
+            # GAZE + HEAD POSE (LOW/MEDIUM) - conservative
+            # ========================================
+            # Short glance away (<2s) => ignore
+            # Repeated gaze away (>5s total in 10s) => low (do not store unless risk threshold exceeded)
+            # Long continuous away (>=6s) => medium
+            if gaze_away_dur >= 6.0:
+                emit_event('gaze_sustained', {
+                    'direction': gaze_direction,
+                    'direction_norm': gaze_norm,
+                    'message': f'Sustained looking away ({gaze_direction})',
+                    'duration_seconds': float(gaze_away_dur),
+                    'risk_score': 55,
+                }, 'medium', risk_score=55)
+            elif total_gaze_away_10s >= 5.0:
+                emit_event('gaze_frequency', {
+                    'direction': gaze_direction,
+                    'direction_norm': gaze_norm,
+                    'message': 'Repeated gaze aversion detected (cumulative in window)',
+                    'window_seconds': 10.0,
+                    'away_total_seconds': float(total_gaze_away_10s),
+                    'risk_score': 20,
+                }, 'low', risk_score=20)
+
+            # Head pose: ignore brief turns; medium only for sustained down/away posture
+            if head_turned_dur >= 6.0 and head_norm in ('down', 'down_left', 'down_right'):
+                emit_event('head_pose', {
+                    'pose': head_pose,
+                    'pose_norm': head_norm,
+                    'message': f'Sustained head-down posture ({head_pose})',
+                    'duration_seconds': float(head_turned_dur),
+                    'risk_score': 45,
+                }, 'medium', risk_score=45)
+            elif total_head_turned_10s >= 6.0:
+                emit_event('head_pose', {
+                    'pose': head_pose,
+                    'pose_norm': head_norm,
+                    'message': 'Repeated head turns detected (cumulative in window)',
+                    'window_seconds': 10.0,
+                    'turned_total_seconds': float(total_head_turned_10s),
+                    'risk_score': 15,
+                }, 'low', risk_score=15)
+
+            # ========================================
+            # BACKGROUND CHANGE (SOFTENED) - persistence required
+            # ========================================
+            if st.get('reference_background') is not None and frame is not None and (mean_brightness is None or mean_brightness >= 30):
                 try:
                     current_small = cv2.resize(frame, (160, 120))
                     diff = cv2.absdiff(st['reference_background'], current_small)
-                    diff_score = np.mean(diff)
-
-                    # If the change is mostly a global lighting shift, ignore it.
-                    # This reduces false positives when the screen brightness/ambient light changes.
+                    diff_score = float(np.mean(diff))
                     try:
                         ref_gray = cv2.cvtColor(st['reference_background'], cv2.COLOR_BGR2GRAY)
                         cur_gray = cv2.cvtColor(current_small, cv2.COLOR_BGR2GRAY)
                         lighting_delta = float(abs(np.mean(cur_gray) - np.mean(ref_gray)))
                     except Exception:
                         lighting_delta = 0.0
-                    
-                    # Increased threshold to reduce false positives from lighting changes
-                    BACKGROUND_THRESHOLD = 30.0  # More tolerant (was 20.0)
+
+                    BACKGROUND_THRESHOLD = 35.0
                     if diff_score > BACKGROUND_THRESHOLD and lighting_delta < 25.0:
-                        is_first = 'background_change' not in tc['first_violation_emitted']
-                        if is_first:
-                            tc['first_violation_emitted']['background_change'] = True
-                            if 'background_change' in st['last_emit']:
-                                del st['last_emit']['background_change']
-                        
-                        emit('background_change', {
-                            'change_score': float(diff_score),
-                            'lighting_delta': float(lighting_delta),
-                            'message': 'Significant background change detected',
-                            'risk_score': 70  # High risk
-                        }, 'high')
+                        if st.get('background_change_since') is None:
+                            st['background_change_since'] = now_ts
+                        bg_dur = now_ts - float(st.get('background_change_since') or now_ts)
+                        if bg_dur >= 5.0:
+                            emit_event('background_change', {
+                                'change_score': float(diff_score),
+                                'lighting_delta': float(lighting_delta),
+                                'message': 'Sustained background change detected',
+                                'duration_seconds': float(bg_dur),
+                                'risk_score': 55,
+                            }, 'medium', risk_score=55)
+                    else:
+                        st['background_change_since'] = None
                 except Exception as e:
                     print(f"[PROCTOR] Error in background detection: {e}")
 
+            # ========================================
+            # IDENTITY MISMATCH (HIGH) - stable, interval-based
+            # ========================================
+            ident = st.get('identity') or {}
+            last_check = float(ident.get('last_check_ts') or 0.0)
+            head_turned_now = bool(head_norm not in ('forward', 'unknown'))
+            if (
+                (now_ts - last_check) >= 2.5 and
+                (not head_turned_now) and
+                int(face_count or 0) == 1 and
+                face_absent_dur < 6.0
+            ):
+                ident['last_check_ts'] = now_ts
+                identity_threshold = float(get_face_threshold())
+
+                # Cache stored embeddings per session to reduce DB load and improve determinism.
+                stored_embeddings = ident.get('cached_embeddings')
+                try:
+                    cached_at = float(ident.get('cached_embeddings_at') or 0.0)
+                except Exception:
+                    cached_at = 0.0
+
+                if not stored_embeddings or (now_ts - cached_at) > 60.0:
+                    stored_embeddings = []
+                    try:
+                        user = users_collection.find_one({'_id': ObjectId(user_id)}) if users_collection is not None else None
+                        if user:
+                            if user.get('faceEmbeddingAvg') and isinstance(user.get('faceEmbeddingAvg'), (list, tuple)):
+                                stored_embeddings.append(user.get('faceEmbeddingAvg'))
+                            if user.get('faceEmbeddings') and isinstance(user.get('faceEmbeddings'), list):
+                                stored_embeddings.extend([e for e in user['faceEmbeddings'] if isinstance(e, (list, tuple))])
+                            if not stored_embeddings and user.get('faceEmbedding'):
+                                stored_embeddings = [user.get('faceEmbedding')]
+                    except Exception:
+                        stored_embeddings = stored_embeddings or []
+                    ident['cached_embeddings'] = stored_embeddings
+                    ident['cached_embeddings_at'] = now_ts
+
+                similarity_score = None
+                identity_verified = False
+                if stored_embeddings:
+                    try:
+                        verify_payload = {'imageDataUrl': f"data:image/jpeg;base64,{frame_base64}"}
+                        ok_verify, verify_result = call_ml_service('/verify-face', verify_payload, timeout=12)
+                        if ok_verify and isinstance(verify_result, dict) and 'embedding' in verify_result:
+                            sims = []
+                            for stored in stored_embeddings:
+                                sim = _cosine_similarity(verify_result['embedding'], stored)
+                                if sim is not None:
+                                    sims.append(sim)
+                            if sims:
+                                similarity_score = float(max(sims))
+                    except Exception as e:
+                        print(f"[PROCTOR] Identity check error: {e}")
+
+                # Maintain a 15s similarity window and decide based on max similarity in-window.
+                try:
+                    rs = ident.get('recent_sims')
+                    if not isinstance(rs, deque):
+                        rs = deque()
+                    if similarity_score is not None:
+                        rs.append((now_ts, float(similarity_score)))
+                    cutoff = now_ts - 15.0
+                    while rs and float(rs[0][0]) < cutoff:
+                        rs.popleft()
+                    ident['recent_sims'] = rs
+                    max_recent = max([v for _, v in rs], default=None)
+                except Exception:
+                    max_recent = similarity_score
+
+                if max_recent is not None:
+                    identity_verified = float(max_recent) >= float(identity_threshold)
+
+                # Update response + session cache
+                try:
+                    st['last_identity'] = {
+                        'similarity': float(max_recent) if max_recent is not None else None,
+                        'verified': bool(identity_verified),
+                        'threshold': float(identity_threshold),
+                        'checked_at': now_dt.isoformat() + 'Z',
+                    }
+                    results['identityVerified'] = bool(identity_verified)
+                    results['similarity'] = float(max_recent) if max_recent is not None else None
+                except Exception:
+                    pass
+
+                if max_recent is None:
+                    # If we couldn't compute similarity, do not punish.
+                    ident['pass_count'] = int(ident.get('pass_count') or 0) + 1
+                    ident['fail_count'] = 0
+                else:
+                    if identity_verified:
+                        ident['pass_count'] = int(ident.get('pass_count') or 0) + 1
+                        if int(ident['pass_count']) >= 2:
+                            ident['fail_count'] = 0
+                    else:
+                        ident['fail_count'] = int(ident.get('fail_count') or 0) + 1
+                        ident['pass_count'] = 0
+
+                        # Require multiple consecutive mismatches (stability)
+                        if int(ident['fail_count']) >= 2:
+                            emit_event('identity_mismatch', {
+                                'similarity': float(max_recent),
+                                'threshold': float(identity_threshold),
+                                'message': 'Face does not match registered student (sustained mismatches)',
+                                'consecutive_failures': int(ident['fail_count']),
+                                'risk_score': 90,
+                            }, 'high', risk_score=90)
+
+                st['identity'] = ident
+
+            # Persist state
             PROCTOR_STATE[key] = st
     except Exception as e:
         app.logger.debug('Proctor logic error: %s', e)
@@ -1873,7 +1843,7 @@ def proctor_audio():
     if not audio_b64:
         return jsonify({"error": "Audio data is required"}), 400
     
-    # TODO: Implement audio processing via ML service or separate audio service
+    # Note: Audio processing is not implemented in this service build.
     result = "Unknown"  # Placeholder until audio processing is implemented
     
     # Record proctoring event only if voice is detected
@@ -1949,6 +1919,18 @@ def log_suspicious_activity():
         
         if not activity_type:
             return jsonify({"error": "activityType is required"}), 400
+
+        # Best-effort: mirror recent browser-lock activity into in-memory proctor state.
+        # Used for context-aware escalation (e.g., fullscreen_exit + camera_blocked => critical).
+        try:
+            key = (str(exam_id), str(user_id))
+            st = PROCTOR_STATE.get(key) or {'last_emit': {}, 'recent_activity': {}}
+            if 'recent_activity' not in st or not isinstance(st.get('recent_activity'), dict):
+                st['recent_activity'] = {}
+            st['recent_activity'][str(activity_type)] = datetime.datetime.utcnow().timestamp()
+            PROCTOR_STATE[key] = st
+        except Exception:
+            pass
         
         # 2. Determine severity and risk score based on activity type (ProctorU-style)
         # Risk scoring aligns with commercial proctoring platforms:

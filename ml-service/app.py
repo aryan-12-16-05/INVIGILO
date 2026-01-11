@@ -149,7 +149,7 @@ def match_face():
     
     try:
         similarity = engine.match(emb1, emb2)
-        threshold = 0.6  # Match threshold
+        threshold = 0.4  # Match threshold
         
         return jsonify({
             "similarity": float(similarity),
