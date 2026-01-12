@@ -4,7 +4,7 @@ from flask import Flask, jsonify, request, redirect, url_for
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
-from flask_socketio import SocketIO, emit, join_room, leave_room
+from flask_socketio import SocketIO, emit, join_room, leave_room, disconnect
 from pymongo import MongoClient
 import bcrypt
 from bson import ObjectId
@@ -26,6 +26,7 @@ from PIL import Image
 import io
 import hmac
 import hashlib
+import threading
 from werkzeug.exceptions import HTTPException
 from collections import Counter, deque
 import math
@@ -53,6 +54,59 @@ except Exception:
     # If mounting fails for any reason, Session() still works.
     pass
 
+# Simple in-process circuit breaker to avoid hammering HF Spaces on failures.
+_ML_CB_LOCK = threading.Lock()
+_ML_CB_STATE = {
+    'fail_window_start': 0.0,
+    'fail_count': 0,
+    'open_until': 0.0,
+}
+
+
+def _ml_cb_settings():
+    try:
+        fail_threshold = int(os.getenv('ML_CB_FAIL_THRESHOLD', '3'))
+    except Exception:
+        fail_threshold = 3
+    try:
+        window_s = float(os.getenv('ML_CB_WINDOW_S', '30'))
+    except Exception:
+        window_s = 30.0
+    try:
+        cooldown_s = float(os.getenv('ML_CB_COOLDOWN_S', '45'))
+    except Exception:
+        cooldown_s = 45.0
+    return fail_threshold, window_s, cooldown_s
+
+
+def _ml_cb_is_open(now_ts: float):
+    with _ML_CB_LOCK:
+        open_until = float(_ML_CB_STATE.get('open_until') or 0.0)
+    if now_ts < open_until:
+        return True, max(0, int(open_until - now_ts))
+    return False, 0
+
+
+def _ml_cb_record_success():
+    with _ML_CB_LOCK:
+        _ML_CB_STATE['fail_window_start'] = 0.0
+        _ML_CB_STATE['fail_count'] = 0
+        _ML_CB_STATE['open_until'] = 0.0
+
+
+def _ml_cb_record_failure(now_ts: float):
+    fail_threshold, window_s, cooldown_s = _ml_cb_settings()
+    with _ML_CB_LOCK:
+        window_start = float(_ML_CB_STATE.get('fail_window_start') or 0.0)
+        if (window_start == 0.0) or ((now_ts - window_start) > window_s):
+            _ML_CB_STATE['fail_window_start'] = now_ts
+            _ML_CB_STATE['fail_count'] = 1
+        else:
+            _ML_CB_STATE['fail_count'] = int(_ML_CB_STATE.get('fail_count') or 0) + 1
+
+        if int(_ML_CB_STATE.get('fail_count') or 0) >= int(fail_threshold):
+            _ML_CB_STATE['open_until'] = now_ts + float(cooldown_s)
+
 def call_ml_service(endpoint: str, payload: dict, timeout: int = ML_SERVICE_TIMEOUT):
     """
     Call ML service endpoint via HTTP with HMAC authentication.
@@ -68,6 +122,15 @@ def call_ml_service(endpoint: str, payload: dict, timeout: int = ML_SERVICE_TIME
     if not ML_SERVICE_URL:
         print(f"[ML-CLIENT] ERROR: ML_SERVICE_URL not configured")
         return False, {"error": "ML service not configured"}
+
+    now_ts = time.time()
+    is_open, retry_after_s = _ml_cb_is_open(now_ts)
+    if is_open:
+        return False, {
+            "error": "ML service temporarily unavailable",
+            "circuitOpen": True,
+            "retryAfterSeconds": retry_after_s,
+        }
     
     url = ML_SERVICE_URL.rstrip('/') + endpoint
     
@@ -86,27 +149,33 @@ def call_ml_service(endpoint: str, payload: dict, timeout: int = ML_SERVICE_TIME
             ).hexdigest()
             
             headers["X-Signature"] = signature
-            print(f"[ML-CLIENT] Added HMAC signature to request")
+            if _bool_env('ML_CLIENT_DEBUG', '0'):
+                print(f"[ML-CLIENT] Added HMAC signature to request")
         except Exception as e:
             print(f"[ML-CLIENT] WARNING: Failed to generate signature: {e}")
     else:
         print(f"[ML-CLIENT] WARNING: ML_SHARED_SECRET not set - requests are not authenticated!")
     
     try:
-        print(f"[ML-CLIENT] Calling {url}")
+        if _bool_env('ML_CLIENT_DEBUG', '0'):
+            print(f"[ML-CLIENT] Calling {url}")
         response = _ML_HTTP_SESSION.post(url, json=payload, headers=headers, timeout=timeout)
         
         if response.status_code == 200:
+            _ml_cb_record_success()
             return True, response.json()
         else:
             print(f"[ML-CLIENT] ERROR: {response.status_code} - {response.text}")
+            _ml_cb_record_failure(time.time())
             return False, {"error": f"ML service error: {response.status_code}"}
     
     except requests.Timeout:
         print(f"[ML-CLIENT] ERROR: Request timeout after {timeout}s")
+        _ml_cb_record_failure(time.time())
         return False, {"error": "ML service timeout"}
     except Exception as e:
         print(f"[ML-CLIENT] ERROR: {e}")
+        _ml_cb_record_failure(time.time())
         return False, {"error": str(e)}
 
 
@@ -150,6 +219,66 @@ def _sign_token(user_id: str, ttl_seconds: int = 3600):
     key = app.secret_key.encode('utf-8')
     sig = hmac.new(key, msg, hashlib.sha256).hexdigest()
     return f"v1.{user_id}.{exp}.{sig}"
+
+
+def _verify_token(token: str):
+    """Verify token created by _sign_token.
+
+    Returns (ok: bool, user_id: str|None)
+    """
+    try:
+        raw = (token or '').strip()
+        if raw.lower().startswith('bearer '):
+            raw = raw.split(' ', 1)[1].strip()
+        parts = raw.split('.')
+        if len(parts) != 4:
+            return False, None
+        v, user_id, exp_s, sig = parts
+        if v != 'v1':
+            return False, None
+        exp = int(exp_s)
+        if int(time.time()) > exp:
+            return False, None
+        msg = f"v1.{user_id}.{exp}".encode('utf-8')
+        key = app.secret_key.encode('utf-8')
+        expected = hmac.new(key, msg, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, sig):
+            return False, None
+        return True, str(user_id)
+    except Exception:
+        return False, None
+
+
+def _get_auth_header_token() -> str:
+    try:
+        return (request.headers.get('Authorization') or '').strip()
+    except Exception:
+        return ''
+
+
+def _get_authenticated_user_id():
+    """Best-effort auth: prefer Authorization Bearer token, fall back to X-User-Id."""
+    auth = _get_auth_header_token()
+    if auth:
+        ok, uid = _verify_token(auth)
+        if ok and uid:
+            return uid
+    # Back-compat fallback
+    return (request.headers.get('X-User-Id') or '').strip() or None
+
+
+def _get_authenticated_user_doc():
+    uid = _get_authenticated_user_id()
+    if not uid:
+        return None
+    try:
+        return users_collection.find_one({'_id': ObjectId(uid)}) if ObjectId.is_valid(uid) else None
+    except Exception:
+        return None
+
+
+# Socket.IO per-connection auth cache (best-effort)
+SOCKET_AUTH = {}  # sid -> {userId, role}
 
 # Initialize rate limiter to prevent abuse and brute force attacks
 limiter = Limiter(
@@ -700,9 +829,16 @@ def login_user():
         })
 
         if user and bcrypt.checkpw(password.encode('utf-8'), user['password']):
+            raw_user_id = str(user.get('_id'))
             user = serialize_doc(user)
             user = sanitize_user_response(user)  # Remove all sensitive fields
-            return jsonify({"message": "Login successful", "user": user}), 200
+
+            try:
+                ttl = int(os.getenv('AUTH_TOKEN_TTL_S', '43200'))  # 12h default
+            except Exception:
+                ttl = 43200
+            token = _sign_token(raw_user_id, ttl_seconds=ttl)
+            return jsonify({"message": "Login successful", "user": user, "token": token}), 200
         return jsonify({"error": "Invalid credentials"}), 401
     except Exception as e:
         print(f"[LOGIN] Unhandled login error: {e}")
@@ -1275,12 +1411,31 @@ def proctor_activity():
                     "message": "ML service unavailable"
                 }), 200
 
+            # If the ML service is running in degraded mode (e.g., missing native deps on HF),
+            # do not treat this as suspicious behavior; just return Unknowns and skip eventing.
+            try:
+                degraded = (ml_result.get('proctoring_available') is False) or (ml_result.get('proctoringAvailable') is False)
+            except Exception:
+                degraded = False
+            if degraded:
+                return jsonify({
+                    "faceCount": None,
+                    "identityVerified": False,
+                    "similarity": None,
+                    "blinkStatus": "Unknown",
+                    "gazeDirection": "Unknown",
+                    "mouthStatus": "Unknown",
+                    "headPose": "Unknown",
+                    "proctoringAvailable": False,
+                    "message": "ML proctoring unavailable (degraded mode)"
+                }), 200
+
             # Extract ML results
-            face_count = ml_result.get('face_count', 0)
-            blink_status = ml_result.get('blink_status', 'Unknown')
-            gaze_direction = ml_result.get('gaze_direction', 'Unknown')
-            mouth_status = ml_result.get('mouth_status', 'Unknown')
-            head_pose = ml_result.get('head_pose', 'Unknown')
+            face_count = ml_result.get('face_count', ml_result.get('faceCount', 0))
+            blink_status = ml_result.get('blink_status', ml_result.get('blinkStatus', 'Unknown'))
+            gaze_direction = ml_result.get('gaze_direction', ml_result.get('gazeDirection', 'Unknown'))
+            mouth_status = ml_result.get('mouth_status', ml_result.get('mouthStatus', 'Unknown'))
+            head_pose = ml_result.get('head_pose', ml_result.get('headPose', 'Unknown'))
 
     except Exception as e:
         print(f"[PROCTOR] Error calling ML service: {e}")
@@ -1342,7 +1497,9 @@ def proctor_activity():
             # Detect large gaps (slow network / paused capture) and reset volatile counters.
             try:
                 last_sample_ts = st.get('last_sample_ts')
-                if last_sample_ts and (now_ts - float(last_sample_ts)) > 2.5:
+                # Client should sample ~every 3–5 seconds; treat only larger gaps as discontinuities.
+                gap_reset_s = float(os.getenv('PROCTOR_DISCONTINUITY_RESET_S', '8'))
+                if last_sample_ts and (now_ts - float(last_sample_ts)) > gap_reset_s:
                     # Treat as a discontinuity: don't punish camera issues immediately after resuming.
                     st['face_absent_since'] = None
                     st['gaze_away_since'] = None
@@ -2008,10 +2165,21 @@ def log_suspicious_activity():
 # --- Exam Routes ---
 @app.route('/api/exams', methods=['POST'])
 def create_exam():
+    req_user = _get_authenticated_user_doc()
+    if not req_user or req_user.get('role') != 'lecturer':
+        return jsonify({'error': 'Forbidden: lecturer role required'}), 403
+
     data = request.get_json()
     required_fields = ['title', 'courseCode', 'lecturerId', 'institution', 'department', 'targetYear', 'questions']
     if not all(k in data for k in required_fields):
         return jsonify({"error": "Missing required fields for exam"}), 400
+
+    # Prevent client-side spoofing: lecturer identity comes from auth.
+    try:
+        data['lecturerId'] = str(req_user.get('_id'))
+        data['lecturerName'] = req_user.get('name') or data.get('lecturerName')
+    except Exception:
+        pass
     
     questions_with_ids = []
     for q in data.get('questions', []):
@@ -2059,6 +2227,20 @@ def create_exam():
 
 @app.route('/api/exams/<exam_id>/status', methods=['PUT'])
 def update_exam_status(exam_id):
+    req_user = _get_authenticated_user_doc()
+    if not req_user or req_user.get('role') != 'lecturer':
+        return jsonify({'error': 'Forbidden: lecturer role required'}), 403
+
+    # Only the owner lecturer can update their exam.
+    try:
+        ex = exams_collection.find_one({'_id': ObjectId(exam_id)}) if ObjectId.is_valid(exam_id) else None
+    except Exception:
+        ex = None
+    if not ex:
+        return jsonify({"error": "Exam not found"}), 404
+    if str(ex.get('lecturerId')) != str(req_user.get('_id')):
+        return jsonify({'error': 'Forbidden'}), 403
+
     data = request.get_json()
     new_status = data.get('status')
     if not new_status:
@@ -3091,6 +3273,20 @@ def get_exams():
 
 @app.route('/api/exams/<exam_id>', methods=['PUT'])
 def update_exam(exam_id):
+    req_user = _get_authenticated_user_doc()
+    if not req_user or req_user.get('role') != 'lecturer':
+        return jsonify({'error': 'Forbidden: lecturer role required'}), 403
+
+    # Only the owner lecturer can update their exam.
+    try:
+        ex = exams_collection.find_one({'_id': ObjectId(exam_id)}) if ObjectId.is_valid(exam_id) else None
+    except Exception:
+        ex = None
+    if not ex:
+        return jsonify({'error': 'Exam not found'}), 404
+    if str(ex.get('lecturerId')) != str(req_user.get('_id')):
+        return jsonify({'error': 'Forbidden'}), 403
+
     """Update exam fields and questions. Expects fields similar to creation payload."""
     data = request.get_json()
     if not data:
@@ -3135,6 +3331,12 @@ def record_proctor_event():
     if not data or not all(k in data for k in required):
         print(f"[PROCTOR-EVENT] ERROR: Missing required fields")
         return jsonify({'error': 'Missing required fields'}), 400
+
+    requester = _get_authenticated_user_id()
+    if not requester:
+        return jsonify({'error': 'Authentication required'}), 403
+    if str(requester) != str(data.get('userId')):
+        return jsonify({'error': 'Forbidden'}), 403
 
     # Normalize eventType to a consistent lower_snake format
     et = data.get('eventType', '') or ''
@@ -3214,15 +3416,10 @@ def record_proctor_event():
 @app.route('/api/exams/<exam_id>/proctoring', methods=['GET'])
 def get_proctoring_summary(exam_id):
     """Return a summary of proctoring events for an exam, grouped by student."""
-    # Simple role guard: require X-User-Id header of a lecturer
-    requester = request.headers.get('X-User-Id')
-    if not requester:
-        return jsonify({'error': 'X-User-Id header required'}), 403
-    try:
-        req_user = users_collection.find_one({'_id': ObjectId(requester)}) if ObjectId.is_valid(requester) else None
-    except Exception:
-        req_user = None
-    if not req_user or req_user.get('role') != 'lecturer':
+    req_user = _get_authenticated_user_doc()
+    if not req_user:
+        return jsonify({'error': 'Authentication required'}), 403
+    if req_user.get('role') != 'lecturer':
         return jsonify({'error': 'Forbidden: lecturer role required'}), 403
 
     try:
@@ -3286,14 +3483,10 @@ def get_proctoring_summary(exam_id):
 def get_proctoring_details(exam_id, user_id):
     """Return detailed proctor events for a student in an exam."""
     # Require lecturer role
-    requester = request.headers.get('X-User-Id')
-    if not requester:
-        return jsonify({'error': 'X-User-Id header required'}), 403
-    try:
-        req_user = users_collection.find_one({'_id': ObjectId(requester)}) if ObjectId.is_valid(requester) else None
-    except Exception:
-        req_user = None
-    if not req_user or req_user.get('role') != 'lecturer':
+    req_user = _get_authenticated_user_doc()
+    if not req_user:
+        return jsonify({'error': 'Authentication required'}), 403
+    if req_user.get('role') != 'lecturer':
         return jsonify({'error': 'Forbidden: lecturer role required'}), 403
 
     try:
@@ -3321,14 +3514,10 @@ def get_proctoring_recent(exam_id):
     Useful for frequent polling by lecturer dashboard to get fast updates.
     """
     # Require lecturer role
-    requester = request.headers.get('X-User-Id')
-    if not requester:
-        return jsonify({'error': 'X-User-Id header required'}), 403
-    try:
-        req_user = users_collection.find_one({'_id': ObjectId(requester)}) if ObjectId.is_valid(requester) else None
-    except Exception:
-        req_user = None
-    if not req_user or req_user.get('role') != 'lecturer':
+    req_user = _get_authenticated_user_doc()
+    if not req_user:
+        return jsonify({'error': 'Authentication required'}), 403
+    if req_user.get('role') != 'lecturer':
         return jsonify({'error': 'Forbidden: lecturer role required'}), 403
 
     since = request.args.get('since')
@@ -3497,6 +3686,18 @@ def upload_evidence():
         500 Internal Error: File storage error
     """
     try:
+        def _bytes_from_mb(mb: float) -> int:
+            try:
+                return int(float(mb) * 1024 * 1024)
+            except Exception:
+                return int(10 * 1024 * 1024)
+
+        def _env_mb(name: str, default_mb: float) -> float:
+            try:
+                return float(os.getenv(name, str(default_mb)))
+            except Exception:
+                return float(default_mb)
+
         # 1. Validate required parameters
         exam_id = request.form.get('examId')
         user_id = request.form.get('userId')
@@ -3510,6 +3711,11 @@ def upload_evidence():
         
         if not user_id:
             return jsonify({"error": "userId is required"}), 400
+
+        # Best-effort: if the client authenticates, enforce it matches the payload userId.
+        requester = (_get_authenticated_user_id() or '').strip()
+        if requester and requester != str(user_id):
+            return jsonify({"error": "Forbidden"}), 403
         
         # 2. Get uploaded file
         if 'file' not in request.files:
@@ -3527,22 +3733,59 @@ def upload_evidence():
         except Exception as e:
             return jsonify({"error": "Invalid exam ID format"}), 400
         
-        # 4. Determine file extension based on evidence type
-        extension_map = {
+        evidence_type = str(evidence_type or 'screenshot').strip().lower()
+        allowed_types = {'screenshot', 'image', 'video', 'audio'}
+        if evidence_type not in allowed_types:
+            return jsonify({"error": f"Invalid evidenceType: {evidence_type}"}), 400
+
+        # 4. Validate request size early (best-effort; relies on Content-Length)
+        max_mb_map = {
+            'screenshot': _env_mb('EVIDENCE_MAX_MB_SCREENSHOT', 2.0),
+            'image': _env_mb('EVIDENCE_MAX_MB_IMAGE', 2.0),
+            'audio': _env_mb('EVIDENCE_MAX_MB_AUDIO', 6.0),
+            'video': _env_mb('EVIDENCE_MAX_MB_VIDEO', 20.0),
+        }
+        max_bytes = _bytes_from_mb(max_mb_map.get(evidence_type, 2.0))
+        try:
+            content_len = int(request.content_length or 0)
+        except Exception:
+            content_len = 0
+        if content_len and content_len > (max_bytes + (512 * 1024)):
+            return jsonify({"error": "Evidence upload too large", "maxBytes": max_bytes}), 413
+
+        # 5. Determine and validate file extension based on evidence type
+        allowed_ext_map = {
+            'screenshot': {'.jpg', '.jpeg', '.png'},
+            'image': {'.jpg', '.jpeg', '.png'},
+            'video': {'.webm', '.mp4'},
+            'audio': {'.wav', '.mp3', '.ogg'},
+        }
+        default_ext_map = {
             'screenshot': '.jpg',
+            'image': '.jpg',
             'video': '.webm',
             'audio': '.wav',
-            'image': '.jpg'
         }
-        extension = extension_map.get(evidence_type, '.bin')
-        
-        # Allow extension from original filename if available
+        extension = default_ext_map.get(evidence_type, '.bin')
+
+        original_ext = ''
         if '.' in file.filename:
-            original_ext = os.path.splitext(file.filename)[1]
-            if original_ext.lower() in ['.jpg', '.jpeg', '.png', '.webm', '.mp4', '.wav', '.mp3', '.ogg']:
-                extension = original_ext.lower()
+            original_ext = os.path.splitext(file.filename)[1].lower()
+
+        if original_ext and original_ext in allowed_ext_map.get(evidence_type, set()):
+            extension = original_ext
+
+        # Best-effort mimetype validation: reject only when it's clearly wrong.
+        mimetype = (getattr(file, 'mimetype', None) or '').lower()
+        if mimetype and mimetype not in ('application/octet-stream', 'binary/octet-stream'):
+            if evidence_type in ('screenshot', 'image') and not mimetype.startswith('image/'):
+                return jsonify({"error": "Invalid file type for image evidence"}), 415
+            if evidence_type == 'video' and not mimetype.startswith('video/'):
+                return jsonify({"error": "Invalid file type for video evidence"}), 415
+            if evidence_type == 'audio' and not mimetype.startswith('audio/'):
+                return jsonify({"error": "Invalid file type for audio evidence"}), 415
         
-        # 5. Create directory structure: evidence/{examId}/{userId}/
+        # 6. Create directory structure: evidence/{examId}/{userId}/
         evidence_base = os.path.join(os.path.dirname(__file__), 'evidence')
         evidence_dir = os.path.join(evidence_base, str(exam_id), str(user_id))
         
@@ -3552,24 +3795,32 @@ def upload_evidence():
             app.logger.error(f"Failed to create evidence directory: {e}")
             return jsonify({"error": "Failed to create storage directory"}), 500
         
-        # 6. Generate unique filename with timestamp
+        # 7. Generate unique filename with timestamp
         timestamp = int(time.time() * 1000)  # milliseconds for uniqueness
         filename = f"{timestamp}_{evidence_type}{extension}"
         filepath = os.path.join(evidence_dir, filename)
         
-        # 7. Save file to disk
+        # 8. Save file to disk
         try:
             file.save(filepath)
             file_size = os.path.getsize(filepath)
         except Exception as e:
             app.logger.error(f"Failed to save evidence file: {e}")
             return jsonify({"error": "Failed to save file"}), 500
+
+        # Enforce max size after-save too (in case Content-Length was missing).
+        if file_size and int(file_size) > int(max_bytes):
+            try:
+                os.remove(filepath)
+            except Exception:
+                pass
+            return jsonify({"error": "Evidence upload too large", "maxBytes": max_bytes}), 413
         
-        # 8. Create relative path for URL and database storage
+        # 9. Create relative path for URL and database storage
         relative_path = os.path.join('evidence', str(exam_id), str(user_id), filename)
         relative_path = relative_path.replace('\\', '/')  # Normalize for web URLs
         
-        # 9. Store evidence record in database
+        # 10. Store evidence record in database
         evidence_record = {
             'examId': str(exam_id),
             'userId': str(user_id),
@@ -3595,7 +3846,7 @@ def upload_evidence():
             app.logger.warning(f"Evidence file saved but DB record failed: {filepath}")
             return jsonify({"error": "Failed to store evidence record"}), 500
         
-        # 10. Return success response
+        # 11. Return success response
         return jsonify({
             "message": "Evidence uploaded successfully",
             "url": f"/api/evidence/{file_id}",
@@ -3632,16 +3883,10 @@ def get_evidence(evidence_id):
     """
     try:
         # 1. Require lecturer role (basic security)
-        requester = request.headers.get('X-User-Id')
-        if not requester:
-            return jsonify({'error': 'X-User-Id header required'}), 403
-        
-        try:
-            req_user = users_collection.find_one({'_id': ObjectId(requester)}) if ObjectId.is_valid(requester) else None
-        except Exception:
-            req_user = None
-        
-        if not req_user or req_user.get('role') != 'lecturer':
+        req_user = _get_authenticated_user_doc()
+        if not req_user:
+            return jsonify({'error': 'Authentication required'}), 403
+        if req_user.get('role') != 'lecturer':
             return jsonify({'error': 'Forbidden: lecturer role required'}), 403
         
         # 2. Get evidence record from database
@@ -3718,16 +3963,10 @@ def list_evidence():
     """
     try:
         # 1. Require lecturer role
-        requester = request.headers.get('X-User-Id')
-        if not requester:
-            return jsonify({'error': 'X-User-Id header required'}), 403
-        
-        try:
-            req_user = users_collection.find_one({'_id': ObjectId(requester)}) if ObjectId.is_valid(requester) else None
-        except Exception:
-            req_user = None
-        
-        if not req_user or req_user.get('role') != 'lecturer':
+        req_user = _get_authenticated_user_doc()
+        if not req_user:
+            return jsonify({'error': 'Authentication required'}), 403
+        if req_user.get('role') != 'lecturer':
             return jsonify({'error': 'Forbidden: lecturer role required'}), 403
         
         # 2. Get query parameters
@@ -3791,14 +4030,10 @@ def get_proctoring_recent_global():
     """Return newest proctoring events across all exams since a given ISO timestamp.
     Requires lecturer role. Sorted newest-first and limited by ?limit=.
     """
-    requester = request.headers.get('X-User-Id')
-    if not requester:
-        return jsonify({'error': 'X-User-Id header required'}), 403
-    try:
-        req_user = users_collection.find_one({'_id': ObjectId(requester)}) if ObjectId.is_valid(requester) else None
-    except Exception:
-        req_user = None
-    if not req_user or req_user.get('role') != 'lecturer':
+    req_user = _get_authenticated_user_doc()
+    if not req_user:
+        return jsonify({'error': 'Authentication required'}), 403
+    if req_user.get('role') != 'lecturer':
         return jsonify({'error': 'Forbidden: lecturer role required'}), 403
 
     since = request.args.get('since')
@@ -3838,14 +4073,10 @@ def get_proctoring_recent_user():
         return jsonify({'error': 'userId is required'}), 400
     
     # Verify the requester is either the user themselves or a lecturer
-    requester = request.headers.get('X-User-Id')
+    requester = _get_authenticated_user_id()
     if not requester:
-        return jsonify({'error': 'X-User-Id header required'}), 403
-    
-    try:
-        req_user = users_collection.find_one({'_id': ObjectId(requester)}) if ObjectId.is_valid(requester) else None
-    except Exception:
-        req_user = None
+        return jsonify({'error': 'Authentication required'}), 403
+    req_user = _get_authenticated_user_doc()
     
     if not req_user:
         return jsonify({'error': 'Unauthorized'}), 403
@@ -4316,10 +4547,44 @@ def handle_proctor_connect():
     """
     try:
         client_id = request.sid
+
+        # Optional but recommended: require signed token for Socket.IO.
+        # Clients should pass ?token=<BearerToken> in the namespace connection query.
+        require_auth = _bool_env('SOCKET_REQUIRE_AUTH', '1')
+        token = (request.args.get('token') or '').strip()
+        user_doc = None
+        authed = False
+        if token:
+            ok, uid = _verify_token(token)
+            if ok and uid:
+                try:
+                    user_doc = users_collection.find_one({'_id': ObjectId(uid)}) if ObjectId.is_valid(uid) else None
+                except Exception:
+                    user_doc = None
+                if user_doc:
+                    authed = True
+                    SOCKET_AUTH[client_id] = {
+                        'userId': str(user_doc.get('_id')),
+                        'role': str(user_doc.get('role') or ''),
+                    }
+
+        if require_auth and not authed:
+            emit('error', {
+                'message': 'Unauthorized: token required',
+                'timestamp': datetime.datetime.utcnow().isoformat() + 'Z'
+            })
+            try:
+                disconnect()
+            except Exception:
+                pass
+            return
+
         app.logger.info(f'[WEBSOCKET] Proctor client connected: {client_id}')
         emit('status', {
             'message': 'Connected to proctor updates',
             'clientId': client_id,
+            'authenticated': bool(authed),
+            'role': (SOCKET_AUTH.get(client_id) or {}).get('role') if authed else None,
             'timestamp': datetime.datetime.utcnow().isoformat() + 'Z'
         })
     except Exception as e:
@@ -4335,6 +4600,10 @@ def handle_proctor_disconnect():
     """
     try:
         client_id = request.sid
+        try:
+            SOCKET_AUTH.pop(client_id, None)
+        except Exception:
+            pass
         app.logger.info(f'[WEBSOCKET] Proctor client disconnected: {client_id}')
     except Exception as e:
         app.logger.error(f'[WEBSOCKET] Error in disconnect handler: {e}')
@@ -4371,6 +4640,16 @@ def handle_join_exam(data):
         except Exception as e:
             emit('error', {'message': 'Invalid exam ID format'})
             return
+
+        # Only lecturers can join the exam broadcast room.
+        # This prevents students from subscribing to other students' frames.
+        allow_unauth = _bool_env('ALLOW_UNAUTH_JOIN_EXAM', '0')
+        if not allow_unauth:
+            sid = request.sid
+            auth = SOCKET_AUTH.get(sid) or {}
+            if not auth or auth.get('role') != 'lecturer':
+                emit('error', {'message': 'Forbidden: lecturer role required'})
+                return
         
         # Join the exam room
         join_room(exam_id, namespace='/proctor')
@@ -4592,6 +4871,15 @@ def handle_student_video_frame(data):
         if not exam_id or not user_id or not frame:
             app.logger.warning('[VIDEO] Missing required fields in video frame')
             return
+
+        # Require authenticated sender, and require sender matches declared userId.
+        allow_unauth = _bool_env('ALLOW_UNAUTH_STUDENT_ROOMS', '0')
+        if not allow_unauth:
+            auth = SOCKET_AUTH.get(request.sid) or {}
+            sender_user_id = auth.get('userId')
+            if not sender_user_id or str(sender_user_id) != str(user_id):
+                app.logger.warning('[VIDEO] Dropping frame: unauth or user mismatch')
+                return
         
         # Broadcast to all lecturers monitoring this exam (send to exam room)
         socketio.emit(
@@ -4625,6 +4913,14 @@ def handle_student_screen_frame(data):
         if not exam_id or not user_id or not frame:
             app.logger.warning('[SCREEN] Missing required fields in screen frame')
             return
+
+        allow_unauth = _bool_env('ALLOW_UNAUTH_STUDENT_ROOMS', '0')
+        if not allow_unauth:
+            auth = SOCKET_AUTH.get(request.sid) or {}
+            sender_user_id = auth.get('userId')
+            if not sender_user_id or str(sender_user_id) != str(user_id):
+                app.logger.warning('[SCREEN] Dropping frame: unauth or user mismatch')
+                return
         
         # Broadcast to all lecturers monitoring this exam
         socketio.emit(
@@ -4687,6 +4983,19 @@ def handle_join_student(data):
         if not exam_id or not user_id:
             emit('error', {'message': 'examId and userId are required'})
             return
+
+        # Only the student themselves (or a lecturer) may join examId:userId rooms.
+        allow_unauth = _bool_env('ALLOW_UNAUTH_STUDENT_ROOMS', '0')
+        if not allow_unauth:
+            auth = SOCKET_AUTH.get(request.sid) or {}
+            requester_id = auth.get('userId')
+            requester_role = auth.get('role')
+            if not requester_id:
+                emit('error', {'message': 'Unauthorized'})
+                return
+            if requester_role != 'lecturer' and str(requester_id) != str(user_id):
+                emit('error', {'message': 'Forbidden'})
+                return
 
         room_name = f"{exam_id}:{user_id}"
         join_room(room_name, namespace='/proctor')
@@ -4846,13 +5155,10 @@ def api_get_proctor_status(exam_id, user_id):
       - lecturer can query any student
       - student can query themselves
     """
-    requester = request.headers.get('X-User-Id')
+    requester = _get_authenticated_user_id()
     if not requester:
-        return jsonify({'error': 'X-User-Id header required'}), 403
-    try:
-        req_user = users_collection.find_one({'_id': ObjectId(requester)}) if ObjectId.is_valid(requester) else None
-    except Exception:
-        req_user = None
+        return jsonify({'error': 'Authentication required'}), 403
+    req_user = _get_authenticated_user_doc()
     if not req_user:
         return jsonify({'error': 'Unauthorized'}), 403
 
@@ -4868,13 +5174,10 @@ def api_get_proctor_status(exam_id, user_id):
 @app.route('/api/exams/<exam_id>/students/<user_id>/proctor-status', methods=['POST'])
 def api_set_proctor_status(exam_id, user_id):
     """Set proctor decision status for a student (lecturer only)."""
-    requester = request.headers.get('X-User-Id')
+    requester = _get_authenticated_user_id()
     if not requester:
-        return jsonify({'error': 'X-User-Id header required'}), 403
-    try:
-        req_user = users_collection.find_one({'_id': ObjectId(requester)}) if ObjectId.is_valid(requester) else None
-    except Exception:
-        req_user = None
+        return jsonify({'error': 'Authentication required'}), 403
+    req_user = _get_authenticated_user_doc()
     if not req_user or req_user.get('role') != 'lecturer':
         return jsonify({'error': 'Forbidden: lecturer role required'}), 403
 

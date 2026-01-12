@@ -43,6 +43,21 @@ const API_URL = (() => {
     return trimmed.endsWith('/api') ? trimmed : `${trimmed}/api`;
 })();
 
+const getStoredToken = (): string => {
+    try {
+        return localStorage.getItem('invigilo_token') || '';
+    } catch {
+        return '';
+    }
+};
+
+const authzHeaders = (): Record<string, string> => {
+    const t = getStoredToken();
+    if (!t) return {};
+    // backend expects Authorization: Bearer <token>
+    return { Authorization: t.toLowerCase().startsWith('bearer ') ? t : `Bearer ${t}` };
+};
+
 // --- INSTITUTIONS AND DEPARTMENTS ---
 const INSTITUTIONS: { [key: string]: string[] } = {
   "Indian Institute of Technology Hyderabad (IIT Hyderabad)": [
@@ -520,7 +535,11 @@ export default function App() {
             
             // Setup socket connection for real-time exam updates
             const baseUrl = API_URL.replace('/api', '');
-            const socket = io(`${baseUrl}/proctor`);
+            const socket = io(`${baseUrl}/proctor`, {
+                query: {
+                    token: getStoredToken(),
+                }
+            });
             
             socket.on('connect', () => {
                 console.log('[STUDENT] Connected to exam updates');
@@ -544,11 +563,21 @@ export default function App() {
         }
     }, [currentUser, fetchExams, showToast]);
 
+    const [, setAuthToken] = useState<string>(() => {
+        try {
+            return localStorage.getItem('invigilo_token') || '';
+        } catch {
+            return '';
+        }
+    });
+
 
     const handleLogout = () => {
         setCurrentUser(null);
         setExams([]);
         setCurrentExam(null);
+        setAuthToken('');
+        try { localStorage.removeItem('invigilo_token'); } catch {}
         navigateTo('landing');
         showToast('Successfully logged out.', 'success');
     };
@@ -561,8 +590,12 @@ export default function App() {
         setTimeout(() => setAppState(state), 400);
     }
 
-    const onAuthSuccess = (user: UserProfile) => {
+    const onAuthSuccess = (user: UserProfile, token?: string) => {
         setCurrentUser(user);
+        if (token) {
+            setAuthToken(token);
+            try { localStorage.setItem('invigilo_token', token); } catch {}
+        }
         navigateTo(user.role === 'student' ? 'student-dashboard' : 'lecturer-dashboard');
     };
     
@@ -780,7 +813,7 @@ const AuthPage = ({
   onBack,
 }: {
   initialRole: UserRole;
-  onAuthSuccess: (user: UserProfile) => void;
+    onAuthSuccess: (user: UserProfile, token?: string) => void;
   showToast: (message: string, type: "success" | "error") => void;
   onBack: () => void;
 }) => {
@@ -1128,7 +1161,7 @@ const getVideoStatus = () => {
                         const loginData = await loginRes.json();
                         if (loginRes.ok) {
                             showToast(`Welcome, ${loginData.user.name}!`, 'success');
-                            onAuthSuccess(loginData.user);
+                            onAuthSuccess(loginData.user, loginData.token);
                         } else {
                             // fallback to signin screen
                             setAuthMode('signin');
@@ -1226,7 +1259,7 @@ const getVideoStatus = () => {
             }
 
             showToast(`Welcome back, ${loginData.user.name}!`, "success");
-            onAuthSuccess(loginData.user);
+            onAuthSuccess(loginData.user, loginData.token);
         } catch (error: any) {
             if (error.name === 'AbortError') {
                 showToast("Face verification timeout. Please try again.", "error");
@@ -3181,7 +3214,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
             const snapshot = typeof details?.frameEvidence === 'string' ? details.frameEvidence : undefined;
             const res = await fetch(`${API_URL}/proctor/event`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', ...authzHeaders() },
                 body: JSON.stringify({
                     examId: exam._id,
                     userId: user._id,
@@ -3211,7 +3244,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
         try {
             await fetch(`${API_URL}/exams/${exam._id}/students/${user._id}/proctor-status`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-User-Id': user._id },
+                headers: { 'Content-Type': 'application/json', ...authzHeaders() },
                 body: JSON.stringify({ status: 'paused', reason })
             });
         } catch {
@@ -3691,13 +3724,12 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                             studentId: user.studentId || user.email,
                             name: user.name,
                             role: 'student' 
+                            ,token: getStoredToken()
                         }
                     });
 
                     socket.on('connect', () => {
                         console.log('[STREAMING] Connected to proctoring server for live video streaming');
-                        // Join the exam room so lecturers can receive our frames
-                        socket.emit('join_exam', { examId: exam._id });
                     });
 
                     socket.on('disconnect', () => {
@@ -3780,8 +3812,8 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                         }
                     };
 
-                    // Stream video every 500ms for smoother feed (2 FPS)
-                    videoStreamTimerRef.current = window.setInterval(streamVideo, 50);
+                    // Stream video every 500ms for low bandwidth (~2 FPS)
+                    videoStreamTimerRef.current = window.setInterval(streamVideo, 500);
 
                     // Also start screen capture and streaming
                     try {
@@ -3823,8 +3855,8 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                             }
                         };
 
-                        // Stream screen every 3 seconds
-                        setInterval(streamScreen, 3000);
+                        // Stream screen every 3 seconds (store handle so stopProctoring can clean up)
+                        screenCaptureTimerRef.current = window.setInterval(streamScreen, 3000);
                         
                         console.log('[STREAMING] Screen capture started');
                     } catch (screenErr) {
@@ -3885,7 +3917,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                 
                 console.log('[PROCTORING] Initializing optimized rendering pipeline...');
                 console.log('[RENDERING] Target: 30 FPS for smooth UI');
-                console.log('[AI] Target: 4 FPS (~250ms) for detection accuracy');
+                console.log('[AI] Target: sampling every ~3s for free-tier safety');
                 
                 // Initialize rendering canvas (reused for both rendering and AI capture)
                 const initRenderCanvas = () => {
@@ -3944,7 +3976,9 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                 // 2. AI PROCESSING LOOP (4 FPS - Backend Analysis, Interval-based)
                 // ========================================================================
                 const startAIProcessingLoop = () => {
-                    const AI_INTERVAL_MS = 250; // 4 FPS (250ms between frames)
+                    // Free-tier safe: sample a single frame every 3 seconds.
+                    // Backend still applies temporal confirmation using timestamps.
+                    const AI_INTERVAL_MS = 3000;
                     
                     const processAIFrame = async () => {
                         // Throttle check (prevent drift if processing takes longer than interval)
@@ -4244,9 +4278,9 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                         }
                     };
                     
-                    // Start AI processing interval (4 FPS)
+                    // Start AI processing interval (sampling)
                     aiProcessingIntervalRef.current = window.setInterval(processAIFrame, AI_INTERVAL_MS);
-                    console.log('[AI] Processing loop started - 4 FPS (every 250ms)');
+                    console.log('[AI] Processing loop started - sampling (every 3000ms)');
                 };
                 
                 // Helper: Capture AI frame (separate from rendering, optimized for ML)
@@ -4361,7 +4395,7 @@ const ExamScreen = ({ exam, user, onExit, showToast }: { exam: Exam; user: UserP
                 const ac = new AbortController();
                 proctorDecisionAbortRef.current = ac;
                 const res = await fetch(`${API_URL}/exams/${exam._id}/students/${user._id}/proctor-status`, {
-                    headers: { 'X-User-Id': user._id },
+                    headers: { ...authzHeaders() },
                     signal: ac.signal
                 });
                 if (!res.ok) return;
@@ -4979,13 +5013,13 @@ const CreateExamForm = ({ lecturer, showToast, examToEdit, onCancel, onSaved }: 
             if (examToEdit) {
                 res = await fetch(`${API_URL}/exams/${examToEdit._id}`, {
                     method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: { 'Content-Type': 'application/json', ...authzHeaders() },
                     body: JSON.stringify({ ...examDetails })
                 });
             } else {
                 res = await fetch(`${API_URL}/exams`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: { 'Content-Type': 'application/json', ...authzHeaders() },
                     body: JSON.stringify(examDetails)
                 });
             }
@@ -5303,7 +5337,7 @@ const LiveProctoring = ({ user, onBack }: { user: UserProfile; onBack: () => voi
         if (user.role !== 'lecturer') return;
         const fetchLiveExams = async () => {
             try {
-                const res = await fetch(`${API_URL}/exams`, { headers: { 'X-User-Id': user._id } });
+                const res = await fetch(`${API_URL}/exams`, { headers: { ...authzHeaders() } });
                 const data = await res.json();
                 if (res.ok && Array.isArray(data.exams)) {
                     // Filter for Live status exams created by this lecturer
@@ -5368,7 +5402,7 @@ const LiveProctoring = ({ user, onBack }: { user: UserProfile; onBack: () => voi
     const refreshSummary = React.useCallback(async () => {
         if (!examId) return;
         try {
-            const res = await fetch(`${API_URL}/exams/${examId}/proctoring`, { headers: { 'X-User-Id': user._id } });
+            const res = await fetch(`${API_URL}/exams/${examId}/proctoring`, { headers: { ...authzHeaders() } });
             const data = await res.json();
             if (!res.ok) return;
             const s = Array.isArray(data?.summary) ? data.summary : [];
@@ -5388,7 +5422,7 @@ const LiveProctoring = ({ user, onBack }: { user: UserProfile; onBack: () => voi
         try {
             const results = await Promise.all(userIds.map(async (uid) => {
                 try {
-                    const r = await fetch(`${API_URL}/exams/${examId}/students/${uid}/proctor-status`, { headers: { 'X-User-Id': user._id } });
+                    const r = await fetch(`${API_URL}/exams/${examId}/students/${uid}/proctor-status`, { headers: { ...authzHeaders() } });
                     const j = await r.json();
                     if (!r.ok) return null;
                     return { uid, status: j?.status?.status as any, reason: j?.status?.reason as any };
@@ -5414,7 +5448,7 @@ const LiveProctoring = ({ user, onBack }: { user: UserProfile; onBack: () => voi
         const fetchEvents = async () => {
             try {
                 const endpoint = `${API_URL}/proctoring/recent?userId=${user._id}&limit=50`;
-                const res = await fetch(endpoint, { headers: { 'X-User-Id': user._id } });
+                const res = await fetch(endpoint, { headers: { ...authzHeaders() } });
                 const data = await res.json();
                 if (res.ok && data.events) setEvents(data.events);
             } catch {}
@@ -5445,6 +5479,9 @@ const LiveProctoring = ({ user, onBack }: { user: UserProfile; onBack: () => voi
             const baseUrl = API_URL.replace(/\/api$/, '');
             const s = io(`${baseUrl}/proctor`, {
                 transports: ['websocket'],
+                query: {
+                    token: getStoredToken(),
+                },
             });
             socketRef.current = s;
 
@@ -5652,7 +5689,7 @@ const LiveProctoring = ({ user, onBack }: { user: UserProfile; onBack: () => voi
                                         try {
                                             await fetch(`${API_URL}/exams/${activeAlert.examId}/students/${activeAlert.userId}/proctor-status`, {
                                                 method: 'POST',
-                                                headers: { 'Content-Type': 'application/json', 'X-User-Id': user._id },
+                                                headers: { 'Content-Type': 'application/json', ...authzHeaders() },
                                                 body: JSON.stringify({ status: 'paused', reason: 'Paused for review by invigilator.' })
                                             });
                                         } catch {}
@@ -5662,7 +5699,7 @@ const LiveProctoring = ({ user, onBack }: { user: UserProfile; onBack: () => voi
                                         try {
                                             await fetch(`${API_URL}/exams/${activeAlert.examId}/students/${activeAlert.userId}/proctor-status`, {
                                                 method: 'POST',
-                                                headers: { 'Content-Type': 'application/json', 'X-User-Id': user._id },
+                                                headers: { 'Content-Type': 'application/json', ...authzHeaders() },
                                                 body: JSON.stringify({ status: 'active', reason: 'Allowed to continue.' })
                                             });
                                         } catch {}
@@ -5672,7 +5709,7 @@ const LiveProctoring = ({ user, onBack }: { user: UserProfile; onBack: () => voi
                                         try {
                                             await fetch(`${API_URL}/exams/${activeAlert.examId}/students/${activeAlert.userId}/proctor-status`, {
                                                 method: 'POST',
-                                                headers: { 'Content-Type': 'application/json', 'X-User-Id': user._id },
+                                                headers: { 'Content-Type': 'application/json', ...authzHeaders() },
                                                 body: JSON.stringify({ status: 'terminated', reason: 'Terminated by invigilator due to high severity violation.' })
                                             });
                                         } catch {}
@@ -5748,7 +5785,7 @@ const LiveProctoring = ({ user, onBack }: { user: UserProfile; onBack: () => voi
                                                     try {
                                                         await fetch(`${API_URL}/exams/${examId}/students/${s.userId}/proctor-status`, {
                                                             method: 'POST',
-                                                            headers: { 'Content-Type': 'application/json', 'X-User-Id': user._id },
+                                                            headers: { 'Content-Type': 'application/json', ...authzHeaders() },
                                                             body: JSON.stringify({ status: 'paused', reason: 'Paused by invigilator.' })
                                                         });
                                                     } catch {}
@@ -5757,7 +5794,7 @@ const LiveProctoring = ({ user, onBack }: { user: UserProfile; onBack: () => voi
                                                     try {
                                                         await fetch(`${API_URL}/exams/${examId}/students/${s.userId}/proctor-status`, {
                                                             method: 'POST',
-                                                            headers: { 'Content-Type': 'application/json', 'X-User-Id': user._id },
+                                                            headers: { 'Content-Type': 'application/json', ...authzHeaders() },
                                                             body: JSON.stringify({ status: 'active', reason: 'Allowed to continue.' })
                                                         });
                                                     } catch {}
@@ -5766,7 +5803,7 @@ const LiveProctoring = ({ user, onBack }: { user: UserProfile; onBack: () => voi
                                                     try {
                                                         await fetch(`${API_URL}/exams/${examId}/students/${s.userId}/proctor-status`, {
                                                             method: 'POST',
-                                                            headers: { 'Content-Type': 'application/json', 'X-User-Id': user._id },
+                                                            headers: { 'Content-Type': 'application/json', ...authzHeaders() },
                                                             body: JSON.stringify({ status: 'terminated', reason: 'Terminated by invigilator.' })
                                                         });
                                                     } catch {}

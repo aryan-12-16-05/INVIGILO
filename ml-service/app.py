@@ -15,13 +15,40 @@ Endpoints:
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
+import json
 import base64
 import numpy as np
+import hmac
+import hashlib
 from PIL import Image
 import io
 
 app = Flask(__name__)
 CORS(app)  # Allow calls from Render backend
+
+ML_SHARED_SECRET = os.getenv('ML_SHARED_SECRET', '').strip()
+
+
+def _verify_request_signature(payload: dict) -> bool:
+    """Verify HMAC signature sent by the backend.
+
+    If ML_SHARED_SECRET is not set, signature verification is disabled.
+    """
+    if not ML_SHARED_SECRET:
+        return True
+    try:
+        supplied = (request.headers.get('X-Signature') or '').strip()
+        if not supplied:
+            return False
+        payload_str = json.dumps(payload, sort_keys=True)
+        expected = hmac.new(
+            ML_SHARED_SECRET.encode('utf-8'),
+            payload_str.encode('utf-8'),
+            hashlib.sha256,
+        ).hexdigest()
+        return hmac.compare_digest(supplied, expected)
+    except Exception:
+        return False
 
 # Import heavy ML modules (only runs on HF Spaces)
 try:
@@ -42,6 +69,26 @@ try:
 except Exception as e:
     print(f'[ML-SERVICE] WARNING: Proctoring modules unavailable: {e}')
     PROCTORING_AVAILABLE = False
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    try:
+        raw = os.getenv(name)
+        if raw is None:
+            return default
+        return str(raw).strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+    except Exception:
+        return default
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        raw = os.getenv(name)
+        if raw is None:
+            return float(default)
+        return float(str(raw).strip())
+    except Exception:
+        return float(default)
 
 
 def decode_base64_image(data_url):
@@ -92,6 +139,12 @@ def verify_face():
         return jsonify({"error": "Face engine not available"}), 500
     
     data = request.get_json()
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid JSON body"}), 400
+
+    if not _verify_request_signature(data):
+        return jsonify({"error": "Forbidden"}), 403
+
     image_data = data.get('imageDataUrl')
     
     if not image_data:
@@ -141,6 +194,12 @@ def match_face():
         return jsonify({"error": "Face engine not available"}), 500
     
     data = request.get_json()
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid JSON body"}), 400
+
+    if not _verify_request_signature(data):
+        return jsonify({"error": "Forbidden"}), 403
+
     emb1 = np.array(data.get('embedding1'))
     emb2 = np.array(data.get('embedding2'))
     
@@ -149,7 +208,8 @@ def match_face():
     
     try:
         similarity = engine.match(emb1, emb2)
-        threshold = 0.4  # Match threshold
+        # Keep threshold consistent with the backend defaults (can be overridden on HF Spaces)
+        threshold = _float_env('FACE_SIMILARITY_THRESHOLD', 0.58)
         
         return jsonify({
             "similarity": float(similarity),
@@ -182,10 +242,17 @@ def analyze_frame():
             "violations": []
         }
     """
-    if not PROCTORING_AVAILABLE:
-        return jsonify({"error": "Proctoring modules not available"}), 500
+    # HF Spaces free-tier can fail to build native deps (e.g., dlib). We must not hard-fail
+    # the whole pipeline; instead return a safe, explicit degraded response.
+    allow_degraded = _bool_env('ALLOW_DEGRADED_PROCTORING', True)
     
     data = request.get_json()
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid JSON body"}), 400
+
+    if not _verify_request_signature(data):
+        return jsonify({"error": "Forbidden"}), 403
+
     image_data = data.get('imageDataUrl')
     
     if not image_data:
@@ -194,6 +261,33 @@ def analyze_frame():
     img = decode_base64_image(image_data)
     if img is None:
         return jsonify({"error": "Invalid image data"}), 400
+
+    if not PROCTORING_AVAILABLE:
+        if not allow_degraded:
+            return jsonify({"error": "Proctoring modules not available"}), 500
+
+        # Degraded response: keep schema stable so the backend can skip eventing.
+        face_count = None
+        blink_status = "Unknown"
+        mouth_status = "Unknown"
+        head_pose = "Unknown"
+        gaze_dir = "Unknown"
+        violations: list = []
+        return jsonify({
+            "proctoringAvailable": False,
+            "proctoring_available": False,
+            "faceCount": face_count,
+            "face_count": face_count,
+            "blinkStatus": blink_status,
+            "blink_status": blink_status,
+            "mouthStatus": mouth_status,
+            "mouth_status": mouth_status,
+            "headPose": head_pose,
+            "head_pose": head_pose,
+            "gazeDirection": gaze_dir,
+            "gaze_direction": gaze_dir,
+            "violations": violations,
+        }), 200
     
     try:
         # Run all proctoring checks
@@ -230,11 +324,19 @@ def analyze_frame():
                 violations.append(f"Looking {gaze_dir}")
         
         return jsonify({
+            "proctoringAvailable": True,
+            "proctoring_available": True,
+            # Provide both formats for backward/forward compatibility
             "faceCount": face_count,
+            "face_count": face_count,
             "blinkStatus": blink_status,
+            "blink_status": blink_status,
             "mouthStatus": mouth_status,
+            "mouth_status": mouth_status,
             "headPose": head_pose,
+            "head_pose": head_pose,
             "gazeDirection": gaze_dir,
+            "gaze_direction": gaze_dir,
             "violations": violations
         }), 200
     
