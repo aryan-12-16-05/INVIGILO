@@ -88,36 +88,270 @@ The system continuously monitors students throughout the examination.
 
 # System Architecture
 
-┌───────────────────────────┐
-│ React Frontend │
-│ (TypeScript + Vite) │
-└─────────────┬─────────────┘
-│
-│ REST APIs
-│ WebSockets
-▼
-┌───────────────────────────┐
-│ Flask Backend │
-│ Authentication │
-│ Exam Management │
-│ Proctoring Engine │
-│ Event Logging │
-└─────────────┬─────────────┘
-│
-├─────────────► MongoDB
-│
-│
-▼
-┌───────────────────────────┐
-│ ML Service │
-│ (Hugging Face Spaces) │
-│ │
-│ InsightFace │
-│ Dlib │
-│ OpenCV │
-└───────────────────────────┘
+# Detailed System Architecture
+
+```text
+                                    ┌──────────────────────┐
+                                    │      Lecturer        │
+                                    │ Monitoring Dashboard │
+                                    └──────────┬───────────┘
+                                               │
+                                               │ WebSocket
+                                               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Flask Backend                              │
+│                                                                     │
+│  Authentication Module                                              │
+│  Exam Management Module                                             │
+│  Face Verification Module                                           │
+│  Proctoring Event Manager                                           │
+│  Violation Detection Engine                                         │
+│  Real-Time Notification System                                      │
+└───────────────┬──────────────────────────────┬──────────────────────┘
+                │                              │
+                │                              │
+                ▼                              ▼
+
+      ┌─────────────────┐          ┌─────────────────────────┐
+      │    MongoDB      │          │ Hugging Face ML Service │
+      │                 │          │                         │
+      │ Users           │          │ Face Recognition        │
+      │ Exams           │          │ Face Embeddings         │
+      │ Exam Attempts   │          │ Eye Tracking            │
+      │ Violations      │          │ Head Pose Detection     │
+      │ Logs            │          │ Mouth Detection         │
+      └─────────────────┘          │ Gaze Estimation         │
+                                   │ Multi-Face Detection    │
+                                   └───────────┬─────────────┘
+                                               │
+                                               ▼
+                                   ┌─────────────────────────┐
+                                   │ InsightFace + OpenCV   │
+                                   │ Dlib + ONNX Runtime    │
+                                   └─────────────────────────┘
+
+
+                ▲
+                │ REST API
+                │
+                ▼
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                    React + TypeScript Frontend                     │
+│                                                                     │
+│ Student Dashboard                                                   │
+│ Lecturer Dashboard                                                  │
+│ Registration Module                                                 │
+│ Login Module                                                        │
+│ Exam Interface                                                      │
+│ Live Proctoring Client                                              │
+│ Browser Activity Monitoring                                         │
+│ Real-Time Alerts                                                    │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
 ---
+
+# Registration Workflow
+
+Student Registration
+
+1. Student enters details.
+2. Webcam captures face images.
+3. Frontend sends images to Flask Backend.
+4. Backend forwards images to ML Service.
+5. ML Service generates facial embeddings using InsightFace.
+6. Embeddings are stored in MongoDB.
+7. User account is created.
+
+```text
+Student
+   │
+   ▼
+Frontend
+   │
+   ▼
+Flask Backend
+   │
+   ▼
+ML Service
+   │
+   ▼
+Face Embedding Generation
+   │
+   ▼
+MongoDB Storage
+```
+
+---
+
+# Login & Face Verification Workflow
+
+```text
+Student Login
+      │
+      ▼
+Credential Validation
+      │
+      ▼
+Face Capture
+      │
+      ▼
+Generate New Embedding
+      │
+      ▼
+Cosine Similarity Matching
+      │
+      ▼
+Identity Verified
+      │
+      ▼
+Allow Exam Access
+```
+
+---
+
+# Examination Workflow
+
+```text
+Student Starts Exam
+        │
+        ▼
+Exam Questions Loaded
+        │
+        ▼
+Timer Activated
+        │
+        ▼
+Continuous Camera Capture
+        │
+        ▼
+Frame Sent To Backend
+        │
+        ▼
+Frame Forwarded To ML Service
+        │
+        ▼
+Violation Detection
+        │
+        ▼
+Store Events In MongoDB
+        │
+        ▼
+Send Alerts Through WebSocket
+        │
+        ▼
+Lecturer Dashboard Updated
+```
+
+---
+
+# Proctoring Pipeline
+
+Every frame undergoes the following checks:
+
+```text
+Video Frame
+     │
+     ▼
+Face Detection
+     │
+     ├── No Face
+     ├── Multiple Faces
+     └── Single Face
+               │
+               ▼
+      Identity Verification
+               │
+               ▼
+      Eye Tracking Module
+               │
+               ▼
+      Gaze Direction Analysis
+               │
+               ▼
+      Mouth Detection
+               │
+               ▼
+      Head Pose Estimation
+               │
+               ▼
+      Violation Classification
+               │
+               ▼
+      Risk Scoring
+               │
+               ▼
+      Database Logging
+               │
+               ▼
+      Real-Time Alert
+```
+
+---
+
+# Browser Security Architecture
+
+```text
+Student Browser
+       │
+       ├── Tab Switch Detection
+       ├── Fullscreen Exit Detection
+       ├── DevTools Detection
+       ├── Copy/Paste Detection
+       ├── Right Click Detection
+       └── Window Blur Detection
+                     │
+                     ▼
+             Flask Backend
+                     │
+                     ▼
+             Violation Logs
+                     │
+                     ▼
+          Lecturer Monitoring Panel
+```
+
+---
+
+# Deployment Architecture
+
+```text
+Frontend
+(Vercel)
+
+      │
+      ▼
+
+Flask Backend
+(Render)
+
+      │
+      ├──────────────► MongoDB Atlas
+      │
+      ▼
+
+ML Service
+(Hugging Face Spaces)
+
+      │
+      ▼
+
+InsightFace + OpenCV + Dlib
+```
+
+This architecture ensures:
+
+• Scalability through separation of ML and Backend services
+• Real-time monitoring using WebSockets
+• Secure authentication and face verification
+• Continuous AI-powered proctoring during examinations
+• Centralized event logging and analytics
+• Cloud-native deployment architecture
+
+```
+```
+
 
 # Working Flow
 
