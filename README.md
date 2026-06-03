@@ -539,17 +539,7 @@ ml-service/
 
 ---
 
-# Contributors
 
-### Team INVIGILO
-
-* Alluri Aryavardhan Reddy
-* Team Member 2
-* Team Member 3
-* Team Member 4
-* Team Member 5
-
----
 
 # Conclusion
 
